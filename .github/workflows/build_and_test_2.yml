@@ -1,0 +1,40 @@
+name: C/C++ CI
+
+on: 
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+  
+jobs:
+  build:
+    strategy:
+      matrix:
+        arch: [ X64, ARM64 ]
+
+    runs-on: [ self-hosted, ${{ matrix.arch }} ]
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Configure
+      shell: bash
+      run: |
+        cd ../build
+        rm -rf *
+        cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE=../ydb/clang.toolchain ../ydb
+    - name: Build
+      shell: bash
+      run: |
+        cd ../build
+        ninja
+    - name: Test
+      shell: bash
+      run: |
+        rm -rf /mnt/d/tmp/*
+        cd ../build/ydb
+        # Our test util provides output with coloring, so remove it using sed before sending to grep
+        TMPDIR=/mnt/d/tmp ctest -j28 --timeout 1200 --force-new-ctest-process --output-on-failure | \
+          sed -e 's/\x1b\[[0-9;]*m//g' | \
+          tee testrun.log | \
+          grep -E '(Test\s*#.*\*\*\*|\[FAIL\])|.*tests passed,.*tests failed out of'
+  
