@@ -1,4 +1,4 @@
-name: C/C++ CI
+name: C/C++ CI 2
 
 on: 
   schedule:
@@ -11,7 +11,7 @@ jobs:
       matrix:
         arch: [ X64, ARM64 ]
 
-    runs-on: [ self-hosted, ${{ matrix.arch }} ]
+    runs-on: [ self-hosted, matrix.arch ]
 
     steps:
     - name: Checkout
