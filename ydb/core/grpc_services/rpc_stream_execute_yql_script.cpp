@@ -358,7 +358,7 @@ private:
     void SetClientTimeoutTimer(TDuration timeout, const TActorContext& ctx) {
         LOG_DEBUG_S(ctx, NKikimrServices::RPC_REQUEST, this->SelfId() << " Set stream timeout timer for " << timeout);
 
-        auto *ev = new IEventHandle(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup(EStreamRpcWakeupTag::ClientTimeoutTag));
+        auto *ev = new IEventHandleFat(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup(EStreamRpcWakeupTag::ClientTimeoutTag));
         ClientTimeoutTimerCookieHolder_.Reset(ISchedulerCookie::Make2Way());
         CreateLongTimer(ctx, timeout, ev, 0, ClientTimeoutTimerCookieHolder_.Get());
     }
@@ -489,9 +489,9 @@ private:
 
 } // namespace
 
-void DoStreamExecuteYqlScript(std::unique_ptr<IRequestNoOpCtx> p, const IFacilityProvider& facility) {
-    ui64 rpcBufferSize = facility.GetAppConfig().GetTableServiceConfig().GetResourceManager().GetChannelBufferSize();
-    TActivationContext::AsActorContext().Register(new TStreamExecuteYqlScriptRPC(p.release(), rpcBufferSize));
+void DoStreamExecuteYqlScript(std::unique_ptr<IRequestNoOpCtx> p, const IFacilityProvider& f) {
+    ui64 rpcBufferSize = f.GetAppConfig()->GetTableServiceConfig().GetResourceManager().GetChannelBufferSize();
+    f.RegisterActor(new TStreamExecuteYqlScriptRPC(p.release(), rpcBufferSize));
 }
 
 } // namespace NGRpcService

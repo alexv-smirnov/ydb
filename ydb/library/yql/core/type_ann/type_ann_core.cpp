@@ -4184,11 +4184,17 @@ namespace NTypeAnnImpl {
                 return IGraphTransformer::TStatus::Repeat;
             }
 
-            input->SetTypeAnn(type);
-            if (IsSameAnnotation(*sourceType, *input->GetTypeAnn())) {
+            if (IsSameAnnotation(*sourceType, *type)) {
                 output = input->HeadPtr();
                 return IGraphTransformer::TStatus::Repeat;
             }
+
+            if (!IsSameAnnotation(*type, *targetType)) {
+                output = ctx.Expr.ChangeChild(*input, 1U, ExpandType(input->Tail().Pos(), *type, ctx.Expr));
+                return IGraphTransformer::TStatus::Repeat;
+            }
+
+            input->SetTypeAnn(type);
 
             const TDataExprType* sourceDataType  = nullptr;
             const TDataExprType* targetDataType  = nullptr;
@@ -8506,11 +8512,20 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         applyChildren.pop_back(); // Remove position of list argument
 
         if (input->Head().Type() != TExprNode::Lambda) {
+            if (!EnsureCallableType(input->Head(), ctx.Expr)) {
+                return IGraphTransformer::TStatus::Error;
+            }
             const TCallableExprType* callableType = input->Head().GetTypeAnn()->Cast<TCallableExprType>();
 
             if (applyChildren.size() < callableType->GetArgumentsSize() + 1 - callableType->GetOptionalArgumentsCount()) {
                 ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), TStringBuilder() << "Invalid number of arguments "
                     << (applyChildren.size() - 1) << " to use with callable type " << FormatType(callableType)));
+                return IGraphTransformer::TStatus::Error;
+            }
+
+            if (listArg >= callableType->GetArguments().size()) {
+                ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), TStringBuilder() << "Expecting callable with at least "
+                    << (listArg + 1) << " arguments, but got: " << FormatType(callableType)));
                 return IGraphTransformer::TStatus::Error;
             }
 
@@ -10089,11 +10104,11 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
                 ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Head().Pos()), TStringBuilder() << "unknown token: " << p1 << ", prefix: " << p0));
                 return IGraphTransformer::TStatus::Error;
             }
-            if (p1 == "oauth" && ctx.Types.UserCredentials.OauthToken.empty()) {
+            if (p1 == "oauth" && ctx.Types.Credentials->GetUserCredentials().OauthToken.empty()) {
                 ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Head().Pos()), TStringBuilder() << "got empty Oauth token string"));
                 return IGraphTransformer::TStatus::Error;
             }
-            if (p1 == "cookie" && ctx.Types.UserCredentials.BlackboxSessionIdCookie.empty()) {
+            if (p1 == "cookie" && ctx.Types.Credentials->GetUserCredentials().BlackboxSessionIdCookie.empty()) {
                 ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Head().Pos()), TStringBuilder() << "got empty session cookie"));
                 return IGraphTransformer::TStatus::Error;
             }
@@ -11481,6 +11496,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["Sort"] = &SortWrapper;
         Functions["AssumeSorted"] = &SortWrapper;
         Functions["AssumeUnique"] = &AssumeUniqueWrapper;
+        Functions["AssumeDistinct"] = &AssumeUniqueWrapper;
         Functions["AssumeAllMembersNullableAtOnce"] = &AssumeAllMembersNullableAtOnceWrapper;
         Functions["AssumeStrict"] = &AssumeStrictWrapper;
         Functions["Top"] = &TopWrapper;
@@ -11839,6 +11855,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["WideChain1Map"] = &WideChain1MapWrapper;
         Functions["WideTop"] = &WideTopWrapper;
         Functions["WideTopSort"] = &WideTopWrapper;
+        Functions["WideSort"] = &WideSortWrapper;
         Functions["NarrowMap"] = &NarrowMapWrapper;
         Functions["NarrowFlatMap"] = &NarrowFlatMapWrapper;
         Functions["NarrowMultiMap"] = &NarrowMultiMapWrapper;
@@ -11849,6 +11866,9 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["WideTakeBlocks"] = &WideSkipTakeBlocksWrapper;
         Functions["BlockCompress"] = &BlockCompressWrapper;
         Functions["BlockExpandChunked"] = &BlockExpandChunkedWrapper;
+        Functions["WideTopBlocks"] = &WideTopBlocksWrapper;
+        Functions["WideTopSortBlocks"] = &WideTopBlocksWrapper;
+        Functions["WideSortBlocks"] = &WideSortBlocksWrapper;
 
         Functions["AsScalar"] = &AsScalarWrapper;
         Functions["BlockCoalesce"] = &BlockCoalesceWrapper;

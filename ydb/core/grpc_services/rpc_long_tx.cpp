@@ -9,7 +9,7 @@
 #include <ydb/core/base/tablet_pipecache.h>
 #include <ydb/core/tablet/tablet_pipe_client_cache.h>
 #include <ydb/core/formats/arrow_helpers.h>
-#include <ydb/core/formats/sharding.h>
+#include <ydb/core/tx/sharding/sharding.h>
 #include <ydb/core/scheme/scheme_types_proto.h>
 #include <ydb/core/tx/schemeshard/schemeshard.h>
 #include <ydb/core/tx/columnshard/columnshard.h>
@@ -37,9 +37,9 @@ std::shared_ptr<arrow::Schema> ExtractArrowSchema(const NKikimrSchemeOp::TColumn
     TVector<std::pair<TString, NScheme::TTypeInfo>> columns;
     for (auto& col : schema.GetColumns()) {
         Y_VERIFY(col.HasTypeId());
-        auto typeInfo = NScheme::TypeInfoFromProtoColumnType(col.GetTypeId(),
+        auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(col.GetTypeId(),
             col.HasTypeInfo() ? &col.GetTypeInfo() : nullptr);
-        columns.emplace_back(col.GetName(), typeInfo);
+        columns.emplace_back(col.GetName(), typeInfoMod.TypeInfo);
     }
 
     return NArrow::MakeArrowSchema(columns);
@@ -97,10 +97,8 @@ TFullSplitData SplitData(const std::shared_ptr<arrow::RecordBatch>& batch,
     Y_VERIFY(description.HasSharding() && description.GetSharding().HasHashSharding());
 
     auto& descSharding = description.GetSharding();
-    auto& hashSharding = descSharding.GetHashSharding();
 
     TVector<ui64> tabletIds(descSharding.GetColumnShards().begin(), descSharding.GetColumnShards().end());
-    TVector<TString> shardingColumns(hashSharding.GetColumns().begin(), hashSharding.GetColumns().end());
     ui32 numShards = tabletIds.size();
     Y_VERIFY(numShards);
     TFullSplitData result(numShards);
@@ -111,28 +109,15 @@ TFullSplitData SplitData(const std::shared_ptr<arrow::RecordBatch>& batch,
         return result;
     }
 
+    auto sharding = NSharding::TShardingBase::BuildShardingOperator(descSharding);
     std::vector<ui32> rowSharding;
-    if (hashSharding.GetFunction() == NKikimrSchemeOp::TColumnTableSharding::THashSharding::HASH_FUNCTION_MODULO_N) {
-        NArrow::THashSharding sharding(numShards);
-        rowSharding = sharding.MakeSharding(batch, shardingColumns);
-    } else if (hashSharding.GetFunction() == NKikimrSchemeOp::TColumnTableSharding::THashSharding::HASH_FUNCTION_CLOUD_LOGS) {
-        ui32 activeShards = NArrow::TLogsSharding::DEFAULT_ACITVE_SHARDS;
-        if (hashSharding.HasActiveShardsCount()) {
-            activeShards = hashSharding.GetActiveShardsCount();
-        }
-        NArrow::TLogsSharding sharding(numShards, activeShards);
-        rowSharding = sharding.MakeSharding(batch, shardingColumns);
+    if (sharding) {
+        rowSharding = sharding->MakeSharding(batch);
     }
-
     if (rowSharding.empty()) {
         result.ErrorString = "empty "
-            + NKikimrSchemeOp::TColumnTableSharding::THashSharding::EHashFunction_Name(hashSharding.GetFunction())
-            + " sharding";
-        for (auto& column : shardingColumns) {
-            if (batch->schema()->GetFieldIndex(column) < 0) {
-                result.ErrorString += ", no column '" + column + "'";
-            }
-        }
+            + NKikimrSchemeOp::TColumnTableSharding::THashSharding::EHashFunction_Name(descSharding.GetHashSharding().GetFunction())
+            + " sharding (" + (sharding ? sharding->DebugString() : "no sharding object") + ")";
         return result;
     }
 
@@ -533,7 +518,7 @@ private:
             if (delayed) {
                 if (ShardsToRetry.empty()) {
                     TimeoutTimerActorId = CreateLongTimer(TRetryData::OverloadTimeout(),
-                        new IEventHandle(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup()));
+                        new IEventHandleFat(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup()));
                 }
                 ShardsToRetry.insert(shardId);
             } else {
@@ -555,51 +540,20 @@ private:
         }
     }
 
-    // Expects NKikimrTxColumnShard::EResultStatus
-    static Ydb::StatusIds::StatusCode ConvertToYdbStatus(ui32 columnShardStatus) {
-        switch (columnShardStatus) {
-        case NKikimrTxColumnShard::UNSPECIFIED:
-            return Ydb::StatusIds::STATUS_CODE_UNSPECIFIED;
-
-        case NKikimrTxColumnShard::PREPARED:
-        case NKikimrTxColumnShard::SUCCESS:
-            return Ydb::StatusIds::SUCCESS;
-
-        case NKikimrTxColumnShard::ABORTED:
-            return Ydb::StatusIds::ABORTED;
-
-        case NKikimrTxColumnShard::ERROR:
-            return Ydb::StatusIds::GENERIC_ERROR;
-
-        case NKikimrTxColumnShard::TIMEOUT:
-            return Ydb::StatusIds::TIMEOUT;
-
-        case NKikimrTxColumnShard::SCHEMA_ERROR:
-        case NKikimrTxColumnShard::SCHEMA_CHANGED:
-            return Ydb::StatusIds::SCHEME_ERROR;
-
-        case NKikimrTxColumnShard::OVERLOADED:
-            return Ydb::StatusIds::OVERLOADED;
-
-        default:
-            return Ydb::StatusIds::GENERIC_ERROR;
-        }
-    }
-
     void Handle(TEvColumnShard::TEvWriteResult::TPtr& ev) {
         auto gProfile = ActorSpan.StartStackTimeGuard("WriteResult");
         const auto* msg = ev->Get();
         ui64 shardId = msg->Record.GetOrigin();
         Y_VERIFY(WaitShards.count(shardId) || ShardsWrites.count(shardId));
 
-        auto status = msg->Record.GetStatus();
+        const auto status = (NKikimrTxColumnShard::EResultStatus)msg->Record.GetStatus();
         if (status == NKikimrTxColumnShard::OVERLOADED) {
             if (RetryWriteRequest(shardId)) {
                 return;
             }
         }
         if (status != NKikimrTxColumnShard::SUCCESS) {
-            auto ydbStatus = ConvertToYdbStatus(status);
+            auto ydbStatus = NColumnShard::ConvertToYdbStatus(status);
             return ReplyError(ydbStatus,
                 TStringBuilder() << "Cannot write data into shard " << shardId << " in longTx " << LongTxId.ToString());
         }
@@ -725,7 +679,7 @@ public:
     explicit TLongTxWriteRPC(std::unique_ptr<IRequestOpCtx> request)
         : TBase(request->GetDatabaseName().GetOrElse(DatabaseFromDomain(AppData())),
             TEvLongTxWriteRequest::GetProtoRequest(request)->path(),
-            request->GetInternalToken(),
+            request->GetSerializedToken(),
             TLongTxId(),
             TEvLongTxWriteRequest::GetProtoRequest(request)->dedup_id())
         , Request(std::move(request))
@@ -916,7 +870,7 @@ public:
     void Bootstrap() {
         const auto* req = TEvLongTxReadRequest::GetProtoRequest(Request);
 
-        if (const TString& internalToken = Request->GetInternalToken()) {
+        if (const TString& internalToken = Request->GetSerializedToken()) {
             UserToken.emplace(internalToken);
         }
 
@@ -1137,24 +1091,24 @@ private:
 
 //
 
-void DoLongTxBeginRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TLongTxBeginRPC(std::move(p)));
+void DoLongTxBeginRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TLongTxBeginRPC(std::move(p)));
 }
 
-void DoLongTxCommitRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TLongTxCommitRPC(std::move(p)));
+void DoLongTxCommitRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TLongTxCommitRPC(std::move(p)));
 }
 
-void DoLongTxRollbackRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TLongTxRollbackRPC(std::move(p)));
+void DoLongTxRollbackRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TLongTxRollbackRPC(std::move(p)));
 }
 
-void DoLongTxWriteRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TLongTxWriteRPC(std::move(p)));
+void DoLongTxWriteRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TLongTxWriteRPC(std::move(p)));
 }
 
-void DoLongTxReadRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TLongTxReadRPC(std::move(p)));
+void DoLongTxReadRPC(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TLongTxReadRPC(std::move(p)));
 }
 
 }

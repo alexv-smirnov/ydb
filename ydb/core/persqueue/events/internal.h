@@ -120,10 +120,13 @@ struct TEvPQ {
         EvMetering,
         EvTxCalcPredicate,
         EvTxCalcPredicateResult,
+        EvProposePartitionConfig,
+        EvProposePartitionConfigResult,
         EvTxCommit,
         EvTxCommitDone,
         EvTxRollback,
         EvPartitionConfigChanged,
+        EvSubDomainStatus,
         EvEnd
     };
 
@@ -710,6 +713,32 @@ struct TEvPQ {
         bool Predicate = false;
     };
 
+    struct TEvProposePartitionConfig : public TEventLocal<TEvProposePartitionConfig, EvProposePartitionConfig> {
+        TEvProposePartitionConfig(ui64 step, ui64 txId) :
+            Step(step),
+            TxId(txId)
+        {
+        }
+
+        ui64 Step;
+        ui64 TxId;
+        NPersQueue::TTopicConverterPtr TopicConverter;
+        NKikimrPQ::TPQTabletConfig Config;
+    };
+
+    struct TEvProposePartitionConfigResult : public TEventLocal<TEvProposePartitionConfigResult, EvProposePartitionConfigResult> {
+        TEvProposePartitionConfigResult(ui64 step, ui64 txId, ui32 partition) :
+            Step(step),
+            TxId(txId),
+            Partition(partition)
+        {
+        }
+
+        ui64 Step;
+        ui64 TxId;
+        ui32 Partition;
+    };
+
     struct TEvTxCommit : public TEventLocal<TEvTxCommit, EvTxCommit> {
         TEvTxCommit(ui64 step, ui64 txId) :
             Step(step),
@@ -743,6 +772,18 @@ struct TEvPQ {
 
         ui64 Step;
         ui64 TxId;
+    };
+
+    struct TEvSubDomainStatus : public TEventPB<TEvSubDomainStatus, NKikimrPQ::TEvSubDomainStatus, EvSubDomainStatus> {
+        TEvSubDomainStatus() {
+        }
+
+        explicit TEvSubDomainStatus(bool subDomainOutOfSpace)
+        {
+            Record.SetSubDomainOutOfSpace(subDomainOutOfSpace);
+        }
+
+        bool SubDomainOutOfSpace() const { return Record.GetSubDomainOutOfSpace(); }
     };
 };
 

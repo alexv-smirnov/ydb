@@ -947,45 +947,6 @@ void TExecutor::ApplyFollowerAuxUpdate(const TString &auxBody) {
     const TString aux = NPageCollection::TSlicer::Lz4()->Decode(auxBody);
     TProtoBox<NKikimrExecutorFlat::TFollowerAux> proto(aux);
 
-    for (const auto &x : proto.GetPageCollectionsTouched()) {
-        const TLogoBlobID &metaId = LogoBlobIDFromLogoBlobID(x.GetMetaInfoId());
-        TPrivatePageCache::TInfo *collectionInfo = PrivatePageCache->Info(metaId);
-        if (!collectionInfo)
-            continue;
-
-        TVector<NTable::TPageId> pages;
-
-        for (ui32 pageId : x.GetTouchedPages()) {
-            auto* page = collectionInfo->EnsurePage(pageId);
-            switch (page->LoadState) {
-            case TPrivatePageCache::TPage::LoadStateNo:
-                pages.push_back(pageId);
-                page->LoadState = TPrivatePageCache::TPage::LoadStateRequestedAsync;
-                break;
-            case TPrivatePageCache::TPage::LoadStateRequested:
-            case TPrivatePageCache::TPage::LoadStateRequestedAsync:
-                break;
-            case TPrivatePageCache::TPage::LoadStateLoaded:
-                PrivatePageCache->Touch(pageId, collectionInfo);
-                break;
-            default:
-                Y_FAIL("unknown ELoadState");
-            }
-        }
-
-        if (auto logl = Logger->Log(ELnLev::Debug)) {
-            logl
-                << NFmt::Do(*this) << " refresh pageCollection " << metaId
-                << " " << pages.size() << " pages of " << x.TouchedPagesSize();
-        }
-
-        if (pages) {
-            auto *req = new NPageCollection::TFetch(0, collectionInfo->PageCollection, std::move(pages));
-
-            RequestFromSharedCache(req, NBlockIO::EPriority::Bkgr, EPageCollectionRequest::CacheSync);
-        }
-    }
-
     if (proto.HasUserAuxUpdate())
         Owner->OnLeaderUserAuxUpdate(std::move(proto.GetUserAuxUpdate()));
 }
@@ -2384,22 +2345,6 @@ void TExecutor::CommitTransactionLog(TAutoPtr<TSeat> seat, TPageCollectionTxEnv 
             MakeLogSnapshot();
 
         CompactionLogic->UpdateLogUsage(LogicRedo->GrabLogUsage());
-    }
-
-    if (!Stats->IsFollower && HadFollowerAttached && env.Touches) {
-        NKikimrExecutorFlat::TFollowerAux proto;
-        proto.MutablePageCollectionsTouched()->Reserve(env.Touches.size());
-        for (auto &xpair : env.Touches) {
-            auto *px = proto.AddPageCollectionsTouched();
-            LogoBlobIDFromLogoBlobID(xpair.first->Id, px->MutableMetaInfoId());
-            px->MutableTouchedPages()->Reserve(xpair.second.size());
-            for (ui32 blockId : xpair.second)
-                px->AddTouchedPages(blockId);
-        }
-
-        auto coded = NPageCollection::TSlicer::Lz4()->Encode(proto.SerializeAsString());
-
-        Send(Owner->Tablet(), new TEvTablet::TEvAux(std::move(coded)));
     }
 
     const ui64 bookkeepingTimeuS = ui64(1000000. * (currentBookkeepingTime + bookkeepingTimer.PassedReset()));
@@ -3938,7 +3883,6 @@ void TExecutor::RenderHtmlCounters(NMon::TEvRemoteHttpInfo::TPtr &ev) const {
 void TExecutor::RenderHtmlPage(NMon::TEvRemoteHttpInfo::TPtr &ev) const {
     auto cgi = ev->Get()->Cgi();
     TStringStream str;
-    const NScheme::TTypeRegistry& tr = *AppData()->TypeRegistry;
 
     if (cgi.Has("force_compaction")) {
         bool ok;
@@ -4026,7 +3970,7 @@ void TExecutor::RenderHtmlPage(NMon::TEvRemoteHttpInfo::TPtr &ev) const {
                             TABLER() {
                                 TABLED() {str << col.Name;}
                                 TABLED() {str << col.Id;}
-                                TABLED() {str << tr.GetTypeName(col.PType.GetTypeId());}
+                                TABLED() {str << NScheme::TypeName(col.PType, col.PTypeMod);}
                                 TABLED() {str << (isKey ? ToString(col.KeyOrder) : "");}
                             }
                         }
@@ -4241,7 +4185,14 @@ ui64 TExecutor::BeginCompaction(THolder<NTable::TCompactionParams> params)
 
     for (size_t group : xrange(rowScheme->Families.size())) {
         auto familyId = rowScheme->Families[group];
-        auto* family = tableInfo->Families.FindPtr(familyId);
+        const auto* family = tableInfo->Families.FindPtr(familyId);
+        if (Y_UNLIKELY(!family)) {
+            // FIXME: workaround for KIKIMR-17222
+            // Column families with default settings may be missing in schema,
+            // so we have to use a static variable as a substitute
+            static const NTable::TScheme::TFamily defaultFamilySettings;
+            family = &defaultFamilySettings;
+        }
         Y_VERIFY(family, "Cannot find family %" PRIu32 " in table %" PRIu32, familyId, table);
 
         auto roomId = family->Room;

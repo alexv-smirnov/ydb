@@ -175,6 +175,17 @@ namespace NSchemeShardUT_Private {
     DROP_BY_PATH_ID_HELPERS(DropTable);
     GENERIC_HELPERS(DropTableIndex);
 
+
+    // external table
+    GENERIC_HELPERS(CreateExternalTable);
+    GENERIC_HELPERS(DropExternalTable);
+    DROP_BY_PATH_ID_HELPERS(DropExternalTable);
+
+    // external data source
+    GENERIC_HELPERS(CreateExternalDataSource);
+    GENERIC_HELPERS(DropExternalDataSource);
+    DROP_BY_PATH_ID_HELPERS(DropExternalDataSource);
+
     // backup & restore
     GENERIC_HELPERS(Backup);
     GENERIC_HELPERS(BackupToYt);
@@ -522,5 +533,8 @@ namespace NSchemeShardUT_Private {
         TTestActorRuntime& runtime, ui64 shardId, const TTableId& tableId, bool compactBorrowed = false);
 
     NKikimrPQ::TDescribeResponse GetDescribeFromPQBalancer(TTestActorRuntime& runtime, ui64 balancerId);
+
+    void SendTEvPeriodicTopicStats(TTestActorRuntime& runtime, ui64 topicId, ui64 generation, ui64 round, ui64 dataSize, ui64 usedReserveSize);
+    void WriteToTopic(TTestActorRuntime& runtime, const TString& path, ui32& msgSeqNo, const TString& message);
 
 } //NSchemeShardUT_Private

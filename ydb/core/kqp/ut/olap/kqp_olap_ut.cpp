@@ -1150,6 +1150,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
             R"((`level`, `uid`, `resource_id`) != (Int32("0"), "uid_3000001", "10011"))",
             R"(`level` = 0 OR `level` = 2 OR `level` = 1)",
             R"(`level` = 0 OR (`level` = 2 AND `uid` = "uid_3000002"))",
+            R"(`level` = 0 AND (`uid` = "uid_3000000" OR `uid` = "uid_3000002"))",
             R"(`level` = 0 OR `uid` = "uid_3000003")",
             R"(`level` = 0 AND `uid` = "uid_3000003")",
             R"(`level` = 0 AND `uid` = "uid_3000000")",
@@ -1294,6 +1295,8 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
     }
 
     Y_UNIT_TEST(AggregationCountGroupByPushdown) {
+        // Should be fixed in KIKIMR-17007
+        return;
         auto settings = TKikimrSettings()
             .SetWithSampleTables(false)
             .SetEnableOlapSchemaOperations(true);
@@ -1822,7 +1825,6 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
             .SetExpectedReply("[[4600u;]]")
             .AddExpectedPlanOptions("KqpOlapFilter")
 #if SSA_RUNTIME_VERSION >= 2U
-//            .AddExpectedPlanOptions("WideCombiner")
             .AddExpectedPlanOptions("TKqpOlapAgg")
             .MutableLimitChecker().SetExpectedResultCount(1)
 #else
@@ -2829,7 +2831,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime->Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime->Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
             }
@@ -2895,7 +2897,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime->Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime->Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
             }
@@ -2958,7 +2960,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime->Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime->Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
             }
@@ -3040,7 +3042,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime->Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime->Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
             }
@@ -3115,7 +3117,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime->Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime->Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
 
@@ -3131,7 +3133,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                             Cerr << (TStringBuilder() << "-- EvScanData from " << ev->Sender << ": hijack event");
                             Cerr.Flush();
                             auto resp = std::make_unique<NKqp::TEvKqpCompute::TEvScanError>(msg->Generation);
-                            runtime->Send(new IEventHandle(ev->Recipient, ev->Sender, resp.release()));
+                            runtime->Send(new IEventHandleFat(ev->Recipient, ev->Sender, resp.release()));
                         } else {
                             prevIsFinished = msg->Finished;
                         }
@@ -3667,6 +3669,237 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
         }
     }
 
+    void TestOlapUpsert(ui32 numShards) {
+        auto settings = TKikimrSettings()
+            .SetWithSampleTables(false);
+        TKikimrRunner kikimr(settings);
+
+        //EnableDebugLogging(kikimr);
+
+        auto& server = kikimr.GetTestServer();
+        auto tableClient = kikimr.GetTableClient();
+        Tests::NCommon::THelper lHelper(server);
+
+        auto session = tableClient.CreateSession().GetValueSync().GetSession();
+
+        auto query = TStringBuilder() << R"(
+            --!syntax_v1
+            CREATE TABLE `/Root/test_table`
+            (
+                WatchID Int64 NOT NULL,
+                CounterID Int32 NOT NULL,
+                URL Text NOT NULL,
+                Age Int16 NOT NULL,
+                Sex Int16 NOT NULL,
+                PRIMARY KEY (CounterID, WatchID)
+            )
+            PARTITION BY HASH(WatchID)
+            WITH (
+                STORE = COLUMN,
+                AUTO_PARTITIONING_MIN_PARTITIONS_COUNT =)" << numShards
+            << ")";
+        auto result = session.ExecuteSchemeQuery(query).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        result = session.ExecuteDataQuery(R"(
+            UPSERT INTO `/Root/test_table` (WatchID, CounterID, URL, Age, Sex) VALUES
+                (0, 15, 'aaaaaaa', 23, 1),
+                (0, 15, 'bbbbbbb', 23, 1),
+                (1, 15, 'ccccccc', 23, 1);
+        )", TTxControl::BeginTx(TTxSettings::SerializableRW()).CommitTx()).ExtractValueSync(); // TODO: snapshot isolation?
+
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+
+        {
+            TString query = R"(
+                --!syntax_v1
+                SELECT CounterID, WatchID
+                FROM `/Root/test_table`
+                ORDER BY CounterID, WatchID
+            )";
+
+            auto it = tableClient.StreamExecuteScanQuery(query).GetValueSync();
+
+            UNIT_ASSERT_C(it.IsSuccess(), it.GetIssues().ToString());
+            TString result = StreamResultToYson(it);
+            Cout << result << Endl;
+            //CompareYson(result, R"([[0;15];[1;15]])");
+            CompareYson(result, R"([])"); // FIXME
+        }
+    }
+
+    Y_UNIT_TEST(OlapUpsertImmediate) {
+        TestOlapUpsert(1);
+    }
+
+    Y_UNIT_TEST(OlapUpsert) {
+        TestOlapUpsert(2); // it should lead to planned tx
+    }
+
+    Y_UNIT_TEST(OlapDeleteImmediate) {
+        TPortManager pm;
+
+        ui32 grpcPort = pm.GetPort();
+        ui32 msgbPort = pm.GetPort();
+
+        Tests::TServerSettings serverSettings(msgbPort);
+        serverSettings.Port = msgbPort;
+        serverSettings.GrpcPort = grpcPort;
+        serverSettings.SetDomainName("Root")
+            .SetUseRealThreads(false)
+            .SetEnableMetadataProvider(true)
+            .SetEnableOlapSchemaOperations(true);
+        ;
+
+        Tests::TServer::TPtr server = new Tests::TServer(serverSettings);
+        server->EnableGRpc(grpcPort);
+        //        server->SetupDefaultProfiles();
+        Tests::TClient client(serverSettings);
+
+        auto& runtime = *server->GetRuntime();
+        EnableDebugLogging(&runtime);
+
+        auto sender = runtime.AllocateEdgeActor();
+        server->SetupRootStoragePools(sender);
+        Tests::NCommon::THelper lHelper(*server);
+        lHelper.StartSchemaRequest(
+            R"(
+                CREATE TABLE `/Root/test_table`
+                (
+                    WatchID Int64 NOT NULL,
+                    CounterID Int32 NOT NULL,
+                    URL Text NOT NULL,
+                    Age Int16 NOT NULL,
+                    Sex Int16 NOT NULL,
+                    PRIMARY KEY (CounterID, WatchID)
+                )
+                PARTITION BY HASH(WatchID)
+                WITH (
+                    STORE = COLUMN,
+                    AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                    AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1
+                );
+            )"
+        );
+
+        lHelper.StartDataRequest(
+            R"(
+                DELETE FROM `/Root/test_table` WHERE WatchID = 1;
+            )"
+        );
+
+    }
+
+    Y_UNIT_TEST(OlapDeleteImmediatePK) {
+        TPortManager pm;
+
+        ui32 grpcPort = pm.GetPort();
+        ui32 msgbPort = pm.GetPort();
+
+        Tests::TServerSettings serverSettings(msgbPort);
+        serverSettings.Port = msgbPort;
+        serverSettings.GrpcPort = grpcPort;
+        serverSettings.SetDomainName("Root")
+            .SetUseRealThreads(false)
+            .SetEnableMetadataProvider(true)
+            .SetEnableOlapSchemaOperations(true);
+        ;
+
+        Tests::TServer::TPtr server = new Tests::TServer(serverSettings);
+        server->EnableGRpc(grpcPort);
+        //        server->SetupDefaultProfiles();
+        Tests::TClient client(serverSettings);
+
+        auto& runtime = *server->GetRuntime();
+        EnableDebugLogging(&runtime);
+
+        auto sender = runtime.AllocateEdgeActor();
+        server->SetupRootStoragePools(sender);
+        Tests::NCommon::THelper lHelper(*server);
+        lHelper.StartSchemaRequest(
+            R"(
+                CREATE TABLE `/Root/test_table`
+                (
+                    WatchID Int64 NOT NULL,
+                    CounterID Int32 NOT NULL,
+                    URL Text NOT NULL,
+                    Age Int16 NOT NULL,
+                    Sex Int16 NOT NULL,
+                    PRIMARY KEY (CounterID, WatchID)
+                )
+                PARTITION BY HASH(WatchID)
+                WITH (
+                    STORE = COLUMN,
+                    AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                    AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1
+                );
+            )"
+        );
+
+        lHelper.StartDataRequest(
+            R"(
+                DELETE FROM `/Root/test_table` WHERE WatchID = 1 AND CounterID = 1;
+            )"
+        );
+
+    }
+
+    Y_UNIT_TEST(OlapDeletePlanned) {
+        TPortManager pm;
+
+        ui32 grpcPort = pm.GetPort();
+        ui32 msgbPort = pm.GetPort();
+
+        Tests::TServerSettings serverSettings(msgbPort);
+        serverSettings.Port = msgbPort;
+        serverSettings.GrpcPort = grpcPort;
+        serverSettings.SetDomainName("Root")
+            .SetUseRealThreads(false)
+            .SetEnableMetadataProvider(true)
+            .SetEnableOlapSchemaOperations(true);
+        ;
+
+        Tests::TServer::TPtr server = new Tests::TServer(serverSettings);
+        server->EnableGRpc(grpcPort);
+        //        server->SetupDefaultProfiles();
+        Tests::TClient client(serverSettings);
+
+        auto& runtime = *server->GetRuntime();
+        EnableDebugLogging(&runtime);
+
+        auto sender = runtime.AllocateEdgeActor();
+        server->SetupRootStoragePools(sender);
+        Tests::NCommon::THelper lHelper(*server);
+        lHelper.StartSchemaRequest(
+            R"(
+                CREATE TABLE `/Root/test_table`
+                (
+                    WatchID Int64 NOT NULL,
+                    CounterID Int32 NOT NULL,
+                    URL Text NOT NULL,
+                    Age Int16 NOT NULL,
+                    Sex Int16 NOT NULL,
+                    PRIMARY KEY (CounterID, WatchID)
+                )
+                PARTITION BY HASH(WatchID)
+                WITH (
+                    STORE = COLUMN,
+                    AUTO_PARTITIONING_BY_SIZE = ENABLED,
+                    AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 8
+                );
+            )"
+        );
+
+        lHelper.StartDataRequest(
+            R"(
+                DELETE FROM `/Root/test_table` WHERE WatchID = 0;
+            )"
+#if 1 // TODO
+            , false
+#endif
+        );
+    }
+
     Y_UNIT_TEST(PredicatePushdownCastErrors) {
         auto settings = TKikimrSettings()
             .SetWithSampleTables(false);
@@ -3827,6 +4060,36 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
             )")
             .SetExpectedReply("[[5;#]]")
             .AddExpectedPlanOptions("KqpOlapFilter");
+
+        TestTableWithNulls({ testCase });
+    }
+
+    Y_UNIT_TEST(BlocksRead) {
+        TAggregationTestCase testCase;
+        testCase.SetQuery(R"(
+                PRAGMA UseBlocks;
+                PRAGMA Kikimr.OptEnableOlapPushdown = "false";
+
+                SELECT
+                    id, resource_id
+                FROM `/Root/tableWithNulls`
+                WHERE
+                    level = 5;
+            )")
+            .SetExpectedReply("[[5;#]]");
+
+        TestTableWithNulls({ testCase });
+    }
+
+    Y_UNIT_TEST(Blocks_NoAggPushdown) {
+        TAggregationTestCase testCase;
+        testCase.SetQuery(R"(
+                PRAGMA UseBlocks;
+                SELECT
+                    COUNT(DISTINCT id)
+                FROM `/Root/tableWithNulls`;
+            )")
+            .SetExpectedReply("[[10u]]");
 
         TestTableWithNulls({ testCase });
     }

@@ -114,7 +114,7 @@ public:
     void ForwardToProxy(TAutoPtr<IEventHandle> ev) {
         const TGroupID groupId(GroupIDFromBlobStorageProxyID(ev->GetForwardOnNondeliveryRecipient()));
         const ui32 id = groupId.GetRaw();
-        TActivationContext::Send(ev->Forward(MakeBlobStorageProxyID(id)));
+        Forward(ev, MakeBlobStorageProxyID(id));
     }
 
     STRICT_STFUNC(StateFunc,
@@ -257,14 +257,14 @@ public:
     void RestartDisk(TTestActorSystem& runtime, TDiskRecord& disk) {
         LOG_NOTICE_S(runtime, NActorsServices::TEST, "Restarting " << disk.VDiskId << " over NodeId# " << disk.NodeId
             << " PDiskId# " << disk.PDiskId);
-        runtime.Send(new IEventHandle(TEvents::TSystem::Poison, 0, disk.VDiskActorId, TActorId(), nullptr, 0), disk.NodeId);
+        runtime.Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, disk.VDiskActorId, TActorId(), nullptr, 0), disk.NodeId);
         StartVDisk(runtime, disk);
     }
 
     void FormatDisk(TTestActorSystem& runtime, TDiskRecord& disk) {
         LOG_NOTICE_S(runtime, NActorsServices::TEST, "Formatting " << disk.VDiskId << " over NodeId# " << disk.NodeId
             << " PDiskId# " << disk.PDiskId << " DiskStatus# " << GetDiskStatusMap());
-        runtime.Send(new IEventHandle(TEvents::TSystem::Poison, 0, disk.VDiskActorId, TActorId(), nullptr, 0), disk.NodeId);
+        runtime.Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, disk.VDiskActorId, TActorId(), nullptr, 0), disk.NodeId);
         Slay(runtime, disk);
         StartVDisk(runtime, disk);
     }
@@ -295,7 +295,7 @@ public:
         Slay(runtime, disk);
 
         // terminate running VDisk directly
-        runtime.Send(new IEventHandle(TEvents::TSystem::Poison, 0, disk.VDiskActorId, TActorId(), nullptr, 0), disk.NodeId);
+        runtime.Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, disk.VDiskActorId, TActorId(), nullptr, 0), disk.NodeId);
 
         // fill in new VDisk params
         const ui32 vdiskSlotId = ++NextVDiskSlotId[std::make_tuple(nodeId, pdiskId)];
@@ -322,13 +322,13 @@ public:
         for (TDiskRecord& disk : Disks) {
             if (disk.VDiskId.GroupGeneration != Info->GroupGeneration) {
                 disk.VDiskId = TVDiskID(Info->GroupID, Info->GroupGeneration, disk.VDiskId);
-                runtime.Send(new IEventHandle(disk.VDiskActorId, {}, new TEvVGenerationChange(disk.VDiskId, Info)),
+                runtime.Send(new IEventHandleFat(disk.VDiskActorId, {}, new TEvVGenerationChange(disk.VDiskId, Info)),
                     disk.VDiskActorId.NodeId());
             }
         }
 
         // update group info for proxy
-        runtime.Send(new IEventHandle(MakeBlobStorageProxyID(Info->GroupID), TActorId(),
+        runtime.Send(new IEventHandleFat(MakeBlobStorageProxyID(Info->GroupID), TActorId(),
             new TEvBlobStorage::TEvConfigureProxy(Info, StoragePoolCounters)), 1);
     }
 
@@ -336,7 +336,7 @@ public:
         LOG_INFO_S(runtime, NActorsServices::TEST, "Slaying VDiskId# " << disk.VDiskId);
         const TActorId& edge = runtime.AllocateEdgeActor(disk.NodeId);
         auto slay = std::make_unique<NPDisk::TEvSlay>(disk.VDiskId, ++Round, disk.PDiskId, disk.VDiskSlotId);
-        runtime.Send(new IEventHandle(disk.PDiskActorId, edge, slay.release()), disk.NodeId);
+        runtime.Send(new IEventHandleFat(disk.PDiskActorId, edge, slay.release()), disk.NodeId);
         auto res = runtime.WaitForEdgeActorEvent({edge});
         if (const auto *ev = res->CastAsLocal<NPDisk::TEvSlayResult>()) {
             Y_VERIFY_S(ev->Status == NKikimrProto::OK || ev->Status == NKikimrProto::ALREADY, "TEvSlayResult# " << ev->ToString());
@@ -461,12 +461,12 @@ public:
     }
 
     template<typename TEvent, typename... TArgs>
-    TAutoPtr<TEventHandle<TResultFor<TEvent>>> Query(TArgs&&... args) {
+    TAutoPtr<TEventHandleFat<TResultFor<TEvent>>> Query(TArgs&&... args) {
         auto q = std::make_unique<TEvent>(std::forward<TArgs>(args)...);
         LOG_DEBUG_S(GetActorContext(), NActorsServices::TEST, Prefix << " sending " << TypeName<TEvent>() << "# "
             << q->Print(false));
         GetActorSystem()->Schedule(TDuration::MicroSeconds(TAppData::RandomProvider->Uniform(10, 100)),
-            new IEventHandle(ProxyId, SelfActorId, q.release()));
+            new IEventHandleFat(ProxyId, SelfActorId, q.release()));
         ++*Counter;
         auto ev = WaitForSpecificEvent<TResultFor<TEvent>>();
         LOG_DEBUG_S(GetActorContext(), NActorsServices::TEST, Prefix << " received "
@@ -511,9 +511,9 @@ public:
         // issue gets from the read queue
         ui32 readsInFlight = 0;
         const ui32 maxReadsInFlight = 3;
-        TInstant nextSendTimestamp;
+        TMonotonic nextSendTimestamp;
         while (readsInFlight || !readQueue.empty()) {
-            const TInstant now = TActorCoroImpl::Now();
+            const TMonotonic now = TActorCoroImpl::Monotonic();
             if (readQueue.size() && now >= nextSendTimestamp && readsInFlight < maxReadsInFlight) {
                 auto ev = std::make_unique<TEvBlobStorage::TEvGet>(readQueue.front(), 0, 0, TInstant::Max(),
                     NKikimrBlobStorage::EGetHandleClass::FastRead, true, false);
@@ -554,7 +554,7 @@ public:
         ui32 numWritesRemain = TAppData::RandomProvider->Uniform(100, 201);
         ui32 step = 1;
         while (writesInFlight.size() || numWritesRemain) {
-            const TInstant now = TActorCoroImpl::Now();
+            const TMonotonic now = TActorCoroImpl::Monotonic();
             if (numWritesRemain && now >= nextSendTimestamp && writesInFlight.size() < maxWritesInFlight) {
                 TString buffer = GenerateRandomBuffer(Cache);
                 const TLogoBlobID id(TabletId, generation, step++, 0, buffer.size(), 0);

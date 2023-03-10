@@ -1162,7 +1162,7 @@ void TDataReq::ProcessReadTableResolve(NSchemeCache::TSchemeCacheRequest *cacheR
             auto &c = *tx.AddColumns();
             c.SetId(col.Id);
             c.SetName(col.Name);
-            auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(col.PType);
+            auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(col.PType, col.PTypeMod);
             c.SetTypeId(columnType.TypeId);
             if (columnType.TypeInfo) {
                 *c.MutableTypeInfo() = *columnType.TypeInfo;
@@ -1308,7 +1308,7 @@ void TDataReq::Handle(TEvTxProxyReq::TEvMakeRequest::TPtr &ev, const TActorConte
 
     // Schedule execution timeout
     {
-        TAutoPtr<IEventHandle> wakeupEv(new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
+        TAutoPtr<IEventHandle> wakeupEv(new IEventHandleFat(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
         ExecTimeoutCookieHolder.Reset(ISchedulerCookie::Make2Way());
 
         CreateLongTimer(ctx, ExecTimeoutPeriod, wakeupEv, AppData(ctx)->SystemPoolId, ExecTimeoutCookieHolder.Get());

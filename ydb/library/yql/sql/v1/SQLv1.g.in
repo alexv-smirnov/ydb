@@ -47,6 +47,10 @@ sql_stmt_core:
   | create_object_stmt
   | alter_object_stmt
   | drop_object_stmt
+  | create_external_data_source_stmt
+  | drop_external_data_source_stmt
+  | create_replication_stmt
+  | drop_replication_stmt
 ;
 
 expr:
@@ -453,6 +457,12 @@ values_source_row: LPAREN expr_list RPAREN;
 
 simple_values_source: expr_list | select_stmt;
 
+create_external_data_source_stmt: CREATE EXTERNAL DATA SOURCE object_ref
+    with_table_settings
+;
+
+drop_external_data_source_stmt: DROP EXTERNAL DATA SOURCE object_ref;
+
 create_object_stmt: CREATE OBJECT object_ref
     LPAREN TYPE object_type_ref RPAREN
     create_object_features?
@@ -599,6 +609,17 @@ drop_role_stmt: DROP (USER|GROUP) (IF EXISTS)? role_name (COMMA role_name)* COMM
 
 role_name: an_id_or_type | bind_parameter;
 create_user_option: ENCRYPTED? PASSWORD expr;
+
+create_replication_stmt: CREATE ASYNC REPLICATION object_ref
+    FOR replication_target (COMMA replication_target)*
+    WITH LPAREN replication_settings RPAREN
+;
+
+replication_target: object_ref AS object_ref;
+replication_settings: replication_settings_entry (COMMA replication_settings_entry)*;
+replication_settings_entry: an_id EQUALS STRING_VALUE;
+
+drop_replication_stmt: DROP ASYNC REPLICATION object_ref CASCADE?;
 
 action_or_subquery_args: opt_bind_parameter (COMMA opt_bind_parameter)*;
 
@@ -783,7 +804,6 @@ id_hint:
 ;
 
 id_as_compat: identifier | keyword_as_compat;
-keyword_as_compat: TYPE;
 
 // ANSI-aware versions of various identifiers with support double-quoted identifiers when PRAGMA AnsiQuotedIdentifiers; is present
 an_id: id | STRING_VALUE;
@@ -887,6 +907,14 @@ keyword_hint_uncompat:
   | COLUMNS
 ;
 
+keyword_as_compat:
+    DATA
+  | REPLICATION
+  | SOURCE
+  | TYPE
+;
+
+// insert new keyword into keyword_as_compat also
 keyword_compat: (
     ABORT
   | ACTION
@@ -917,6 +945,7 @@ keyword_compat: (
   | CREATE
   | CROSS
   | CURRENT
+  | DATA
   | DATABASE
   | DECIMAL
   | DECLARE
@@ -1008,6 +1037,7 @@ keyword_compat: (
   | RELEASE
   | RENAME
   | REPLACE
+  | REPLICATION
   | RESET
   | RESPECT
   | RESTRICT
@@ -1022,6 +1052,7 @@ keyword_compat: (
   | SAVEPOINT
   | SEMI
   | SETS
+  | SOURCE
   | SUBQUERY
   | SYMBOLS
   | SYNC
@@ -1195,6 +1226,7 @@ CURRENT: C U R R E N T;
 CURRENT_TIME: C U R R E N T '_' T I M E;
 CURRENT_DATE: C U R R E N T '_' D A T E;
 CURRENT_TIMESTAMP: C U R R E N T '_' T I M E S T A M P;
+DATA: D A T A;
 DATABASE: D A T A B A S E;
 DECIMAL: D E C I M A L;
 DECLARE: D E C L A R E;
@@ -1315,6 +1347,7 @@ RELEASE: R E L E A S E;
 RENAME: R E N A M E;
 REPEATABLE: R E P E A T A B L E;
 REPLACE: R E P L A C E;
+REPLICATION: R E P L I C A T I O N;
 RESET: R E S E T;
 RESOURCE: R E S O U R C E;
 RESPECT: R E S P E C T;
@@ -1336,6 +1369,7 @@ SELECT: S E L E C T;
 SEMI: S E M I;
 SET: S E T;
 SETS: S E T S;
+SOURCE: S O U R C E;
 STREAM: S T R E A M;
 STRUCT: S T R U C T;
 SUBQUERY: S U B Q U E R Y;

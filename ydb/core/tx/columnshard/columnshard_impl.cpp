@@ -205,7 +205,7 @@ void TColumnShard::RescheduleWaitingReads() {
 }
 
 TRowVersion TColumnShard::GetMaxReadVersion() const {
-    if (PlanQueue) {
+    if (!PlanQueue.empty()) {
         // We may only read just before the first transaction in the queue
         auto it = PlanQueue.begin();
         return TRowVersion(it->Step, it->TxId).Prev();
@@ -712,10 +712,15 @@ void TColumnShard::EnqueueBackgroundActivities(bool periodic, bool insertOnly) {
 
     if (auto event = SetupCleanup()) {
         ctx.Send(SelfId(), event.release());
+    } else {
+        // Small cleanup (no index changes)
+        THashSet<NOlap::TEvictedBlob> blobsToForget;
+        BlobManager->GetCleanupBlobs(blobsToForget);
+        ForgetBlobs(ctx, blobsToForget);
     }
 
     if (auto event = SetupTtl()) {
-        if (event->NeedWrites()) {
+        if (event->NeedDataReadWrite()) {
             ctx.Send(EvictionActor, event.release());
         } else {
             ctx.Send(SelfId(), event->TxEvent.release());
@@ -989,9 +994,9 @@ NOlap::TIndexInfo TColumnShard::ConvertSchema(const NKikimrSchemeOp::TColumnTabl
     for (const auto& col : schema.GetColumns()) {
         const ui32 id = col.GetId();
         const TString& name = col.GetName();
-        auto typeInfo = NScheme::TypeInfoFromProtoColumnType(col.GetTypeId(),
+        auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(col.GetTypeId(),
             col.HasTypeInfo() ? &col.GetTypeInfo() : nullptr);
-        indexInfo.Columns[id] = NTable::TColumn(name, id, typeInfo);
+        indexInfo.Columns[id] = NTable::TColumn(name, id, typeInfoMod.TypeInfo, typeInfoMod.TypeMod);
         indexInfo.ColumnNames[name] = id;
     }
 
@@ -1024,30 +1029,39 @@ void TColumnShard::MapExternBlobs(const TActorContext& /*ctx*/, NOlap::TReadMeta
         }
     }
 
-    THashMap<TUnifiedBlobId, TUnifiedBlobId> extMap;
+    auto exported = std::make_shared<THashSet<TUnifiedBlobId>>();
 
     for (auto& blobId : uniqBlobs) {
         TEvictMetadata meta;
         auto evicted = BlobManager->GetEvicted(blobId, meta);
-        if (evicted.ExternBlob.IsValid()) {
-            extMap[blobId] = evicted.ExternBlob;
+        if (evicted.IsExternal()) {
+            exported->insert(blobId);
         }
     }
 
-    if (!extMap.empty()) {
-        metadata.ExternBlobs = std::make_shared<const THashMap<TUnifiedBlobId, TUnifiedBlobId>>(std::move(extMap));
+    if (!exported->empty()) {
+        metadata.ExternBlobs = exported;
     }
 }
 
-void TColumnShard::ExportBlobs(const TActorContext& ctx, ui64 exportNo, const TString& tierName,
-    TEvPrivate::TEvExport::TBlobDataMap&& blobsInfo) const {
+void TColumnShard::ExportBlobs(const TActorContext& ctx, ui64 exportNo, const TString& tierName, ui64 pathId,
+                               TEvPrivate::TEvExport::TBlobDataMap&& blobsInfo) const {
+    Y_VERIFY(blobsInfo.size());
+
+    TString strBlobs;
+    for (auto& [blobId, _] : blobsInfo) {
+        strBlobs += "'" + blobId.ToStringNew() + "' ";
+    }
+    LOG_S_NOTICE("Export blobs " << strBlobs << "at tablet " << TabletID());
+
     if (auto s3 = GetS3ActorForTier(tierName)) {
-        auto event = std::make_unique<TEvPrivate::TEvExport>(exportNo, tierName, s3, std::move(blobsInfo));
+        auto event = std::make_unique<TEvPrivate::TEvExport>(exportNo, tierName, pathId, s3, std::move(blobsInfo));
         ctx.Register(CreateExportActor(TabletID(), ctx.SelfID, event.release()));
     }
 }
 
-void TColumnShard::ForgetBlobs(const TActorContext& ctx, const TString& tierName, std::vector<NOlap::TEvictedBlob>&& blobs) const {
+// It should be called from ForgetBlobs() only to log all S3 activity
+void TColumnShard::ForgetTierBlobs(const TActorContext& ctx, const TString& tierName, std::vector<NOlap::TEvictedBlob>&& blobs) const {
     if (auto s3 = GetS3ActorForTier(tierName)) {
         auto forget = std::make_unique<TEvPrivate::TEvForget>();
         forget->Evicted = std::move(blobs);
@@ -1055,26 +1069,38 @@ void TColumnShard::ForgetBlobs(const TActorContext& ctx, const TString& tierName
     }
 }
 
-void TColumnShard::ForgetBlobs(const TActorContext& ctx, const THashSet<TUnifiedBlobId>& blobs) {
+void TColumnShard::ForgetBlobs(const TActorContext& ctx, const THashSet<NOlap::TEvictedBlob>& evictedBlobs) {
     THashMap<TString, std::vector<NOlap::TEvictedBlob>> tierBlobs;
 
-    for (const auto& blobId : blobs) {
+    TString strBlobs;
+    TString strBlobsDelayed;
+
+    for (const auto& ev : evictedBlobs) {
+        auto& blobId = ev.Blob;
         TEvictMetadata meta;
         auto evict = BlobManager->GetDropped(blobId, meta);
 
         if (evict.State == EEvictState::UNKNOWN) {
             LOG_S_ERROR("Forget unknown blob '" << blobId.ToStringNew() << "' at tablet " << TabletID());
         } else if (NOlap::IsExported(evict.State)) {
-            LOG_S_DEBUG("Forget blob '" << blobId.ToStringNew() << "' at tablet " << TabletID());
+            Y_VERIFY(evict.Blob == blobId);
+            strBlobs += "'" + blobId.ToStringNew() + "' ";
             tierBlobs[meta.GetTierName()].emplace_back(std::move(evict));
         } else {
-            LOG_S_DEBUG("Forget blob (deleyed) '" << blobId.ToStringNew() << "' at tablet " << TabletID());
-            DelayedForgetBlobs.insert(blobId);
+            Y_VERIFY(evict.Blob == blobId);
+            strBlobsDelayed += "'" + blobId.ToStringNew() + "' ";
         }
     }
 
+    if (strBlobs.size()) {
+        LOG_S_NOTICE("Forget blobs " << strBlobs << "at tablet " << TabletID());
+    }
+    if (strBlobsDelayed.size()) {
+        LOG_S_NOTICE("Forget blobs (deleyed) " << strBlobsDelayed << "at tablet " << TabletID());
+    }
+
     for (auto& [tierName, blobs] : tierBlobs) {
-        ForgetBlobs(ctx, tierName, std::move(blobs));
+        ForgetTierBlobs(ctx, tierName, std::move(blobs));
     }
 }
 

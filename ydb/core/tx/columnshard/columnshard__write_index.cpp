@@ -24,7 +24,7 @@ public:
 
 private:
     struct TPathIdBlobs {
-        THashSet<TUnifiedBlobId> Blobs;
+        THashMap<TUnifiedBlobId, TString> Blobs;
         ui64 PathId;
         TPathIdBlobs(const ui64 pathId)
             : PathId(pathId) {
@@ -34,7 +34,7 @@ private:
 
     TEvPrivate::TEvWriteIndex::TPtr Ev;
     THashMap<TString, TPathIdBlobs> ExportTierBlobs;
-    THashSet<TUnifiedBlobId> BlobsToForget;
+    THashSet<NOlap::TEvictedBlob> BlobsToForget;
     ui64 ExportNo = 0;
 };
 
@@ -133,14 +133,11 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext& ctx) 
 
             Self->IncCounter(COUNTER_EVICTION_PORTIONS_WRITTEN, changes->PortionsToEvict.size());
             for (auto& [portionInfo, evictionFeatures] : changes->PortionsToEvict) {
-                auto& tierName = portionInfo.TierName;
-                if (tierName.empty()) {
-                    continue;
-                }
-
                 // Mark exported blobs
-                auto& tManager = Self->GetTierManagerVerified(tierName);
-                if (tManager.NeedExport()) {
+                if (evictionFeatures.NeedExport) {
+                    auto& tierName = portionInfo.TierName;
+                    Y_VERIFY(!tierName.empty());
+
                     for (auto& rec : portionInfo.Records) {
                         auto& blobId = rec.BlobRange.BlobId;
                         if (!blobsToExport.count(blobId)) {
@@ -193,7 +190,7 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext& ctx) 
                     auto evict = Self->BlobManager->GetDropped(blobId, meta);
                     Y_VERIFY(evict.State != EEvictState::UNKNOWN);
 
-                    BlobsToForget.insert(blobId);
+                    BlobsToForget.emplace(std::move(evict));
 
                     if (NOlap::IsDeleted(evict.State)) {
                         LOG_S_DEBUG("Skip delete blob '" << blobId.ToStringNew() << "' at tablet " << Self->TabletID());
@@ -213,7 +210,7 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext& ctx) 
 
             Self->UpdateIndexCounters();
         } else {
-            LOG_S_INFO("TTxWriteIndex (" << changes->TypeString()
+            LOG_S_NOTICE("TTxWriteIndex (" << changes->TypeString()
                 << ") cannot apply changes: " << *changes << " at tablet " << Self->TabletID());
 
             // TODO: delayed insert
@@ -230,7 +227,7 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext& ctx) 
             if (it == ExportTierBlobs.end()) {
                 it = ExportTierBlobs.emplace(evFeatures.TargetTierName, TPathIdBlobs(evFeatures.PathId)).first;
             }
-            it->second.Blobs.emplace(blobId);
+            it->second.Blobs.emplace(blobId, TString());
         }
         blobsToExport.clear();
 
@@ -270,6 +267,8 @@ bool TTxWriteIndex::Execute(TTransactionContext& txc, const TActorContext& ctx) 
     } else if (changes->IsCleanup()) {
         Self->ActiveCleanup = false;
 
+        Self->BlobManager->GetCleanupBlobs(BlobsToForget);
+
         Self->IncCounter(ok ? COUNTER_CLEANUP_SUCCESS : COUNTER_CLEANUP_FAIL);
     } else if (changes->IsTtl()) {
         Self->ActiveTtl = false;
@@ -297,17 +296,12 @@ void TTxWriteIndex::Complete(const TActorContext& ctx) {
         Self->EnqueueBackgroundActivities();
     }
 
-    for (auto& [tierName, blobIds] : ExportTierBlobs) {
+    for (auto& [tierName, pathBlobs] : ExportTierBlobs) {
         Y_VERIFY(ExportNo);
+        Y_VERIFY(pathBlobs.PathId);
 
-        TEvPrivate::TEvExport::TBlobDataMap blobsData;
-        for (auto&& i : blobIds.Blobs) {
-            TEvPrivate::TEvExport::TExportBlobInfo info(blobIds.PathId);
-            info.Evicting = Self->BlobManager->IsEvicting(i);
-            blobsData.emplace(i, std::move(info));
-        }
-
-        ctx.Send(Self->SelfId(), new TEvPrivate::TEvExport(ExportNo, tierName, std::move(blobsData)));
+        ctx.Send(Self->SelfId(),
+                 new TEvPrivate::TEvExport(ExportNo, tierName, pathBlobs.PathId, std::move(pathBlobs.Blobs)));
         ++ExportNo;
     }
 

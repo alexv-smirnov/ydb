@@ -17,6 +17,7 @@
 #include "schemeshard_utils.h"
 #include "schemeshard_schema.h"
 #include "schemeshard__operation.h"
+#include "schemeshard__stats.h"
 
 #include <ydb/core/base/hive.h>
 #include <ydb/core/base/storage_pools.h>
@@ -44,6 +45,7 @@
 #include <ydb/core/tx/sequenceshard/public/events.h>
 #include <ydb/core/tx/tx_processing.h>
 #include <ydb/core/util/pb.h>
+#include <ydb/core/util/token_bucket.h>
 #include <ydb/core/ydb_convert/table_profiles.h>
 
 #include <ydb/core/blockstore/core/blockstore.h>
@@ -201,7 +203,7 @@ public:
 
     THashMap<TPathId, TTxId> LockedPaths;
 
-    THashMap<TPathId, TPersQueueGroupInfo::TPtr> PersQueueGroups;
+    THashMap<TPathId, TTopicInfo::TPtr> Topics;
     THashMap<TPathId, TRtmrVolumeInfo::TPtr> RtmrVolumes;
     THashMap<TPathId, TSolomonVolumeInfo::TPtr> SolomonVolumes;
     THashMap<TPathId, TSubDomainInfo::TPtr> SubDomains;
@@ -209,6 +211,8 @@ public:
     THashMap<TPathId, TFileStoreInfo::TPtr> FileStoreInfos;
     THashMap<TPathId, TKesusInfo::TPtr> KesusInfos;
     THashMap<TPathId, TOlapStoreInfo::TPtr> OlapStores;
+    THashMap<TPathId, TExternalTableInfo::TPtr> ExternalTables;
+    THashMap<TPathId, TExternalDataSourceInfo::TPtr> ExternalDataSources;
 
     TTablesStorage ColumnTables;
 
@@ -256,7 +260,7 @@ public:
     bool EnableBackgroundCompaction = false;
     bool EnableBackgroundCompactionServerless = false;
     bool EnableBorrowedSplitCompaction = false;
-    bool EnableMoveIndex = false;
+    bool EnableMoveIndex = true;
     bool EnableAlterDatabaseCreateHiveFirst = false;
 
     TShardDeleter ShardDeleter;
@@ -278,53 +282,21 @@ public:
     THashMap<TTxState::ETxType, ui32> InFlightLimits;
 
     // time when we opened the batch
-    TMonotonic StatsBatchStartTs;
-    bool StatsBatchScheduled = false;
-    bool PersistStatsPending = false;
+    bool TableStatsBatchScheduled = false;
+    bool TablePersistStatsPending = false;
+    TStatsQueue<TEvDataShard::TEvPeriodicTableStats> TableStatsQueue;
 
-    struct TStatsQueueItem {
-        TEvDataShard::TEvPeriodicTableStats::TPtr Ev;
-        TPathId PathId;
-        TMonotonic Ts;
-
-        TStatsQueueItem(TEvDataShard::TEvPeriodicTableStats::TPtr ev, const TPathId& pathId)
-            : Ev(ev)
-            , PathId(pathId)
-            , Ts(AppData()->MonotonicTimeProvider->Now())
-        {}
-    };
-
-    struct TStatsId {
-        TPathId PathId;
-        TTabletId Datashard;
-
-        TStatsId(const TPathId& pathId, const TTabletId& datashard)
-            : PathId(pathId)
-            , Datashard(datashard)
-        {
-        }
-
-        bool operator==(const TStatsId& rhs) const {
-            return PathId == rhs.PathId && Datashard == rhs.Datashard;
-        }
-
-        struct THash {
-            inline size_t operator()(const TStatsId& obj) const {
-                return MultiHash(obj.PathId.Hash(), obj.Datashard);
-            }
-        };
-    };
-
-    using TStatsMap = THashMap<TStatsId, TStatsQueueItem*, TStatsId::THash>;
-
-    TStatsMap StatsMap;
-    TDeque<TStatsQueueItem> StatsQueue;
+    bool TopicStatsBatchScheduled = false;
+    bool TopicPersistStatsPending = false;
+    TStatsQueue<TEvPersQueue::TEvPeriodicTopicStats> TopicStatsQueue;
 
     TSet<TPathId> CleanDroppedPathsCandidates;
     TSet<TPathId> CleanDroppedSubDomainsCandidates;
     bool CleanDroppedPathsInFly = false;
     bool CleanDroppedPathsDisabled = true;
     bool CleanDroppedSubDomainsInFly = false;
+
+    TTokenBucket DropBlockStoreVolumeRateLimiter;
 
     TActorId DelayedInitTenantDestination;
     TAutoPtr<TEvSchemeShard::TEvInitTenantSchemeShardResult> DelayedInitTenantReply;
@@ -524,10 +496,21 @@ public:
 
     TShardIdx ReserveShardIdxs(ui64 count);
     TShardIdx NextShardIdx(const TShardIdx& shardIdx, ui64 inc) const;
-    TShardIdx RegisterShardInfo(TShardInfo&& shardInfo);
-    TShardIdx RegisterShardInfo(const TShardInfo& shardInfo);
-    TShardIdx RegisterShardInfo(const TShardIdx& shardIdx, TShardInfo&& shardInfo);
-    TShardIdx RegisterShardInfo(const TShardIdx& shardIdx, const TShardInfo& shardInfo);
+    template <typename T>
+    TShardIdx RegisterShardInfo(T&& shardInfo) {
+        return RegisterShardInfo(ReserveShardIdxs(1), std::forward<T>(shardInfo));
+    }
+
+    template <typename T>
+    TShardIdx RegisterShardInfo(const TShardIdx& shardIdx, T&& shardInfo) {
+        Y_VERIFY(shardIdx.GetOwnerId() == TabletID());
+        const auto localId = ui64(shardIdx.GetLocalId());
+        Y_VERIFY_S(localId < NextLocalShardIdx, "shardIdx: " << shardIdx << " NextLocalShardIdx: " << NextLocalShardIdx);
+        Y_VERIFY_S(!ShardInfos.contains(shardIdx), "shardIdx: " << shardIdx << " already registered");
+        IncrementPathDbRefCount(shardInfo.PathId, "new shard created");
+        ShardInfos.emplace(shardIdx, std::forward<T>(shardInfo));
+        return shardIdx;
+    }
 
     TTxState& CreateTx(TOperationId opId, TTxState::ETxType txType, TPathId targetPath, TPathId sourcePath = InvalidPathId);
     TTxState* FindTx(TOperationId opId);
@@ -609,11 +592,12 @@ public:
     void PersistTableAlterVersion(NIceDb::TNiceDb &db, const TPathId pathId, const TTableInfo::TPtr tableInfo);
     void PersistTableAltered(NIceDb::TNiceDb &db, const TPathId pathId, const TTableInfo::TPtr tableInfo);
     void PersistAddAlterTable(NIceDb::TNiceDb& db, TPathId pathId, const TTableInfo::TAlterDataPtr alter);
-    void PersistPersQueueGroup(NIceDb::TNiceDb &db, TPathId pathId, const TPersQueueGroupInfo::TPtr);
+    void PersistPersQueueGroup(NIceDb::TNiceDb &db, TPathId pathId, const TTopicInfo::TPtr);
+    void PersistPersQueueGroupStats(NIceDb::TNiceDb &db, const TPathId pathId, const TTopicStats& stats);
     void PersistRemovePersQueueGroup(NIceDb::TNiceDb &db, TPathId pathId);
-    void PersistAddPersQueueGroupAlter(NIceDb::TNiceDb &db, TPathId pathId, const TPersQueueGroupInfo::TPtr);
+    void PersistAddPersQueueGroupAlter(NIceDb::TNiceDb &db, TPathId pathId, const TTopicInfo::TPtr);
     void PersistRemovePersQueueGroupAlter(NIceDb::TNiceDb &db, TPathId pathId);
-    void PersistPersQueue(NIceDb::TNiceDb &db, TPathId pathId, TShardIdx shardIdx, const TPQShardInfo::TPersQueueInfo& pqInfo);
+    void PersistPersQueue(NIceDb::TNiceDb &db, TPathId pathId, TShardIdx shardIdx, const TTopicTabletInfo::TTopicPartitionInfo& pqInfo);
     void PersistRemovePersQueue(NIceDb::TNiceDb &db, TPathId pathId, ui32 pqId);
     void PersistRtmrVolume(NIceDb::TNiceDb &db, TPathId pathId, const TRtmrVolumeInfo::TPtr rtmrVol);
     void PersistRemoveRtmrVolume(NIceDb::TNiceDb &db, TPathId pathId);
@@ -728,6 +712,14 @@ public:
     void PersistInitState(NIceDb::TNiceDb& db);
 
     void PersistStorageBillingTime(NIceDb::TNiceDb& db);
+
+    // ExternalTable
+    void PersistExternalTable(NIceDb::TNiceDb &db, TPathId pathId, const TExternalTableInfo::TPtr externalTable);
+    void PersistRemoveExternalTable(NIceDb::TNiceDb& db, TPathId pathId);
+
+    // ExternalDataSource
+    void PersistExternalDataSource(NIceDb::TNiceDb &db, TPathId pathId, const TExternalDataSourceInfo::TPtr externalDataSource);
+    void PersistRemoveExternalDataSource(NIceDb::TNiceDb& db, TPathId pathId);
 
     TTabletId GetGlobalHive(const TActorContext& ctx) const;
 
@@ -996,10 +988,16 @@ public:
     void Handle(TEvDataShard::TEvSplitAck::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvDataShard::TEvSplitPartitioningChangedAck::TPtr& ev, const TActorContext& ctx);
 
-    void ScheduleStatsBatch(const TActorContext& ctx);
-    void Handle(TEvPrivate::TEvPersistStats::TPtr& ev, const TActorContext& ctx);
+    void ExecuteTableStatsBatch(const TActorContext& ctx);
+    void ScheduleTableStatsBatch(const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvPersistTableStats::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvDataShard::TEvPeriodicTableStats::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvDataShard::TEvGetTableStatsResult::TPtr& ev, const TActorContext& ctx);
+
+    void ExecuteTopicStatsBatch(const TActorContext& ctx);
+    void ScheduleTopicStatsBatch(const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvPersistTopicStats::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPersQueue::TEvPeriodicTopicStats::TPtr& ev, const TActorContext& ctx);
 
     void Handle(TEvSchemeShard::TEvFindTabletSubDomainPathId::TPtr& ev, const TActorContext& ctx);
 

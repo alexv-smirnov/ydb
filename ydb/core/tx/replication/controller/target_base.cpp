@@ -1,13 +1,13 @@
 #include "dst_creator.h"
+#include "dst_remover.h"
 #include "target_base.h"
 #include "util.h"
 
 #include <library/cpp/actors/core/events.h>
 
-namespace NKikimr {
-namespace NReplication {
-namespace NController {
+namespace NKikimr::NReplication::NController {
 
+using ETargetKind = TReplication::ETargetKind;
 using EDstState = TReplication::EDstState;
 using EStreamState = TReplication::EStreamState;
 
@@ -77,6 +77,10 @@ ui64 TTargetBase::GetTargetId() const {
     return TargetId;
 }
 
+ETargetKind TTargetBase::GetTargetKind() const {
+    return Kind;
+}
+
 void TTargetBase::Progress(ui64 schemeShardId, const TActorId& proxy, const TActorContext& ctx) {
     switch (DstState) {
     case EDstState::Creating:
@@ -90,7 +94,11 @@ void TTargetBase::Progress(ui64 schemeShardId, const TActorId& proxy, const TAct
     case EDstState::Ready:
         break; // TODO
     case EDstState::Removing:
-        break; // TODO
+        if (!DstRemover) {
+            DstRemover = ctx.Register(CreateDstRemover(ctx.SelfID, schemeShardId, proxy,
+                ReplicationId, TargetId, DstPathId));
+        }
+        break;
     case EDstState::Error:
         break;
     }
@@ -104,6 +112,4 @@ void TTargetBase::Shutdown(const TActorContext& ctx) {
     }
 }
 
-} // NController
-} // NReplication
-} // NKikimr
+}

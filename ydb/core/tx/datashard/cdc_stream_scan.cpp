@@ -162,7 +162,7 @@ class TDataShard::TTxCdcStreamScanProgress
 {
     TDataShard::TEvPrivate::TEvCdcStreamScanProgress::TPtr Request;
     THolder<TDataShard::TEvPrivate::TEvCdcStreamScanContinue> Response;
-    TVector<NMiniKQL::IChangeCollector::TChange> ChangeRecords;
+    TVector<IDataShardChangeCollector::TChange> ChangeRecords;
 
     static TVector<TRawTypeValue> MakeKey(TArrayRef<const TCell> cells, TUserTable::TCPtr table) {
         TVector<TRawTypeValue> key(Reserve(cells.size()));
@@ -279,7 +279,7 @@ public:
                 .WithBody(body.SerializeAsString())
                 .Build();
 
-            ChangeRecords.push_back(NMiniKQL::IChangeCollector::TChange{
+            ChangeRecords.push_back(IDataShardChangeCollector::TChange{
                 .Order = record.GetOrder(),
                 .Group = record.GetGroup(),
                 .Step = record.GetStep(),
@@ -531,7 +531,7 @@ class TDataShard::TTxCdcStreamScanRun: public TTransactionBase<TDataShard> {
     THolder<IEventHandle> MakeResponse(const TActorContext& ctx,
             NKikimrTxDataShard::TEvCdcStreamScanResponse::EStatus status, const TString& error = {}) const
     {
-        return MakeHolder<IEventHandle>(Request->Sender, ctx.SelfID, new TEvDataShard::TEvCdcStreamScanResponse(
+        return MakeHolder<IEventHandleFat>(Request->Sender, ctx.SelfID, new TEvDataShard::TEvCdcStreamScanResponse(
             Request->Get()->Record, Self->TabletID(), status, error
         ));
     }
@@ -643,7 +643,7 @@ public:
         // Note: cdc stream is added with a schema transaction and those wait for volatile txs
         Y_VERIFY(!Self->GetVolatileTxManager().HasVolatileTxsAtSnapshot(snapshotVersion));
 
-        const ui64 localTxId = ++Self->NextTieBreakerIndex;
+        const ui64 localTxId = Self->NextTieBreakerIndex++;
         auto scan = MakeHolder<TCdcStreamScan>(Self, Request->Sender, localTxId,
             tablePathId, streamPathId, snapshotVersion, valueTags, info->LastKey, info->Stats, record.GetLimits());
         const ui64 scanId = Self->QueueScan(table->LocalTid, scan.Release(), localTxId,

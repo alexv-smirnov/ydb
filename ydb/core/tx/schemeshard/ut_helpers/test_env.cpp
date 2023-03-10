@@ -328,7 +328,7 @@ private:
         LOG_DEBUG_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                     "TFakeMetering:"
                         << " unhandled event type: " << ev->GetTypeRewrite()
-                        << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                        << " event: " << ev->ToString());
     }
 
 private:
@@ -530,6 +530,7 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
     app.SetEnableChangefeedInitialScan(opts.EnableChangefeedInitialScan_);
     app.SetEnableNotNullDataColumns(opts.EnableNotNullDataColumns_);
     app.SetEnableAlterDatabaseCreateHiveFirst(opts.EnableAlterDatabaseCreateHiveFirst_);
+    app.SetEnableTopicDiskSubDomainQuota(opts.EnableTopicDiskSubDomainQuota_);
 
     if (opts.DisableStatsBatching_.value_or(false)) {
         app.SchemeShardConfig.SetStatsMaxBatchSize(0);
@@ -559,6 +560,11 @@ NSchemeShardUT_Private::TTestEnv::TTestEnv(TTestActorRuntime& runtime, const TTe
             runtime.RegisterService(NConsole::MakeConfigsDispatcherID(runtime.GetNodeId(node)),
                 runtime.Register(new TFakeConfigDispatcher(), node), node);
         }
+    }
+
+    if (opts.InitYdbDriver_) {
+        YdbDriver = MakeHolder<NYdb::TDriver>(NYdb::TDriverConfig());
+        runtime.GetAppData().YdbDriver = YdbDriver.Get();
     }
 
     TActorId sender = runtime.AllocateEdgeActor();
@@ -703,7 +709,7 @@ void NSchemeShardUT_Private::TestWaitNotification(NActors::TTestActorRuntime &ru
     for (ui64 txId : txIds) {
         Cerr << Endl << "TestWaitNotification wait txId: " << txId << Endl;
         auto ev = new TEvSchemeShard::TEvNotifyTxCompletion(txId);
-        runtime.Send(new IEventHandle(subscriberActorId, sender, ev));
+        runtime.Send(new IEventHandleFat(subscriberActorId, sender, ev));
     }
 
     TAutoPtr<IEventHandle> handle;
@@ -792,7 +798,7 @@ void NSchemeShardUT_Private::TTestEnv::TestWaitShardDeletion(NActors::TTestActor
 
 void NSchemeShardUT_Private::TTestEnv::SimulateSleep(NActors::TTestActorRuntime &runtime, TDuration duration) {
     auto sender = runtime.AllocateEdgeActor();
-    runtime.Schedule(new IEventHandle(sender, sender, new TEvents::TEvWakeup()), duration);
+    runtime.Schedule(new IEventHandleFat(sender, sender, new TEvents::TEvWakeup()), duration);
     runtime.GrabEdgeEventRethrow<TEvents::TEvWakeup>(sender);
 }
 

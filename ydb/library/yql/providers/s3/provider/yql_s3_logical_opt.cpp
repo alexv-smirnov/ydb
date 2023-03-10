@@ -241,15 +241,13 @@ public:
                             UnpackPathsList(packed, isTextEncoded, paths);
 
                             for (auto& entry : paths) {
-                                const TString path = std::get<0>(entry);
-                                const size_t size = std::get<1>(entry);
-                                if (size > fileSizeLimit) {
+                                if (entry.Size > fileSizeLimit) {
                                     ctx.AddError(TIssue(ctx.GetPosition(batch.Pos()),
-                                        TStringBuilder() << "Size of object " << path << " = " << size << " and exceeds limit = " << fileSizeLimit << " specified for format " << formatName));
+                                        TStringBuilder() << "Size of object " << entry.Path << " = " << entry.Size << " and exceeds limit = " << fileSizeLimit << " specified for format " << formatName));
                                     hasErr = true;
                                     return false;
                                 }
-                                totalSize += size;
+                                totalSize += entry.Size;
                                 ++count;
                             }
                         }
@@ -264,7 +262,9 @@ public:
             return TStatus::Error;
         }
 
-        const auto maxFiles = State_->Configuration->MaxFilesPerQuery;
+        const auto maxFiles = std::max(
+            State_->Configuration->MaxFilesPerQuery,
+            State_->Configuration->MaxDirectoriesAndFilesPerQuery);
         if (count > maxFiles) {
             ctx.AddError(TIssue(ctx.GetPosition(input->Pos()), TStringBuilder() << "Too many objects to read: " << count << ", but limit is " << maxFiles));
             return TStatus::Error;

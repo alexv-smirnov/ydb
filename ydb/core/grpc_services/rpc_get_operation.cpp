@@ -159,7 +159,7 @@ private:
 
         auto request = MakeHolder<NConsole::TEvConsole::TEvGetOperationRequest>();
         request->Record.MutableRequest()->set_id(GetProtoRequest()->id());
-        request->Record.SetUserToken(Request->GetInternalToken());
+        request->Record.SetUserToken(Request->GetSerializedToken());
         NTabletPipe::SendData(ctx, PipeActorId_, request.Release());
     }
 
@@ -283,8 +283,8 @@ private:
     TActorId PipeActorId_;
 };
 
-void DoGetOperationRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TGetOperationRPC(p.release()));
+void DoGetOperationRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TGetOperationRPC(p.release()));
 }
 
 } // namespace NGRpcService

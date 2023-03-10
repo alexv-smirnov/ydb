@@ -13,6 +13,23 @@ namespace NLs {
 
 using namespace NKikimr;
 
+#define DESCRIBE_ASSERT_EQUAL(name, type, expression, description)                                                    \
+    TCheckFunc name(type expected) {                                                                                  \
+        return [=] (const NKikimrScheme::TEvDescribeSchemeResult& record) {                                           \
+            UNIT_ASSERT_C(IsGoodDomainStatus(record.GetStatus()), "Unexpected status: " << record.GetStatus());       \
+                                                                                                                      \
+            const auto& pathDescr = record.GetPathDescription();                                                      \
+            const auto& subdomain = pathDescr.GetDomainDescription();                                                 \
+            const auto& value = expression;                                                                           \
+                                                                                                                      \
+            UNIT_ASSERT_EQUAL_C(value, expected,                                                                      \
+                            description << " mismatch, subdomain with id " << subdomain.GetDomainKey().GetPathId() << \
+                                " has value " << value <<                                                             \
+                                " but expected " << expected);                                                        \
+    };                                                                                                                \
+}
+
+
 void NotInSubdomain(const NKikimrScheme::TEvDescribeSchemeResult& record) {
     UNIT_ASSERT(record.HasPathDescription());
     NKikimrSchemeOp::TPathDescription descr = record.GetPathDescription();
@@ -389,6 +406,20 @@ void IsTable(const NKikimrScheme::TEvDescribeSchemeResult& record) {
     UNIT_ASSERT_VALUES_EQUAL(selfPath.GetPathType(), NKikimrSchemeOp::EPathTypeTable);
 }
 
+void IsExternalTable(const NKikimrScheme::TEvDescribeSchemeResult& record) {
+    UNIT_ASSERT_VALUES_EQUAL(record.GetStatus(), NKikimrScheme::StatusSuccess);
+    const auto& pathDescr = record.GetPathDescription();
+    const auto& selfPath = pathDescr.GetSelf();
+    UNIT_ASSERT_VALUES_EQUAL(selfPath.GetPathType(), NKikimrSchemeOp::EPathTypeExternalTable);
+}
+
+void IsExternalDataSource(const NKikimrScheme::TEvDescribeSchemeResult& record) {
+    UNIT_ASSERT_VALUES_EQUAL(record.GetStatus(), NKikimrScheme::StatusSuccess);
+    const auto& pathDescr = record.GetPathDescription();
+    const auto& selfPath = pathDescr.GetSelf();
+    UNIT_ASSERT_VALUES_EQUAL(selfPath.GetPathType(), NKikimrSchemeOp::EPathTypeExternalDataSource);
+}
+
 TCheckFunc CheckColumns(const TString& name, const TSet<TString>& columns, const TSet<TString>& droppedColumns, const TSet<TString> keyColumns,
                         NKikimrSchemeOp::EPathState pathState) {
     return [=] (const NKikimrScheme::TEvDescribeSchemeResult& record) {
@@ -427,8 +458,9 @@ void CheckBoundaries(const NKikimrScheme::TEvDescribeSchemeResult &record) {
     const NKikimrSchemeOp::TPathDescription& descr = record.GetPathDescription();
     THashMap<ui32, NScheme::TTypeInfo> colTypes;
     for (const auto& col : descr.GetTable().GetColumns()) {
-        colTypes[col.GetId()] = NScheme::TypeInfoFromProtoColumnType(col.GetTypeId(),
+        auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(col.GetTypeId(),
             col.HasTypeInfo() ? &col.GetTypeInfo() : nullptr);
+        colTypes[col.GetId()] = typeInfoMod.TypeInfo;
     }
     TVector<NScheme::TTypeInfo> keyColTypes;
     for (const auto& ki : descr.GetTable().GetKeyColumnIds()) {
@@ -603,6 +635,10 @@ TCheckFunc PQPartitionsInsideDomain(ui64 count) {
                                 " but expected " << count);
     };
 }
+
+DESCRIBE_ASSERT_EQUAL(TopicReservedStorage, ui64, subdomain.GetDiskSpaceUsage().GetTopics().GetReserveSize(), "Topic ReserveSize")
+DESCRIBE_ASSERT_EQUAL(TopicAccountSize, ui64, subdomain.GetDiskSpaceUsage().GetTopics().GetAccountSize(), "Topic AccountSize")
+DESCRIBE_ASSERT_EQUAL(TopicUsedReserveSize, ui64, subdomain.GetDiskSpaceUsage().GetTopics().GetUsedReserveSize(), "Topic UsedReserveSize")
 
 TCheckFunc PathsInsideDomainOneOf(TSet<ui64> variants) {
     return [=] (const NKikimrScheme::TEvDescribeSchemeResult& record) {
@@ -1073,6 +1109,8 @@ TCheckFunc PartitionKeys(TVector<TString> lastShardKeys) {
         }
     };
 }
+
+#undef DESCRIBE_ASSERT_EQUAL
 
 } // NLs
 } // NSchemeShardUT_Private

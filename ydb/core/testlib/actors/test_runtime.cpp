@@ -84,6 +84,11 @@ namespace NActors {
         CleanupNodes();
     }
 
+    void TTestActorRuntime::AddAppDataInit(std::function<void(ui32, NKikimr::TAppData&)> callback) {
+        Y_VERIFY(!IsInitialized, "Actor system is already initialized");
+        AppDataInit_.push_back(std::move(callback));
+    }
+
     void TTestActorRuntime::Initialize(TEgg egg) {
         IsInitialized = true;
 
@@ -147,6 +152,10 @@ namespace NActors {
                 nodeAppData->KeyConfig.CopyFrom(app0->KeyConfig);
             }
 
+            for (auto& callback : AppDataInit_) {
+                callback(nodeIndex, *nodeAppData);
+            }
+
             if (NeedMonitoring && !SingleSysEnv) {
                 ui16 port = GetPortManager().GetPort();
                 node->Mon.Reset(new NActors::TSyncHttpMon({
@@ -168,6 +177,8 @@ namespace NActors {
                 nodeAppData->Mon->Start();
             }
         }
+
+        AppDataInit_.clear();
     }
 
     ui16 TTestActorRuntime::GetMonPort(ui32 nodeIndex) const {
@@ -218,7 +229,7 @@ namespace NActors {
         if (!SleepEdgeActor) {
             SleepEdgeActor = AllocateEdgeActor();
         }
-        Schedule(new IEventHandle(SleepEdgeActor, SleepEdgeActor, new TEvents::TEvWakeup()), duration);
+        Schedule(new IEventHandleFat(SleepEdgeActor, SleepEdgeActor, new TEvents::TEvWakeup()), duration);
         GrabEdgeEventRethrow<TEvents::TEvWakeup>(SleepEdgeActor);
     }
 
@@ -237,7 +248,7 @@ namespace NActors {
 
     void TTestActorRuntime::SendToPipe(TActorId clientId, const TActorId& sender, IEventBase* payload,
                                        ui32 nodeIndex, ui64 cookie) {
-        auto pipeEv = new IEventHandle(clientId, sender, payload, 0, cookie);
+        auto pipeEv = new IEventHandleFat(clientId, sender, payload, 0, cookie);
         pipeEv->Rewrite(NKikimr::TEvTabletPipe::EvSend, clientId);
         Send(pipeEv, nodeIndex, true);
     }
@@ -251,11 +262,11 @@ namespace NActors {
     }
 
     void TTestActorRuntime::ClosePipe(TActorId clientId, const TActorId& sender, ui32 nodeIndex) {
-        Send(new IEventHandle(clientId, sender, new NKikimr::TEvTabletPipe::TEvShutdown()), nodeIndex, true);
+        Send(new IEventHandleFat(clientId, sender, new NKikimr::TEvTabletPipe::TEvShutdown()), nodeIndex, true);
     }
 
     void TTestActorRuntime::DisconnectNodes(ui32 fromNodeIndex, ui32 toNodeIndex, bool async) {
-        Send(new IEventHandle(
+        Send(new IEventHandleFat(
             GetInterconnectProxy(fromNodeIndex, toNodeIndex),
             TActorId(),
             new TEvInterconnect::TEvDisconnect()),

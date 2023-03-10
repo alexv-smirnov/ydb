@@ -17,107 +17,152 @@ using namespace NActors;
 // So, we estimate total memory amount required for task as apriori task size multiplied by this constant.
 constexpr float TASK_MEMORY_ESTIMATION_OVERFLOW = 1.2f;
 
-class TKqpGreedyPlanner : public IKqpPlannerStrategy {
+class TNodesManager {
 public:
-    ~TKqpGreedyPlanner() override {}
+    struct TNodeDesc {
+        ui32 NodeId = std::numeric_limits<ui32>::max();
+        TActorId ResourceManagerId;
+        ui64 RemainsMemory = 0;
+        ui32 RemainsComputeActors = 0;
+        TVector<ui64> Tasks;
+        bool operator < (const TNodeDesc& item) const {
+            return std::tuple(-(i32)Tasks.size(), RemainsMemory, RemainsComputeActors)
+                < std::tuple(-(i32)item.Tasks.size(), item.RemainsMemory, item.RemainsComputeActors);
+        }
 
-    TVector<TResult> Plan(const TVector<NKikimrKqp::TKqpNodeResources>& nodeResources,
-        TVector<TTaskResourceEstimation>&& tasks) override
-    {
-        TVector<TResult> result;
-
-        struct TNodeDesc {
-            ui32 NodeId = std::numeric_limits<ui32>::max();
-            TActorId ResourceManagerId;
-            ui64 RemainsMemory = 0;
-            ui32 RemainsComputeActors = 0;
-            TVector<ui64> Tasks;
-        };
-
-        struct TComp {
-            bool operator ()(const TNodeDesc& l, const TNodeDesc& r) {
-                return r.RemainsMemory > l.RemainsMemory && l.RemainsComputeActors > 0;
+        std::optional<IKqpPlannerStrategy::TResult> BuildResult() {
+            if (Tasks.empty()) {
+                return {};
             }
-        };
+            IKqpPlannerStrategy::TResult item;
+            item.NodeId = NodeId;
+            item.ResourceManager = ResourceManagerId;
+            item.TaskIds.swap(Tasks);
+            return item;
+        }
+    };
+private:
+    std::vector<TNodeDesc> Nodes;
+public:
+    std::vector<TNodeDesc>::iterator begin() {
+        return Nodes.begin();
+    }
+    std::vector<TNodeDesc>::iterator end() {
+        return Nodes.end();
+    }
 
-        TPriorityQueue<TNodeDesc, TVector<TNodeDesc>, TComp> nodes{TComp()};
+    std::optional<TNodeDesc> PopNode() {
+        if (Nodes.empty()) {
+            return {};
+        }
+        std::pop_heap(Nodes.begin(), Nodes.end());
+        auto result = std::move(Nodes.back());
+        Nodes.pop_back();
+        return result;
+    }
 
+    void PushNode(TNodeDesc&& node) {
+        Nodes.emplace_back(std::move(node));
+        std::push_heap(Nodes.begin(), Nodes.end());
+    }
+
+    std::optional<TNodeDesc> PopOptimalNodeWithLimits(const ui64 memoryLimit, const ui32 actorsLimit) {
+        std::vector<TNodeDesc> localNodesWithNotEnoughResources;
+        std::optional<TNodeDesc> result;
+        while (true) {
+            if (Nodes.empty()) {
+                break;
+            }
+            std::pop_heap(Nodes.begin(), Nodes.end());
+            if (Nodes.back().RemainsComputeActors >= actorsLimit && Nodes.back().RemainsMemory >= memoryLimit) {
+                result = std::move(Nodes.back());
+                Nodes.pop_back();
+                break;
+            } else {
+                localNodesWithNotEnoughResources.emplace_back(std::move(Nodes.back()));
+                Nodes.pop_back();
+            }
+        }
+        for (auto&& i : localNodesWithNotEnoughResources) {
+            Nodes.emplace_back(std::move(i));
+            std::push_heap(Nodes.begin(), Nodes.end());
+        }
+        return result;
+    }
+
+    TNodesManager(const TVector<NKikimrKqp::TKqpNodeResources>& nodeResources) {
         for (auto& node : nodeResources) {
-            nodes.emplace(TNodeDesc{
+            if (!node.GetAvailableComputeActors()) {
+                continue;
+            }
+            Nodes.emplace_back(TNodeDesc{
                 node.GetNodeId(),
                 ActorIdFromProto(node.GetResourceManagerActorId()),
                 node.GetTotalMemory() - node.GetUsedMemory(),
                 node.GetAvailableComputeActors(),
                 {}
-            });
+                });
+        }
+        std::make_heap(Nodes.begin(), Nodes.end());
+    }
+};
 
+class TKqpGreedyPlanner : public IKqpPlannerStrategy {
+public:
+    ~TKqpGreedyPlanner() override {}
+
+    TVector<TResult> Plan(const TVector<NKikimrKqp::TKqpNodeResources>& nodeResources,
+        const TVector<TTaskResourceEstimation>& tasks) override
+    {
+        TVector<TResult> result;
+        TNodesManager nodes(nodeResources);
+        for (auto& node : nodeResources) {
             if (LogFunc) {
                 LogFunc(TStringBuilder() << "[AvailableResources] node #" << node.GetNodeId()
                     << " memory: " << (node.GetTotalMemory() - node.GetUsedMemory())
                     << ", ca: " << node.GetAvailableComputeActors());
             }
         }
-
-        Sort(tasks, [](const auto& l, const auto& r) { return l.TotalMemoryLimit > r.TotalMemoryLimit; });
-
         if (LogFunc) {
-            for (auto& task : tasks) {
+            for (const auto& task : tasks) {
                 LogFunc(TStringBuilder() << "[TaskResources] task: " << task.TaskId << ", memory: " << task.TotalMemoryLimit);
             }
         }
 
-        for (auto& taskEstimation : tasks) {
-            TNodeDesc node = nodes.top();
-
-            if (node.RemainsComputeActors > 0 &&
-                node.RemainsMemory > taskEstimation.TotalMemoryLimit * TASK_MEMORY_ESTIMATION_OVERFLOW)
-            {
-                nodes.pop();
-                node.RemainsComputeActors--;
-                node.RemainsMemory -= taskEstimation.TotalMemoryLimit * TASK_MEMORY_ESTIMATION_OVERFLOW;
-                node.Tasks.push_back(taskEstimation.TaskId);
-
-                if (LogFunc) {
-                    LogFunc(TStringBuilder() << "Schedule task: " << taskEstimation.TaskId
-                        << " (" << taskEstimation.TotalMemoryLimit << " bytes) "
-                        << "to node #" << node.NodeId << ". "
-                        << "Remains memory: " << node.RemainsMemory << ", ca: " << node.RemainsComputeActors);
-                }
-
-                nodes.emplace(std::move(node));
-            } else {
+        for (const auto& taskEstimation : tasks) {
+            auto node = nodes.PopOptimalNodeWithLimits(taskEstimation.TotalMemoryLimit * TASK_MEMORY_ESTIMATION_OVERFLOW, 1);
+            if (!node) {
                 if (LogFunc) {
                     TStringBuilder err;
                     err << "Not enough resources to execute query. Task " << taskEstimation.TaskId
-                        << " (" << taskEstimation.TotalMemoryLimit << " bytes) "
-                        << "Node: " << node.NodeId << ", remains memory: " << node.RemainsMemory
-                        << ", ca: " << node.RemainsComputeActors;
+                        << " (" << taskEstimation.TotalMemoryLimit << " bytes) ";
 
                     LogFunc(err);
                 }
-
                 return result;
+            } else {
+                if (LogFunc) {
+                    LogFunc(TStringBuilder() << "Schedule task: " << taskEstimation.TaskId
+                        << " (" << taskEstimation.TotalMemoryLimit << " bytes) "
+                        << "to node #" << node->NodeId << ". "
+                        << "Remains memory: " << node->RemainsMemory << ", ca: " << node->RemainsComputeActors);
+                }
+                node->RemainsMemory -= taskEstimation.TotalMemoryLimit * TASK_MEMORY_ESTIMATION_OVERFLOW;
+                node->Tasks.emplace_back(taskEstimation.TaskId);
+                --node->RemainsComputeActors;
+                nodes.PushNode(std::move(*node));
             }
         }
 
-        while (!nodes.empty()) {
-            TNodeDesc node = nodes.top();
-            nodes.pop();
-
-            if (node.Tasks.empty()) {
-                continue;
+        while (auto node = nodes.PopNode()) {
+            auto resultNode = node->BuildResult();
+            if (resultNode) {
+                if (LogFunc) {
+                    LogFunc(TStringBuilder() << "About to execute tasks [" << JoinSeq(", ", resultNode->TaskIds) << "]"
+                        << " on node " << resultNode->NodeId);
+                }
+                result.emplace_back(std::move(*resultNode));
             }
-
-            if (LogFunc) {
-                LogFunc(TStringBuilder() << "About to execute tasks [" << JoinSeq(", ", node.Tasks) << "]"
-                    << " on node " << node.NodeId);
-            }
-
-            result.push_back({});
-            TResult& item = result.back();
-            item.NodeId = node.NodeId;
-            item.ResourceManager = node.ResourceManagerId;
-            item.TaskIds.swap(node.Tasks);
         }
 
         return result;

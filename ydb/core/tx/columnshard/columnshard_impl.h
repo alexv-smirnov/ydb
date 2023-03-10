@@ -109,6 +109,7 @@ class TColumnShard
     void Handle(TEvTabletPipe::TEvServerConnected::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvTabletPipe::TEvServerDisconnected::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvColumnShard::TEvProposeTransaction::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvColumnShard::TEvCheckPlannedTransaction::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvColumnShard::TEvCancelTransactionProposal::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvColumnShard::TEvNotifyTxCompletion::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvTxProcessing::TEvPlanStep::TPtr& ev, const TActorContext& ctx);
@@ -196,8 +197,8 @@ protected:
         default:
             LOG_S_WARN("TColumnShard.StateBroken at " << TabletID()
                        << " unhandled event type: " << ev->GetTypeRewrite()
-                       << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
-            ctx.Send(ev->ForwardOnNondelivery(TEvents::TEvUndelivered::ReasonActorUnknown));
+                       << " event: " << ev->ToString());
+            ctx.Send(IEventHandle::ForwardOnNondelivery(ev, TEvents::TEvUndelivered::ReasonActorUnknown));
             break;
         }
     }
@@ -212,6 +213,7 @@ protected:
             HFunc(TEvTabletPipe::TEvServerConnected, Handle);
             HFunc(TEvTabletPipe::TEvServerDisconnected, Handle);
             HFunc(TEvColumnShard::TEvProposeTransaction, Handle);
+            HFunc(TEvColumnShard::TEvCheckPlannedTransaction, Handle);
             HFunc(TEvColumnShard::TEvCancelTransactionProposal, Handle);
             HFunc(TEvColumnShard::TEvNotifyTxCompletion, Handle);
             HFunc(TEvColumnShard::TEvScan, Handle);
@@ -232,7 +234,7 @@ protected:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_S_WARN("TColumnShard.StateWork at " << TabletID()
                            << " unhandled event type: "<< ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
             }
             break;
         }
@@ -365,15 +367,14 @@ private:
     std::unique_ptr<NOlap::TInsertTable> InsertTable;
     std::unique_ptr<NOlap::IColumnEngine> PrimaryIndex;
     TBatchCache BatchCache;
-    THashSet<NOlap::TUnifiedBlobId> DelayedForgetBlobs;
     TTtl Ttl;
 
     THashMap<ui64, TBasicTxInfo> BasicTxInfo;
     TSet<TDeadlineQueueItem> DeadlineQueue;
-    TSet<TPlanQueueItem> PlanQueue;
+    std::set<TPlanQueueItem> PlanQueue;
+    std::set<TPlanQueueItem> RunningQueue;
     bool ProgressTxInFlight = false;
     THashMap<ui64, TInstant> ScanTxInFlight;
-
     THashMap<ui64, TAlterMeta> AltersInFlight;
     THashMap<ui64, TCommitMeta> CommitsInFlight; // key is TxId from propose
     THashMap<ui32, TSchemaPreset> SchemaPresets;
@@ -452,10 +453,10 @@ private:
     NOlap::TIndexInfo ConvertSchema(const NKikimrSchemeOp::TColumnTableSchema& schema);
     void MapExternBlobs(const TActorContext& ctx, NOlap::TReadMetadata& metadata);
     TActorId GetS3ActorForTier(const TString& tierId) const;
-    void ExportBlobs(const TActorContext& ctx, ui64 exportNo, const TString& tierName,
+    void ExportBlobs(const TActorContext& ctx, ui64 exportNo, const TString& tierName, ui64 pathId,
         TEvPrivate::TEvExport::TBlobDataMap&& blobsInfo) const;
-    void ForgetBlobs(const TActorContext& ctx, const TString& tierName, std::vector<NOlap::TEvictedBlob>&& blobs) const;
-    void ForgetBlobs(const TActorContext& ctx, const THashSet<TUnifiedBlobId>& blobs);
+    void ForgetTierBlobs(const TActorContext& ctx, const TString& tierName, std::vector<NOlap::TEvictedBlob>&& blobs) const;
+    void ForgetBlobs(const TActorContext& ctx, const THashSet<NOlap::TEvictedBlob>& blobs);
     bool GetExportedBlob(const TActorContext& ctx, TActorId dst, ui64 cookie, const TString& tierName,
                          NOlap::TEvictedBlob&& evicted, std::vector<NOlap::TBlobRange>&& ranges);
 

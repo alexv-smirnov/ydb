@@ -96,7 +96,9 @@ namespace {
     template <typename TRequest, typename TEvRequest, typename TDerived>
     class TDbResolver: public TActorBootstrapped<TDerived> {
         void Handle() {
-            TlsActivationContext->Send(new IEventHandle(Cache, Sender, new TEvRequest(Request.Release())));
+            auto req = new TEvRequest(Request.Release());
+            req->PrepareSend(Cache, Sender);
+            TlsActivationContext->Send(req);
             this->PassAway();
         }
 
@@ -736,6 +738,8 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
             SequenceInfo.Drop();
             ReplicationInfo.Drop();
             BlobDepotInfo.Drop();
+            ExternalTableInfo.Drop();
+            ExternalDataSourceInfo.Drop();
         }
 
         void FillTableInfo(const NKikimrSchemeOp::TPathDescription& pathDesc) {
@@ -745,8 +749,11 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
                 auto& column = Columns[columnDesc.GetId()];
                 column.Id = columnDesc.GetId();
                 column.Name = columnDesc.GetName();
-                column.PType = NScheme::TypeInfoFromProtoColumnType(columnDesc.GetTypeId(),
+                auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(columnDesc.GetTypeId(),
                     columnDesc.HasTypeInfo() ? &columnDesc.GetTypeInfo() : nullptr);
+                column.PType = typeInfoMod.TypeInfo;
+                column.PTypeMod = typeInfoMod.TypeMod;
+
                 if (columnDesc.GetNotNull()) {
                     NotNullColumns.insert(columnDesc.GetName());
                 }
@@ -806,8 +813,10 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
                 auto& column = Columns[columnDesc.GetId()];
                 column.Id = columnDesc.GetId();
                 column.Name = columnDesc.GetName();
-                column.PType = NScheme::TypeInfoFromProtoColumnType(columnDesc.GetTypeId(),
+                auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(columnDesc.GetTypeId(),
                     columnDesc.HasTypeInfo() ? &columnDesc.GetTypeInfo() : nullptr);
+                column.PType = typeInfoMod.TypeInfo;
+                column.PTypeMod = typeInfoMod.TypeMod;
                 nameToId[column.Name] = column.Id;
                 if (columnDesc.GetNotNull()) {
                     NotNullColumns.insert(columnDesc.GetName());
@@ -1148,8 +1157,8 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
                     root.WriteKey(#name).UnsafeWriteValue(ProtoJsonString(name->Description)); \
                 }
 
-            DESCRIPTION_PART(DomainDescription)
-            DESCRIPTION_PART(RtmrVolumeInfo)
+            DESCRIPTION_PART(DomainDescription);
+            DESCRIPTION_PART(RtmrVolumeInfo);
             DESCRIPTION_PART(KesusInfo);
             DESCRIPTION_PART(SolomonVolumeInfo);
             DESCRIPTION_PART(PQGroupInfo);
@@ -1159,6 +1168,8 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
             DESCRIPTION_PART(SequenceInfo);
             DESCRIPTION_PART(ReplicationInfo);
             DESCRIPTION_PART(BlobDepotInfo);
+            DESCRIPTION_PART(ExternalTableInfo);
+            DESCRIPTION_PART(ExternalDataSourceInfo);
 
             #undef DESCRIPTION_PART
 
@@ -1465,6 +1476,14 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
                 Kind = TNavigate::KindBlobDepot;
                 FillInfo(Kind, BlobDepotInfo, std::move(*pathDesc.MutableBlobDepotDescription()));
                 break;
+            case NKikimrSchemeOp::EPathTypeExternalTable:
+                Kind = TNavigate::KindExternalTable;
+                FillInfo(Kind, ExternalTableInfo, std::move(*pathDesc.MutableExternalTableDescription()));
+                break;
+            case NKikimrSchemeOp::EPathTypeExternalDataSource:
+                Kind = TNavigate::KindExternalDataSource;
+                FillInfo(Kind, ExternalDataSourceInfo, std::move(*pathDesc.MutableExternalDataSourceDescription()));
+                break;
             case NKikimrSchemeOp::EPathTypeInvalid:
                 Y_VERIFY_DEBUG(false, "Invalid path type");
                 break;
@@ -1521,6 +1540,12 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
                         break;
                     case NKikimrSchemeOp::EPathTypeBlobDepot:
                         ListNodeEntry->Children.emplace_back(name, pathId, TNavigate::KindBlobDepot);
+                        break;
+                    case NKikimrSchemeOp::EPathTypeExternalTable:
+                        ListNodeEntry->Children.emplace_back(name, pathId, TNavigate::KindExternalTable);
+                        break;
+                    case NKikimrSchemeOp::EPathTypeExternalDataSource:
+                        ListNodeEntry->Children.emplace_back(name, pathId, TNavigate::KindExternalDataSource);
                         break;
                     case NKikimrSchemeOp::EPathTypeTableIndex:
                     case NKikimrSchemeOp::EPathTypeInvalid:
@@ -1730,6 +1755,8 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
             entry.SequenceInfo = SequenceInfo;
             entry.ReplicationInfo = ReplicationInfo;
             entry.BlobDepotInfo = BlobDepotInfo;
+            entry.ExternalTableInfo = ExternalTableInfo;
+            entry.ExternalDataSourceInfo = ExternalDataSourceInfo;
         }
 
         bool CheckColumns(TResolveContext* context, TResolve::TEntry& entry,
@@ -2003,6 +2030,12 @@ class TSchemeCache: public TMonitorableActor<TSchemeCache> {
 
         // BlobDepot specific
         TIntrusivePtr<TNavigate::TBlobDepotInfo> BlobDepotInfo;
+
+        // ExternalTable specific
+        TIntrusivePtr<TNavigate::TExternalTableInfo> ExternalTableInfo;
+
+        // ExternalDataSource specific
+        TIntrusivePtr<TNavigate::TExternalDataSourceInfo> ExternalDataSourceInfo;
 
     }; // TCacheItem
 

@@ -18,6 +18,8 @@ namespace NKikimr::NPersQueueTests {
 
 
 
+
+
 #define SET_LOCALS                                              \
     auto& pqClient = server.Server->AnnoyingClient;             \
     Y_UNUSED(pqClient);                                         \
@@ -34,17 +36,26 @@ namespace NKikimr::NPersQueueTests {
 
     class TPersQueueV1TestServerBase {
     public:
+        TPersQueueV1TestServerBase(bool tenantModeEnabled = false)
+            : TenantMode(tenantModeEnabled)
+        {}
+
         virtual void AlterSettings(NKikimr::Tests::TServerSettings& settings) {
             Y_UNUSED(settings);
         }
+
+
         void InitializePQ() {
             Y_VERIFY(Server == nullptr);
             PortManager = new TPortManager();
             Server = MakeHolder<NPersQueue::TTestServer>(false, PortManager);
             Server->ServerSettings.PQConfig.SetTopicsAreFirstClassCitizen(TenantModeEnabled());
             Server->ServerSettings.PQConfig.MutablePQDiscoveryConfig()->SetLBFrontEnabled(true);
+            Server->ServerSettings.PQConfig.SetACLRetryTimeoutSec(1);
+
             AlterSettings(Server->ServerSettings);
             Server->StartServer(false);
+
             if (TenantModeEnabled()) {
                 Server->AnnoyingClient->SetNoConfigMode();
                 Server->ServerSettings.PQConfig.SetSourceIdTablePath("some unused path");
@@ -54,6 +65,7 @@ namespace NKikimr::NPersQueueTests {
             EnablePQLogs({NKikimrServices::PQ_READ_PROXY, NKikimrServices::PQ_WRITE_PROXY, NKikimrServices::FLAT_TX_SCHEMESHARD});
             EnablePQLogs({NKikimrServices::PERSQUEUE}, NLog::EPriority::PRI_INFO);
             EnablePQLogs({NKikimrServices::KQP_PROXY}, NLog::EPriority::PRI_EMERG);
+
 
             Server->AnnoyingClient->FullInit();
             Server->AnnoyingClient->CreateConsumer("user");
@@ -126,8 +138,8 @@ namespace NKikimr::NPersQueueTests {
         }
 
     public:
-        static bool TenantModeEnabled() {
-            return !GetEnv("PERSQUEUE_NEW_SCHEMECACHE").empty();
+        bool TenantModeEnabled() const {
+            return TenantMode;
         }
 
         void ModifyTopicACL(const TString& topic, const NACLib::TDiffACL& acl) {
@@ -158,6 +170,7 @@ namespace NKikimr::NPersQueueTests {
         }
 
     public:
+        const bool TenantMode;
         THolder<NPersQueue::TTestServer> Server;
         TSimpleSharedPtr<TPortManager> PortManager;
         std::shared_ptr<grpc::Channel> InsecureChannel;
@@ -169,8 +182,9 @@ namespace NKikimr::NPersQueueTests {
 
     class TPersQueueV1TestServer : public TPersQueueV1TestServerBase {
     public:
-        TPersQueueV1TestServer(bool checkAcl = false)
-            : CheckACL(checkAcl)
+        TPersQueueV1TestServer(bool checkAcl = false, bool tenantModeEnabled = false)
+            : TPersQueueV1TestServerBase(tenantModeEnabled)
+            , CheckACL(checkAcl)
         {
             InitAll();
         }
@@ -191,8 +205,8 @@ namespace NKikimr::NPersQueueTests {
     private:
         NKikimrPQ::TPQConfig::TQuotingConfig::ELimitedEntity LimitedEntity;
     public:
-        TPersQueueV1TestServerWithRateLimiter()
-            : TPersQueueV1TestServerBase()
+        TPersQueueV1TestServerWithRateLimiter(bool tenantModeEnabled = false)
+            : TPersQueueV1TestServerBase(tenantModeEnabled)
         {}
 
         void AlterSettings(NKikimr::Tests::TServerSettings& settings) override {

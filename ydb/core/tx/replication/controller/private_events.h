@@ -7,23 +7,26 @@
 #include <ydb/core/base/pathid.h>
 #include <ydb/core/protos/flat_tx_scheme.pb.h>
 
-namespace NKikimr {
-namespace NReplication {
-namespace NController {
+namespace NKikimr::NReplication::NController {
 
 struct TEvPrivate {
     enum EEv {
-        EvDiscoveryResult = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
+        EvDiscoveryTargetsResult = EventSpaceBegin(TKikimrEvents::ES_PRIVATE),
         EvAssignStreamName,
         EvCreateStreamResult,
         EvCreateDstResult,
+        EvDropStreamResult,
+        EvDropDstResult,
+        EvDropReplication,
+        EvResolveTenantResult,
+        EvUpdateTenantNodes,
 
         EvEnd,
     };
 
     static_assert(EvEnd < EventSpaceEnd(TKikimrEvents::ES_PRIVATE), "expect EvEnd < EventSpaceEnd(TKikimrEvents::ES_PRIVATE)");
 
-    struct TEvDiscoveryResult: public TEventLocal<TEvDiscoveryResult, EvDiscoveryResult> {
+    struct TEvDiscoveryTargetsResult: public TEventLocal<TEvDiscoveryTargetsResult, EvDiscoveryTargetsResult> {
         using TAddEntry = std::pair<NYdb::NScheme::TSchemeEntry, TString>; // src, dst
         using TFailedEntry = std::pair<TString, NYdb::TStatus>; // src, error
 
@@ -32,8 +35,8 @@ struct TEvPrivate {
         TVector<ui64> ToDelete;
         TVector<TFailedEntry> Failed;
 
-        explicit TEvDiscoveryResult(ui64 rid, TVector<TAddEntry>&& toAdd, TVector<ui64>&& toDel);
-        explicit TEvDiscoveryResult(ui64 rid, TVector<TFailedEntry>&& failed);
+        explicit TEvDiscoveryTargetsResult(ui64 rid, TVector<TAddEntry>&& toAdd, TVector<ui64>&& toDel);
+        explicit TEvDiscoveryTargetsResult(ui64 rid, TVector<TFailedEntry>&& failed);
         TString ToString() const override;
 
         bool IsSuccess() const;
@@ -72,8 +75,56 @@ struct TEvPrivate {
         bool IsSuccess() const;
     };
 
+    struct TEvDropStreamResult: public TEventLocal<TEvDropStreamResult, EvDropStreamResult> {
+        const ui64 ReplicationId;
+        const ui64 TargetId;
+        const NYdb::TStatus Status;
+
+        explicit TEvDropStreamResult(ui64 rid, ui64 tid, NYdb::TStatus&& status);
+        TString ToString() const override;
+
+        bool IsSuccess() const;
+    };
+
+    struct TEvDropDstResult: public TEventLocal<TEvDropDstResult, EvDropDstResult> {
+        const ui64 ReplicationId;
+        const ui64 TargetId;
+        const NKikimrScheme::EStatus Status;
+        const TString Error;
+
+        explicit TEvDropDstResult(ui64 rid, ui64 tid,
+            NKikimrScheme::EStatus status = NKikimrScheme::StatusSuccess, const TString& error = {});
+        TString ToString() const override;
+
+        bool IsSuccess() const;
+    };
+
+    struct TEvDropReplication: public TEventLocal<TEvDropReplication, EvDropReplication> {
+        const ui64 ReplicationId;
+
+        explicit TEvDropReplication(ui64 rid);
+        TString ToString() const override;
+    };
+
+    struct TEvResolveTenantResult: public TEventLocal<TEvResolveTenantResult, EvResolveTenantResult> {
+        const ui64 ReplicationId;
+        const TString Tenant;
+        const bool Success;
+
+        explicit TEvResolveTenantResult(ui64 rid, const TString& tenant);
+        explicit TEvResolveTenantResult(ui64 rid, bool success);
+        TString ToString() const override;
+
+        bool IsSuccess() const;
+    };
+
+    struct TEvUpdateTenantNodes: public TEventLocal<TEvUpdateTenantNodes, EvUpdateTenantNodes> {
+        const TString Tenant;
+
+        explicit TEvUpdateTenantNodes(const TString& tenant);
+        TString ToString() const override;
+    };
+
 }; // TEvPrivate
 
-} // NController
-} // NReplication
-} // NKikimr
+}

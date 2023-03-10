@@ -241,6 +241,7 @@ protected:
         if (taskCounters) {
             MkqlMemoryQuota = taskCounters->GetCounter("MkqlMemoryQuota");
             OutputChannelSize = taskCounters->GetCounter("OutputChannelSize");
+            SourceCpuTimeMs = taskCounters->GetCounter("SourceCpuTimeMs", true);
         }
     }
 
@@ -252,13 +253,7 @@ protected:
     }
 
     TString GetEventTypeString(TAutoPtr<::NActors::IEventHandle>& ev) {
-        try {
-            if (NActors::IEventBase* eventBase = ev->GetBase()) {
-                return eventBase->ToStringHeader();
-            }
-        } catch (...) {
-        }
-        return "Unknown type";
+        return ev->GetTypeName();
     }
 
     template <auto FuncBody>
@@ -283,21 +278,21 @@ protected:
         ReportEventElapsedTime();
     }
 
-    STFUNC(BaseStateFuncBody) {
+    STATEFN(BaseStateFuncBody) {
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvDqCompute::TEvResumeExecution, HandleExecuteBase);
             hFunc(TEvDqCompute::TEvChannelsInfo, HandleExecuteBase);
             hFunc(TEvDq::TEvAbortExecution, HandleExecuteBase);
             hFunc(NActors::TEvents::TEvWakeup, HandleExecuteBase);
             hFunc(NActors::TEvents::TEvUndelivered, HandleExecuteBase);
-            FFunc(TEvDqCompute::TEvChannelData::EventType, Channels->Receive);
-            FFunc(TEvDqCompute::TEvChannelDataAck::EventType, Channels->Receive);
+            fFunc(TEvDqCompute::TEvChannelData::EventType, Channels->Receive);
+            fFunc(TEvDqCompute::TEvChannelDataAck::EventType, Channels->Receive);
             hFunc(TEvDqCompute::TEvRun, HandleExecuteBase);
             hFunc(TEvDqCompute::TEvStateRequest, HandleExecuteBase);
             hFunc(TEvDqCompute::TEvNewCheckpointCoordinator, HandleExecuteBase);
-            FFunc(TEvDqCompute::TEvInjectCheckpoint::EventType, Checkpoints->Receive);
-            FFunc(TEvDqCompute::TEvCommitState::EventType, Checkpoints->Receive);
-            FFunc(TEvDqCompute::TEvRestoreFromCheckpoint::EventType, Checkpoints->Receive);
+            fFunc(TEvDqCompute::TEvInjectCheckpoint::EventType, Checkpoints->Receive);
+            fFunc(TEvDqCompute::TEvCommitState::EventType, Checkpoints->Receive);
+            fFunc(TEvDqCompute::TEvRestoreFromCheckpoint::EventType, Checkpoints->Receive);
             hFunc(NActors::TEvInterconnect::TEvNodeDisconnected, HandleExecuteBase);
             hFunc(NActors::TEvInterconnect::TEvNodeConnected, HandleExecuteBase);
             hFunc(IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived, OnNewAsyncInputDataArrived);
@@ -502,15 +497,15 @@ protected:
         }
 
         if (Channels) {
-            TAutoPtr<NActors::IEventHandle> handle = new NActors::IEventHandle(Channels->SelfId(), this->SelfId(),
+            TAutoPtr<NActors::IEventHandle> handle = new NActors::IEventHandleFat(Channels->SelfId(), this->SelfId(),
                 new NActors::TEvents::TEvPoison);
-            Channels->Receive(handle, NActors::TActivationContext::AsActorContext());
+            Channels->Receive(handle);
         }
 
         if (Checkpoints) {
-            TAutoPtr<NActors::IEventHandle> handle = new NActors::IEventHandle(Checkpoints->SelfId(), this->SelfId(),
+            TAutoPtr<NActors::IEventHandle> handle = new NActors::IEventHandleFat(Checkpoints->SelfId(), this->SelfId(),
                 new NActors::TEvents::TEvPoison);
-            Checkpoints->Receive(handle, NActors::TActivationContext::AsActorContext());
+            Checkpoints->Receive(handle);
         }
 
         {
@@ -1198,7 +1193,7 @@ protected:
         // Event from coordinator should be processed to confirm seq no.
         TAutoPtr<NActors::IEventHandle> iev(ev.Release());
         if (Checkpoints) {
-            Checkpoints->Receive(iev, NActors::TActivationContext::AsActorContext());
+            Checkpoints->Receive(iev);
         }
     }
 
@@ -1223,8 +1218,8 @@ protected:
             Checkpoints->Init(this->SelfId(), this->RegisterWithSameMailbox(Checkpoints));
             Channels->SetCheckpointsSupport();
         }
-        TAutoPtr<NActors::IEventHandle> handle = new NActors::IEventHandle(Checkpoints->SelfId(), ev->Sender, ev->Release().Release());
-        Checkpoints->Receive(handle, NActors::TActivationContext::AsActorContext());
+        TAutoPtr<NActors::IEventHandle> handle = new NActors::IEventHandleFat(Checkpoints->SelfId(), ev->Sender, ev->Release().Release());
+        Checkpoints->Receive(handle);
     }
 
     void HandleExecuteBase(TEvDq::TEvAbortExecution::TPtr& ev) {
@@ -1256,14 +1251,14 @@ protected:
     void HandleExecuteBase(NActors::TEvInterconnect::TEvNodeDisconnected::TPtr& ev) {
         TAutoPtr<NActors::IEventHandle> iev(ev.Release());
         if (Checkpoints) {
-            Checkpoints->Receive(iev, NActors::TActivationContext::AsActorContext());
+            Checkpoints->Receive(iev);
         }
     }
 
     void HandleExecuteBase(NActors::TEvInterconnect::TEvNodeConnected::TPtr& ev) {
         TAutoPtr<NActors::IEventHandle> iev(ev.Release());
         if (Checkpoints) {
-            Checkpoints->Receive(iev, NActors::TActivationContext::AsActorContext());
+            Checkpoints->Receive(iev);
         }
     }
 
@@ -1627,7 +1622,7 @@ protected:
         Y_VERIFY(!TaskRunner || info.Buffer);
 
         if (info.Finished) {
-            CA_LOG_D("Skip polling async input[" << inputIndex << "]: finished");
+            CA_LOG_T("Skip polling async input[" << inputIndex << "]: finished");
             return;
         }
 
@@ -1670,7 +1665,7 @@ protected:
 
             AsyncInputPush(std::move(batch), info, space, finished);
         } else {
-            CA_LOG_D("Skip polling async input[" << inputIndex << "]: no free space: " << freeSpace);
+            CA_LOG_T("Skip polling async input[" << inputIndex << "]: no free space: " << freeSpace);
             ContinueExecute(); // If there is no free space in buffer, => we have something to process
         }
     }
@@ -1695,6 +1690,11 @@ protected:
 
     void OnNewAsyncInputDataArrived(const IDqComputeActorAsyncInput::TEvNewAsyncInputDataArrived::TPtr& ev) {
         Y_VERIFY(SourcesMap.FindPtr(ev->Get()->InputIndex) || InputTransformsMap.FindPtr(ev->Get()->InputIndex));
+        auto cpuTimeDelta = TakeSourceCpuTimeDelta();
+        if (SourceCpuTimeMs) {
+            SourceCpuTimeMs->Add(cpuTimeDelta.MilliSeconds());
+        }
+        CpuTimeSpent += cpuTimeDelta;
         ContinueExecute();
     }
 
@@ -1880,6 +1880,22 @@ private:
     }
 
 public:
+
+    TDuration GetSourceCpuTime() const {
+        auto result = TDuration::Zero();
+        for (auto& [inputIndex, sourceInfo] : SourcesMap) {
+            result += sourceInfo.AsyncInput->GetCpuTime();
+        }
+        return result;
+    }
+
+    TDuration TakeSourceCpuTimeDelta() {
+        auto newSourceCpuTime = GetSourceCpuTime();
+        auto result = newSourceCpuTime - SourceCpuTime;
+        SourceCpuTime = newSourceCpuTime;
+        return result;
+    }
+
     void FillStats(NDqProto::TDqComputeActorStats* dst, bool last) {
         if (!BasicStats) {
             return;
@@ -1931,6 +1947,7 @@ public:
             // More accurate cpu time counter:
             if (TDerived::HasAsyncTaskRunner) {
                 protoTask->SetCpuTimeUs(BasicStats->CpuTime.MicroSeconds() + taskStats->ComputeCpuTime.MicroSeconds() + taskStats->BuildCpuTime.MicroSeconds());
+                protoTask->SetSourceCpuTimeUs(SourceCpuTime.MicroSeconds());
             }
 
             for (auto& [outputIndex, sinkInfo] : SinksMap) {
@@ -1973,10 +1990,10 @@ public:
                     protoTransform->SetIngressBytes(ingressBytes);
 
                     protoTransform->SetMaxMemoryUsage(transformStats->MaxMemoryUsage);
+                }
 
-                    if (auto* transform = transformInfo.AsyncInput) {
-                        transform->FillExtraStats(protoTask, last);
-                    }
+                if (auto* transform = transformInfo.AsyncInput) {
+                    transform->FillExtraStats(protoTask, last);
                 }
             }
 
@@ -2113,6 +2130,7 @@ protected:
     ::NMonitoring::TDynamicCounterPtr TaskCounters;
     TDqComputeActorMetrics DqComputeActorMetrics;
     NWilson::TSpan ComputeActorSpan;
+    TDuration SourceCpuTime;
 private:
     bool Running = true;
     TInstant LastSendStatsTime;
@@ -2120,7 +2138,9 @@ private:
 protected:
     ::NMonitoring::TDynamicCounters::TCounterPtr MkqlMemoryQuota;
     ::NMonitoring::TDynamicCounters::TCounterPtr OutputChannelSize;
+    ::NMonitoring::TDynamicCounters::TCounterPtr SourceCpuTimeMs;
     THolder<NYql::TCounters> Stat;
+    TDuration CpuTimeSpent;
 };
 
 } // namespace NYql

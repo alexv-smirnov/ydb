@@ -1,4 +1,6 @@
 #include "read_balancer.h"
+
+#include <ydb/core/persqueue/events/internal.h>
 #include <ydb/core/tablet/tablet_exception.h>
 #include <library/cpp/monlib/service/pages/templates.h>
 #include <library/cpp/string_utils/base64/base64.h>
@@ -199,6 +201,9 @@ TString TPersQueueReadBalancer::GenerateStat() {
             TAG(TH3) {str << "[Total/Max/Avg]WriteSpeedMin: " << TotalAvgSpeedMin << "/" << MaxAvgSpeedMin << "/" << TotalAvgSpeedMin / NumActiveParts;}
             TAG(TH3) {str << "[Total/Max/Avg]WriteSpeedHour: " << TotalAvgSpeedHour << "/" << MaxAvgSpeedHour << "/" << TotalAvgSpeedHour / NumActiveParts;}
             TAG(TH3) {str << "[Total/Max/Avg]WriteSpeedDay: " << TotalAvgSpeedDay << "/" << MaxAvgSpeedDay << "/" << TotalAvgSpeedDay / NumActiveParts;}
+            TAG(TH3) {str << "TotalDataSize: " << TotalDataSize;}
+            TAG(TH3) {str << "ReserveSize: " << PartitionReserveSize();}
+            TAG(TH3) {str << "TotalUsedReserveSize: " << TotalUsedReserveSize;}
         }
 
         UL_CLASS("nav nav-tabs") {
@@ -624,15 +629,10 @@ void TPersQueueReadBalancer::RestartPipe(const ui64 tabletId, const TActorContex
     }
 }
 
-
-void TPersQueueReadBalancer::RequestTabletIfNeeded(const ui64 tabletId, const TActorContext& ctx)
-{
-    if ((tabletId == SchemeShardId && !WaitingForACL) ||
-        (tabletId != SchemeShardId && !WaitingForStat.contains(tabletId)))
-        return;
+TActorId TPersQueueReadBalancer::GetPipeClient(const ui64 tabletId, const TActorContext& ctx) {
+    TActorId pipeClient;
 
     auto it = TabletPipes.find(tabletId);
-    TActorId pipeClient;
     if (it == TabletPipes.end()) {
         NTabletPipe::TClientConfig clientConfig;
         pipeClient = ctx.RegisterWithSameMailbox(NTabletPipe::CreateClient(ctx.SelfID, tabletId, clientConfig));
@@ -640,10 +640,22 @@ void TPersQueueReadBalancer::RequestTabletIfNeeded(const ui64 tabletId, const TA
     } else {
         pipeClient = it->second;
     }
+
+    return pipeClient;
+}
+
+void TPersQueueReadBalancer::RequestTabletIfNeeded(const ui64 tabletId, const TActorContext& ctx)
+{
+    if ((tabletId == SchemeShardId && !WaitingForACL) ||
+        (tabletId != SchemeShardId && !WaitingForStat.contains(tabletId)))
+        return;
+
+    TActorId pipeClient = GetPipeClient(tabletId, ctx);
     if (tabletId == SchemeShardId) {
         NTabletPipe::SendData(ctx, pipeClient, new NSchemeShard::TEvSchemeShard::TEvDescribeScheme(tabletId, PathId));
     } else {
         NTabletPipe::SendData(ctx, pipeClient, new TEvPersQueue::TEvStatus());
+        NTabletPipe::SendData(ctx, pipeClient, new TEvPQ::TEvSubDomainStatus(SubDomainOutOfSpace));
     }
 }
 
@@ -664,6 +676,9 @@ void TPersQueueReadBalancer::Handle(TEvPersQueue::TEvStatusResponse::TPtr& ev, c
         MaxAvgSpeedHour = Max<ui64>(MaxAvgSpeedHour, partRes.GetAvgWriteSpeedPerHour());
         TotalAvgSpeedDay += partRes.GetAvgWriteSpeedPerDay();
         MaxAvgSpeedDay = Max<ui64>(MaxAvgSpeedDay, partRes.GetAvgWriteSpeedPerDay());
+
+        TotalDataSize += partRes.GetPartitionSize();
+        TotalUsedReserveSize += partRes.GetUsedReserveSize();
     }
     if (WaitingForStat.empty()) {
         CheckStat(ctx);
@@ -708,6 +723,25 @@ void TPersQueueReadBalancer::CheckStat(const TActorContext& ctx) {
     Y_UNUSED(ctx);
     //TODO: Deside about changing number of partitions and send request to SchemeShard
     //TODO: make AlterTopic request via TX_PROXY
+
+    TEvPersQueue::TEvPeriodicTopicStats* ev = new TEvPersQueue::TEvPeriodicTopicStats();
+    auto& rec = ev->Record;
+    rec.SetPathId(PathId);
+    rec.SetGeneration(Generation);
+    rec.SetRound(++StatsReportRound);
+    rec.SetDataSize(TotalDataSize);
+    rec.SetUsedReserveSize(TotalUsedReserveSize);
+
+    Y_VERIFY(TotalDataSize >= TotalUsedReserveSize);
+
+    LOG_DEBUG(ctx, NKikimrServices::PERSQUEUE_READ_BALANCER, 
+            TStringBuilder() << "Send TEvPeriodicTopicStats PathId: " << PathId
+                             << " Generation: " << Generation
+                             << " StatsReportRound: " << StatsReportRound
+                             << " DataSize: " << TotalDataSize
+                             << " UsedReserveSize: " << TotalUsedReserveSize);
+
+    NTabletPipe::SendData(ctx, GetPipeClient(SchemeShardId, ctx), ev);
 }
 
 void TPersQueueReadBalancer::GetStat(const TActorContext& ctx) {
@@ -717,6 +751,8 @@ void TPersQueueReadBalancer::GetStat(const TActorContext& ctx) {
     TotalAvgSpeedMin = MaxAvgSpeedMin = 0;
     TotalAvgSpeedHour = MaxAvgSpeedHour = 0;
     TotalAvgSpeedDay = MaxAvgSpeedDay = 0;
+    TotalDataSize = 0;
+    TotalUsedReserveSize = 0;
     for (auto& p : PartitionsInfo) {
         const ui64& tabletId = p.second.TabletId;
         bool res = WaitingForStat.insert(tabletId).second;
@@ -1197,5 +1233,87 @@ void TPersQueueReadBalancer::TClientGroupInfo::ReleasePartition(const TActorId p
 }
 
 
+static constexpr TDuration MaxFindSubDomainPathIdDelay = TDuration::Minutes(1);
+
+
+void TPersQueueReadBalancer::StopFindSubDomainPathId() {
+    if (FindSubDomainPathIdActor) {
+        Send(FindSubDomainPathIdActor, new TEvents::TEvPoison);
+        FindSubDomainPathIdActor = { };
+    }
 }
+
+void TPersQueueReadBalancer::StartFindSubDomainPathId(bool delayFirstRequest) {
+    if (!FindSubDomainPathIdActor &&
+        SchemeShardId != 0 &&
+        (!SubDomainPathId || SubDomainPathId->OwnerId != SchemeShardId))
+    {
+        FindSubDomainPathIdActor = Register(CreateFindSubDomainPathIdActor(SelfId(), TabletID(), SchemeShardId, delayFirstRequest, MaxFindSubDomainPathIdDelay));
+    }
 }
+
+void TPersQueueReadBalancer::Handle(NSchemeShard::TEvSchemeShard::TEvSubDomainPathIdFound::TPtr& ev, const TActorContext& ctx) {
+    const auto* msg = ev->Get();
+
+    if (FindSubDomainPathIdActor == ev->Sender) {
+        FindSubDomainPathIdActor = { };
+    }
+
+    if (SchemeShardId == msg->SchemeShardId &&
+       !SubDomainPathId || SubDomainPathId->OwnerId != msg->SchemeShardId)
+    {
+        LOG_DEBUG_S(ctx, NKikimrServices::PERSQUEUE_READ_BALANCER,
+            "Discovered subdomain " << msg->LocalPathId << " at RB " << TabletID());
+
+        SubDomainPathId.emplace(msg->SchemeShardId, msg->LocalPathId);
+        StartWatchingSubDomainPathId();
+    }
+}
+
+void TPersQueueReadBalancer::StopWatchingSubDomainPathId() {
+    if (WatchingSubDomainPathId) {
+        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvWatchRemove());
+        WatchingSubDomainPathId.reset();
+    }
+}
+
+void TPersQueueReadBalancer::StartWatchingSubDomainPathId() {
+    if (!SubDomainPathId || SubDomainPathId->OwnerId != SchemeShardId) {
+        return;
+    }
+
+    if (WatchingSubDomainPathId && *WatchingSubDomainPathId != *SubDomainPathId) {
+        StopWatchingSubDomainPathId();
+    }
+
+    if (!WatchingSubDomainPathId) {
+        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvWatchPathId(*SubDomainPathId));
+        WatchingSubDomainPathId = *SubDomainPathId;
+    }
+}
+
+void TPersQueueReadBalancer::Handle(TEvTxProxySchemeCache::TEvWatchNotifyUpdated::TPtr& ev, const TActorContext& ctx) {
+    const auto* msg = ev->Get();
+    if (SubDomainPathId && msg->PathId == *SubDomainPathId) {
+        const bool outOfSpace = msg->Result->GetPathDescription()
+            .GetDomainDescription()
+            .GetDomainState()
+            .GetDiskQuotaExceeded();
+
+        LOG_DEBUG_S(ctx, NKikimrServices::PERSQUEUE_READ_BALANCER,
+            "Discovered subdomain " << msg->PathId << " state, outOfSpace = " << outOfSpace
+            << " at RB " << TabletID());
+
+        SubDomainOutOfSpace = outOfSpace;
+
+        for (auto& p : PartitionsInfo) {
+            const ui64& tabletId = p.second.TabletId;
+            TActorId pipeClient = GetPipeClient(tabletId, ctx);
+            NTabletPipe::SendData(ctx, pipeClient, new TEvPQ::TEvSubDomainStatus(outOfSpace));
+        }
+    }
+}
+
+
+} // NPQ
+} // NKikimr

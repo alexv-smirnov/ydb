@@ -149,8 +149,8 @@ public:
         TBase::Bootstrap(ctx);
 
         const auto& req = GetProtoRequest();
-        if (!Request_->GetInternalToken().empty()) {
-            UserToken = MakeHolder<NACLib::TUserToken>(Request_->GetInternalToken());
+        if (!Request_->GetSerializedToken().empty()) {
+            UserToken = MakeHolder<NACLib::TUserToken>(Request_->GetSerializedToken());
         }
 
         auto ops = GetOps();
@@ -674,8 +674,8 @@ private:
     TTableProfiles Profiles;
 };
 
-void DoAlterTableRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider &) {
-    TActivationContext::AsActorContext().Register(new TAlterTableRPC(p.release()));
+void DoAlterTableRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TAlterTableRPC(p.release()));
 }
 
 template<>

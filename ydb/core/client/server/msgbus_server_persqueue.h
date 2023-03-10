@@ -2,13 +2,13 @@
 
 #include "grpc_server.h"
 #include "msgbus_tabletreq.h"
-
 #include <ydb/core/base/tablet_pipe.h>
 #include <ydb/core/persqueue/events/global.h>
 #include <ydb/core/tx/scheme_cache/scheme_cache.h>
 #include <ydb/library/persqueue/topic_parser/topic_parser.h>
 
 #include <library/cpp/actors/core/interconnect.h>
+#include <library/cpp/actors/interconnect/interconnect_tcp_proxy.h>
 
 #include <util/generic/ptr.h>
 #include <util/system/compiler.h>
@@ -80,12 +80,20 @@ protected:
     };
 
 public:
-    struct TNodesInfo {
+    class TNodesInfo {
+    public:
         THolder<TEvInterconnect::TEvNodesInfo> NodesInfoReply;
         THashMap<ui32, TString> HostNames;
         THashMap<TString, ui32> MinNodeIdByHost;
+        std::shared_ptr<THashMap<ui32, ui32>> DynToStaticNode;
 
-        explicit TNodesInfo(THolder<TEvInterconnect::TEvNodesInfo> nodesInfoReply);
+        bool Ready = false;
+        void ProcessNodesMapping(NPqMetaCacheV2::TEvPqNewMetaCache::TEvGetNodesMappingResponse::TPtr& ev,
+                                 const TActorContext& ctx);
+        explicit TNodesInfo(THolder<TEvInterconnect::TEvNodesInfo> nodesInfoReply, const TActorContext& ctx);
+    private:
+        void FinalizeWhenReady(const TActorContext& ctx);
+        void Finalize(const TActorContext& ctx);
     };
 
 public:
@@ -95,6 +103,7 @@ public:
     bool NeedChildrenCreation = false;
 
     ui32 ChildrenCreated = 0;
+    bool ChildrenCreationDone = false;
 
     std::deque<THolder<TPerTopicInfo>> ChildrenToCreate;
 
@@ -131,6 +140,7 @@ protected:
     virtual STFUNC(StateFunc);
 
     void Handle(TEvInterconnect::TEvNodesInfo::TPtr& ev, const TActorContext& ctx);
+    void Handle(NPqMetaCacheV2::TEvPqNewMetaCache::TEvGetNodesMappingResponse::TPtr& ev, const TActorContext& ctx);
     void Handle(NPqMetaCacheV2::TEvPqNewMetaCache::TEvDescribeTopicsResponse::TPtr& ev, const TActorContext& ctx);
     void Handle(NPqMetaCacheV2::TEvPqNewMetaCache::TEvDescribeAllTopicsResponse::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPersQueue::TEvResponse::TPtr& ev, const TActorContext& ctx);
@@ -152,7 +162,8 @@ protected:
 
     // Nodes info
     const bool ListNodes;
-    std::shared_ptr<const TNodesInfo> NodesInfo;
+    std::shared_ptr<TNodesInfo> NodesInfo;
+    ui64 NodesPingsPending = 0;
 };
 
 // Helper actor that sends TEvGetBalancerDescribe and checks ACL (ACL is not implemented yet).
@@ -170,6 +181,11 @@ protected:
     virtual void SendReplyAndDie(NKikimrClient::TResponse&& record, const TActorContext& ctx) = 0;
 
     STFUNC(StateFunc);
+
+    template<typename T>
+    void Become(T stateFunc) {
+        IActorCallback::Become(stateFunc);
+    }
 
 protected:
     TActorId SchemeCache;
@@ -304,7 +320,7 @@ protected:
             HFunc(TPipeEvent, HandlePipeEvent);
             CFunc(NActors::TEvents::TSystem::PoisonPill, Die);
         default:
-            LOG_WARN_S(ctx, NKikimrServices::PERSQUEUE, "Unexpected event type: " << ev->GetTypeRewrite() << ", " << (ev->HasEvent() ? ev->GetBase()->ToString() : "<no data>"));
+            LOG_WARN_S(ctx, NKikimrServices::PERSQUEUE, "Unexpected event type: " << ev->GetTypeRewrite() << ", " << ev->ToString());
         }
     }
 
@@ -315,7 +331,7 @@ protected:
             HFunc(TEvTabletPipe::TEvClientConnected, HandlePipeEvent);
             CFunc(NActors::TEvents::TSystem::PoisonPill, Die);
         default:
-            LOG_WARN_S(ctx, NKikimrServices::PERSQUEUE, "Unexpected event type: " << ev->GetTypeRewrite() << ", " << (ev->HasEvent() ? ev->GetBase()->ToString() : "<no data>"));
+            LOG_WARN_S(ctx, NKikimrServices::PERSQUEUE, "Unexpected event type: " << ev->GetTypeRewrite() << ", " << ev->ToString());
         }
     }
 

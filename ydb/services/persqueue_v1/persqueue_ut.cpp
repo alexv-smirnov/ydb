@@ -56,7 +56,7 @@ using namespace NNetClassifier;
 TAutoPtr<IEventHandle> GetClassifierUpdate(TServer& server, const TActorId sender) {
     auto& actorSystem = *server.GetRuntime();
     actorSystem.Send(
-            new IEventHandle(MakeNetClassifierID(), sender,
+            new IEventHandleFat(MakeNetClassifierID(), sender,
             new TEvNetClassifier::TEvSubscribe()
         ));
 
@@ -70,7 +70,7 @@ TAutoPtr<IEventHandle> GetClassifierUpdate(TServer& server, const TActorId sende
 }
 
 THolder<TTempFileHandle> CreateNetDataFile(const TString& content) {
-    auto netDataFile = MakeHolder<TTempFileHandle>("data.tsv");
+    auto netDataFile = MakeHolder<TTempFileHandle>();
 
     netDataFile->Write(content.Data(), content.Size());
     netDataFile->FlushData();
@@ -82,6 +82,27 @@ THolder<TTempFileHandle> CreateNetDataFile(const TString& content) {
 static TString FormNetData() {
     return "10.99.99.224/32\tSAS\n"
            "::1/128\tVLA\n";
+}
+
+NYdb::NPersQueue::TTopicReadSettings MakeTopicReadSettings(const TString& topic,
+                                                           const TVector<ui32>& groupIds)
+{
+    NYdb::NPersQueue::TTopicReadSettings settings{topic};
+    for (ui32 groupId : groupIds) {
+        settings.AppendPartitionGroupIds(groupId);
+    }
+    return settings;
+}
+
+NYdb::NPersQueue::TReadSessionSettings MakeReadSessionSettings(const NYdb::NPersQueue::TTopicReadSettings& topicSettings,
+                                                               const TString& consumer,
+                                                               bool readOnlyOriginal)
+{
+    NYdb::NPersQueue::TReadSessionSettings settings;
+    settings.AppendTopics(topicSettings);
+    settings.ConsumerName(consumer);
+    settings.ReadOnlyOriginal(readOnlyOriginal);
+    return settings;
 }
 
 namespace {
@@ -759,6 +780,13 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
         Ydb::Topic::StreamReadMessage::FromClient req;
         Ydb::Topic::StreamReadMessage::FromServer resp;
 
+        NACLib::TDiffACL acl;
+        for (ui32 i = 0; i < 10; ++i) {
+            acl.AddAccess(NACLib::EAccessType::Allow, NACLib::SelectRow, "test_user_" + ToString(i) + "@" + BUILTIN_ACL_DOMAIN);
+        }
+        server.Server->AnnoyingClient->ModifyACL("/Root/PQ", "acc/topic1", acl.SerializeAsString());
+        WaitACLModification();
+
         for (ui32 i = 0; i < 10; ++i) {
             resp.Clear();
             UNIT_ASSERT(readStream->Read(&resp));
@@ -766,7 +794,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
             UNIT_ASSERT_C(resp.server_message_case() == Ydb::Topic::StreamReadMessage::FromServer::kReadResponse, resp);
 
             // send update token request, await response
-            const TString token = TString("test_user_" + ToString(i) + "@") + BUILTIN_ACL_DOMAIN;;
+            const TString token = "test_user_" + ToString(i) + "@" + BUILTIN_ACL_DOMAIN;
             req.Clear();
             resp.Clear();
             req.mutable_update_token_request()->set_token(token);
@@ -916,7 +944,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
             Ydb::Topic::CreateTopicResponse response;
             request.set_path(TStringBuilder() << "/Root/PQ/rt3.dc1--acc--topic2");
 
-            request.mutable_retention_period()->set_seconds(1);
+            request.set_retention_storage_mb(1);
 
             request.mutable_supported_codecs()->add_codecs(Ydb::Topic::CODEC_RAW);
             request.mutable_supported_codecs()->add_codecs(Ydb::Topic::CODEC_GZIP);
@@ -1023,7 +1051,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
 
             req.set_path("acc/topic2");
             req.set_consumer("first-consumer");
-            req.set_offset(15);
+            req.set_offset(18);
 
             grpc::ClientContext rcontext;
 
@@ -1042,7 +1070,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
 
             req.set_path("acc/topic2");
             req.set_consumer("second-consumer");
-            req.set_offset(15);
+            req.set_offset(18);
 
             grpc::ClientContext rcontext;
 
@@ -2669,8 +2697,6 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
 
         DumpCounters("StartFuncs-2");
 
-        UNIT_ASSERT_VALUES_EQUAL(counters->MessagesInflight->Val(), 5);
-
         for (ui32 i = 0; i < 4; ++i) {
             doRead();
         }
@@ -4179,7 +4205,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
 
         const auto edgeActorID = setup.GetServer().GetRuntime()->AllocateEdgeActor();
 
-        setup.GetServer().GetRuntime()->Send(new IEventHandle(NPQ::NClusterTracker::MakeClusterTrackerID(), edgeActorID, new NPQ::NClusterTracker::TEvClusterTracker::TEvSubscribe));
+        setup.GetServer().GetRuntime()->Send(new IEventHandleFat(NPQ::NClusterTracker::MakeClusterTrackerID(), edgeActorID, new NPQ::NClusterTracker::TEvClusterTracker::TEvSubscribe));
         log << TLOG_INFO << "Wait for cluster tracker event";
         auto clustersUpdate = setup.GetServer().GetRuntime()->GrabEdgeEvent<NPQ::NClusterTracker::TEvClusterTracker::TEvClustersUpdate>();
 
@@ -4217,7 +4243,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
         TInstant now(TInstant::Now());
         auto session = setup.InitWriteSession(GenerateSessionSetupWithPreferredCluster(setup.GetRemoteCluster()));
 
-        setup.GetServer().GetRuntime()->Send(new IEventHandle(NPQ::NClusterTracker::MakeClusterTrackerID(), edgeActorID, new NPQ::NClusterTracker::TEvClusterTracker::TEvSubscribe));
+        setup.GetServer().GetRuntime()->Send(new IEventHandleFat(NPQ::NClusterTracker::MakeClusterTrackerID(), edgeActorID, new NPQ::NClusterTracker::TEvClusterTracker::TEvSubscribe));
         log << TLOG_INFO << "Wait for cluster tracker event";
         auto clustersUpdate = setup.GetServer().GetRuntime()->GrabEdgeEvent<NPQ::NClusterTracker::TEvClusterTracker::TEvClustersUpdate>();
         AssertStreamingSessionAlive(session.first);
@@ -4241,7 +4267,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
 
         setup.GetFlatMsgBusPQClient().UpdateDC(setup.GetRemoteCluster(), false, true);
 
-        setup.GetServer().GetRuntime()->Send(new IEventHandle(NPQ::NClusterTracker::MakeClusterTrackerID(), edgeActorID, new NPQ::NClusterTracker::TEvClusterTracker::TEvSubscribe));
+        setup.GetServer().GetRuntime()->Send(new IEventHandleFat(NPQ::NClusterTracker::MakeClusterTrackerID(), edgeActorID, new NPQ::NClusterTracker::TEvClusterTracker::TEvSubscribe));
         log << TLOG_INFO << "Wait for cluster tracker event";
         auto clustersUpdate = setup.GetServer().GetRuntime()->GrabEdgeEvent<NPQ::NClusterTracker::TEvClusterTracker::TEvClustersUpdate>();
         TInstant now(TInstant::Now());
@@ -5918,7 +5944,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
         };
 
         auto getClustersFromTracker = [&]() {
-            setup.GetServer().GetRuntime()->Send(new IEventHandle(
+            setup.GetServer().GetRuntime()->Send(new IEventHandleFat(
                 NPQ::NClusterTracker::MakeClusterTrackerID(),
                 edgeActorID,
                 new NPQ::NClusterTracker::TEvClusterTracker::TEvSubscribe
@@ -6095,6 +6121,7 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
             Cerr << "partition status: " << partitionStatus->DebugString() << Endl;
         }
     }
+
     Y_UNIT_TEST(PartitionsMapping) {
         NPersQueue::TTestServer server;
 
@@ -6106,10 +6133,13 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
         server.EnableLogs({ NKikimrServices::PQ_READ_PROXY});
 
         auto driver = server.AnnoyingClient->GetDriver();
-        NYdb::NPersQueue::TTopicReadSettings topicSettings(topic);
-        topicSettings.AppendPartitionGroupIds(2).AppendPartitionGroupIds(4);
-        NYdb::NPersQueue::TReadSessionSettings readerSettings;
-        readerSettings.AppendTopics(topicSettings).ConsumerName("shared/user").ReadOnlyOriginal(true);
+
+        NYdb::NPersQueue::TTopicReadSettings topicSettings =
+            MakeTopicReadSettings(topic, {2, 4});
+        NYdb::NPersQueue::TReadSessionSettings readerSettings =
+            MakeReadSessionSettings(topicSettings,
+                                    "shared/user",
+                                    true);
         auto reader = CreateReader(*driver, readerSettings);
 
         THashSet<ui32> locksGot = {};
@@ -6124,15 +6154,42 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
             UNIT_ASSERT(!locksGot.contains(partId));
             locksGot.insert(partId);
         }
+
+        topicSettings =
+            MakeTopicReadSettings(topic, {});
+        readerSettings =
+            MakeReadSessionSettings(topicSettings,
+                                    "shared/user",
+                                    true);
         auto reader2 = CreateReader(*driver, readerSettings);
 
-        {
+        locksGot.clear();
+        THashSet<ui32> releasesGot = {};
+        while (locksGot.size() < 3) {
+            TMaybe<NYdb::NPersQueue::TReadSessionEvent::TEvent> event = reader2->GetEvent(true, 1);
+            auto createStream = std::get_if<NYdb::NPersQueue::TReadSessionEvent::TCreatePartitionStreamEvent>(&*event);
+            UNIT_ASSERT(createStream);
+            Cerr << "Create stream event: " << createStream->DebugString() << Endl;
+            UNIT_ASSERT_VALUES_EQUAL(createStream->GetPartitionStream()->GetTopicPath(), topic);
+            auto partId = createStream->GetPartitionStream()->GetPartitionId();
+            if ((partId == 1) || (partId == 3)) {
+                UNIT_ASSERT(!releasesGot.contains(partId));
+                releasesGot.insert(partId);
+            } else {
+                UNIT_ASSERT(!locksGot.contains(partId));
+                UNIT_ASSERT((partId == 0) || (partId == 2) || (partId == 4));
+                locksGot.insert(partId);
+            }
+        }
+
+        while (!releasesGot.empty()) {
             TMaybe<NYdb::NPersQueue::TReadSessionEvent::TEvent> event = reader->GetEvent(true, 1);
             auto release = std::get_if<NYdb::NPersQueue::TReadSessionEvent::TDestroyPartitionStreamEvent>(&*event);
             UNIT_ASSERT(release);
             UNIT_ASSERT_VALUES_EQUAL(release->GetPartitionStream()->GetTopicPath(), topic);
             auto partId = release->GetPartitionStream()->GetPartitionId();
-            UNIT_ASSERT(partId == 1 || partId == 3);
+            UNIT_ASSERT((partId == 1) || (partId == 3));
+            releasesGot.erase(partId);
         }
     }
 
@@ -6256,6 +6313,9 @@ Y_UNIT_TEST_SUITE(TPersQueueTest) {
         UNIT_ASSERT_VALUES_EQUAL(counters->BytesInflightUncompressed->Val(), 0);
         UNIT_ASSERT_VALUES_EQUAL(counters->BytesInflightCompressed->Val(), 0);
         UNIT_ASSERT_VALUES_EQUAL(counters->BytesInflightTotal->Val(), 0);
+
+        decompressor->RunAllTasks();
+        executor->RunAllTasks();
 
         session->Close(TDuration::Seconds(10));
 

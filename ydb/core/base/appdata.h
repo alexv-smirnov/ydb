@@ -72,6 +72,12 @@ namespace NPQ {
 
 class TFormatFactory;
 
+struct TAppConfig : public NKikimrConfig::TAppConfig, public TThrRefBase, TNonCopyable {
+    explicit TAppConfig(const NKikimrConfig::TAppConfig& c)
+        : NKikimrConfig::TAppConfig(c)
+    {}
+};
+
 struct TAppData {
     static const ui32 MagicTag = 0x2991AAF8;
     const ui32 Magic;
@@ -175,6 +181,10 @@ struct TAppData {
     bool  DisableCheckingSysNodesCms = false;
 
     TKikimrScopeId LocalScopeId;
+
+    TMap<TString, TString> Labels;
+
+    TString ClusterName;
 
     TAppData(
             ui32 sysPoolId, ui32 userPoolId, ui32 ioPoolId, ui32 batchPoolId,

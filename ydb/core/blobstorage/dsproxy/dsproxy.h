@@ -193,7 +193,7 @@ public:
 
     void Registered(TActorSystem *as, const TActorId& parentId) override {
         ProxyActorId = parentId;
-        as->Send(new IEventHandle(TEvents::TSystem::Bootstrap, 0,
+        as->Send(new IEventHandleFat(TEvents::TSystem::Bootstrap, 0,
             TActor<TBlobStorageGroupRequestActor<TDerived>>::SelfId(), parentId, nullptr, 0));
         TActor<TBlobStorageGroupRequestActor<TDerived>>::Registered(as, parentId);
     }
@@ -213,7 +213,7 @@ public:
     }
 
     template<typename TEvent>
-    bool CheckForTermErrors(TAutoPtr<TEventHandle<TEvent>>& ev) {
+    bool CheckForTermErrors(TAutoPtr<TEventHandleFat<TEvent>>& ev) {
         auto& record = ev->Get()->Record;
         auto& self = Derived();
 
@@ -250,7 +250,7 @@ public:
 
         // sanity check for correct VDisk generation ??? possible race
         Y_VERIFY_S(status == NKikimrProto::RACE || vdiskId.GroupGeneration <= Info->GroupGeneration ||
-            TEvent::EventType == TEvBlobStorage::EvVStatusResult,
+            TEvent::EventType == TEvBlobStorage::EvVStatusResult || TEvent::EventType == TEvBlobStorage::EvVAssimilateResult,
             "status# " << NKikimrProto::EReplyStatus_Name(status) << " vdiskId.GroupGeneration# " << vdiskId.GroupGeneration
             << " Info->GroupGeneration# " << Info->GroupGeneration << " Response# " << ev->Get()->ToString());
 
@@ -306,7 +306,7 @@ public:
         }
         ++*Mon->NodeMon->RestartHisto[Min<size_t>(Mon->NodeMon->RestartHisto.size() - 1, RestartCounter)];
         const TActorId& proxyId = MakeBlobStorageProxyID(Info->GroupID);
-        TActivationContext::Send(new IEventHandle(nodeWardenId, Source, q.release(), 0, Cookie, &proxyId, Span.GetTraceId()));
+        TActivationContext::Send(new IEventHandleFat(nodeWardenId, Source, q.release(), 0, Cookie, &proxyId, Span.GetTraceId()));
         PassAway();
         return true;
     }
@@ -326,7 +326,7 @@ public:
 #undef CHECK
 
             case TEvBlobStorage::EvProxySessionsState: {
-                GroupQueues = static_cast<TEvProxySessionsState*>(ev->GetBase())->GroupQueues;
+                GroupQueues = ev->Get<TEvProxySessionsState>()->GroupQueues;
                 return true;
             }
 

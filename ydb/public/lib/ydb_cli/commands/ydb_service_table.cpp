@@ -396,14 +396,14 @@ void TCommandExecuteQuery::Parse(TConfig& config) {
             config.ParseResult->Has("batch")) && QueryType == "scheme") {
         throw TMisuseException() << "Scheme queries does not support parameters.";
     }
+    CheckQueryOptions();
+    CheckQueryFile();
     ValidateResult = MakeHolder<NScripting::TExplainYqlResult>(
         ExplainQuery(config, Query, NScripting::ExplainYqlRequestMode::Validate));
     ParseParameters(config);
-    CheckQueryOptions();
 }
 
 int TCommandExecuteQuery::Run(TConfig& config) {
-    CheckQueryFile();
     if (QueryType) {
         if (QueryType == "data") {
             return ExecuteDataQuery(config);
@@ -421,6 +421,7 @@ int TCommandExecuteQuery::Run(TConfig& config) {
 int TCommandExecuteQuery::ExecuteDataQuery(TConfig& config) {
     auto defaultStatsMode = BasicStats ? NTable::ECollectQueryStatsMode::Basic : NTable::ECollectQueryStatsMode::None;
     NTable::TExecDataQuerySettings settings;
+    settings.KeepInQueryCache(true);
     settings.CollectQueryStats(ParseQueryStatsMode(CollectStatsMode, defaultStatsMode));
 
     NTable::TTxSettings txSettings;
@@ -445,13 +446,14 @@ int TCommandExecuteQuery::ExecuteDataQuery(TConfig& config) {
     if (!Parameters.empty() || !IsStdinInteractive()) {
         THolder<TParamsBuilder> paramBuilder;
         while (GetNextParams(ValidateResult->GetParameterTypes(), InputFormat, StdinFormat, FramingFormat, paramBuilder)) {
-            auto operation = [this, &txSettings, &paramBuilder, &settings, &asyncResult](NTable::TSession session) {
+            TParams params = paramBuilder->Build();
+            auto operation = [this, &txSettings, &params, &settings, &asyncResult](NTable::TSession session) {
                 auto promise = NThreading::NewPromise<NTable::TDataQueryResult>();
                 asyncResult = promise.GetFuture();
                 auto result = session.ExecuteDataQuery(
                     Query,
                     NTable::TTxControl::BeginTx(txSettings).CommitTx(),
-                    paramBuilder->Build(),
+                    params,
                     FillSettings(settings)
                 );
                 return result.Apply([promise](const NTable::TAsyncDataQueryResult& result) mutable {
@@ -732,7 +734,7 @@ int TCommandExplain::Run(TConfig& config) {
 }
 
 TCommandReadTable::TCommandReadTable()
-    : TYdbCommand("readtable", {}, "Stream read table")
+    : TYdbCommand("read", {"readtable"}, "Stream read table")
 {}
 
 void TCommandReadTable::Config(TConfig& config) {

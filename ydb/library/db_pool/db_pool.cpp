@@ -82,7 +82,7 @@ public:
             }, settings)
             .Subscribe([state = std::weak_ptr<int>(State), sharedResult, actorSystem = TActivationContext::ActorSystem(), cookie, selfId = SelfId()](const NThreading::TFuture<NYdb::TStatus>& statusFuture) {
                 if (state.lock()) {
-                    actorSystem->Send(new IEventHandle(selfId, selfId, new TEvents::TEvDbResponse(statusFuture.GetValue(), *sharedResult), 0, cookie));
+                    actorSystem->Send(new IEventHandleFat(selfId, selfId, new TEvents::TEvDbResponse(statusFuture.GetValue(), *sharedResult), 0, cookie));
                 } else {
                     LOG_T_AS(actorSystem, "TDbPoolActor: ProcessQueue " << selfId << " State destroyed");
                 }
@@ -95,7 +95,7 @@ public:
             })
             .Subscribe([state = std::weak_ptr<int>(State), actorSystem = TActivationContext::ActorSystem(), selfId = SelfId(), cookie](const NThreading::TFuture<NYdb::TStatus>& statusFuture) {
                 if (state.lock()) {
-                    actorSystem->Send(new IEventHandle(selfId, selfId, new TEvents::TEvDbFunctionResponse(statusFuture.GetValue()), 0, cookie));
+                    actorSystem->Send(new IEventHandleFat(selfId, selfId, new TEvents::TEvDbFunctionResponse(statusFuture.GetValue()), 0, cookie));
                 } else {
                     LOG_T_AS(actorSystem, "TDbPoolActor: ProcessQueue " << selfId << " State destroyed");
                 }
@@ -200,7 +200,7 @@ TDbPool::TDbPool(
 void TDbPool::Cleanup() {
     auto parentId = NActors::TActivationContext::AsActorContext().SelfID;
     for (const auto& actorId : Actors) {
-        NActors::TActivationContext::Send(new IEventHandle(actorId, parentId, new NActors::TEvents::TEvPoison()));
+        NActors::TActivationContext::Send(new IEventHandleFat(actorId, parentId, new NActors::TEvents::TEvPoison()));
     }
 }
 
@@ -217,10 +217,6 @@ TActorId TDbPool::GetNextActor() {
 static void PrepareConfig(NDbPool::TConfig& config) {
     if (!config.GetToken() && config.GetOAuthFile()) {
         config.SetToken(StripString(TFileInput(config.GetOAuthFile()).ReadAll()));
-    }
-
-    if (!config.GetMaxSessionCount()) {
-        config.SetMaxSessionCount(10);
     }
 }
 
@@ -267,15 +263,20 @@ void TDbPoolMap::Reset(const NDbPool::TConfig& config) {
     TableClient = nullptr;
 }
 
-TDbPool::TPtr TDbPoolHolder::GetOrCreate(ui32 dbPoolId, ui32 sessionsCount) {
-    return Pools->GetOrCreate(dbPoolId, sessionsCount);
+TDbPool::TPtr TDbPoolHolder::GetOrCreate(ui32 dbPoolId) {
+    return Pools->GetOrCreate(dbPoolId);
 }
 
-TDbPool::TPtr TDbPoolMap::GetOrCreate(ui32 dbPoolId, ui32 sessionsCount) {
+TDbPool::TPtr TDbPoolMap::GetOrCreate(ui32 dbPoolId) {
     TGuard<TMutex> lock(Mutex);
     auto it = Pools.find(dbPoolId);
     if (it != Pools.end()) {
         return it->second;
+    }
+
+    auto it_pool = Config.GetPools().find(dbPoolId);
+    if (it_pool == Config.GetPools().end()) {
+        return nullptr;
     }
 
     if (!Config.GetEndpoint()) {
@@ -283,9 +284,14 @@ TDbPool::TPtr TDbPoolMap::GetOrCreate(ui32 dbPoolId, ui32 sessionsCount) {
     }
 
     if (!TableClient) {
+        auto maxSessionCount = 0;
+        for (const auto& pool : Config.GetPools())
+        {
+            maxSessionCount += pool.second;
+        }
         auto clientSettings = NYdb::NTable::TClientSettings()
             .UseQueryCache(false)
-            .SessionPoolSettings(NYdb::NTable::TSessionPoolSettings().MaxActiveSessions(1 + Config.GetMaxSessionCount()))
+            .SessionPoolSettings(NYdb::NTable::TSessionPoolSettings().MaxActiveSessions(1 + maxSessionCount))
             .Database(Config.GetDatabase())
             .DiscoveryEndpoint(Config.GetEndpoint())
             .DiscoveryMode(NYdb::EDiscoveryMode::Async);
@@ -300,7 +306,7 @@ TDbPool::TPtr TDbPoolMap::GetOrCreate(ui32 dbPoolId, ui32 sessionsCount) {
         TableClient = MakeHolder<NYdb::NTable::TTableClient>(Driver, clientSettings);
     }
 
-    TDbPool::TPtr dbPool = new TDbPool(sessionsCount, *TableClient, Counters);
+    TDbPool::TPtr dbPool = new TDbPool(it_pool->second, *TableClient, Counters);
     Pools.emplace(dbPoolId, dbPool);
     return dbPool;
 }

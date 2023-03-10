@@ -1,9 +1,10 @@
 #include "nodes_manager.h"
 #include <ydb/core/yq/libs/config/protos/fq_config.pb.h>
 
+#include <library/cpp/actors/core/actor_bootstrapped.h>
 #include <library/cpp/actors/core/events.h>
 #include <library/cpp/actors/core/hfunc.h>
-#include <library/cpp/actors/core/actor_bootstrapped.h>
+#include <library/cpp/actors/core/process_stats.h>
 #include <library/cpp/actors/interconnect/events_local.h>
 #include <ydb/library/yql/providers/dq/worker_manager/interface/events.h>
 #include <ydb/library/yql/public/issue/yql_issue_message.h>
@@ -64,6 +65,8 @@ public:
 
     {
         InstanceId = GetGuidAsString(RandomProvider->GenUuid4());
+        AnonRssSize = ServiceCounters.Counters->GetCounter("AnonRssSize");
+        AnonRssLimit = ServiceCounters.Counters->GetCounter("AnonRssLimit");
     }
 
     static constexpr char ActorName[] = "YQ_NODES_MANAGER";
@@ -103,6 +106,13 @@ private:
             ui64 memoryAllocated = AtomicGet(WorkerManagerCounters.MkqlMemoryAllocated->GetAtomic());
             TVector<TPeer> nodes;
             for (ui32 i = 0; i < count; ++i) {
+                ui64 totalMemoryLimit = 0;
+                if (rec.TaskSize() > i) {
+                    totalMemoryLimit = rec.GetTask(i).GetInitialTaskMemoryLimit();
+                }
+                if (totalMemoryLimit == 0) {
+                    totalMemoryLimit = MkqlInitialMemoryLimit;
+                }
                 TPeer node = {SelfId().NodeId(), InstanceId + "," + HostName(), 0, 0, 0, DataCenter};
                 bool selfPlacement = true;
                 if (!Peers.empty()) {
@@ -117,13 +127,13 @@ private:
 
                         if (    (!UseDataCenter || DataCenter.empty() || nextNode.DataCenter.empty() || DataCenter == nextNode.DataCenter) // non empty DC must match
                              && (   nextNode.MemoryLimit == 0 // memory is NOT limited
-                                 || nextNode.MemoryLimit >= nextNode.MemoryAllocated + MkqlInitialMemoryLimit) // or enough
+                                 || nextNode.MemoryLimit >= nextNode.MemoryAllocated + totalMemoryLimit) // or enough
                         ) {
                             // adjust allocated size to place next tasks correctly, will be reset after next health check
-                            nextNode.MemoryAllocated += MkqlInitialMemoryLimit;
+                            nextNode.MemoryAllocated += totalMemoryLimit;
                             if (nextNode.NodeId == SelfId().NodeId()) {
                                 // eventually synced self allocation info
-                                memoryAllocated += MkqlInitialMemoryLimit;
+                                memoryAllocated += totalMemoryLimit;
                             }
                             node = nextNode;
                             selfPlacement = false;
@@ -136,8 +146,8 @@ private:
                     }
                 }
                 if (selfPlacement) {
-                    if (memoryLimit == 0 || memoryLimit >= memoryAllocated + MkqlInitialMemoryLimit) {
-                        memoryAllocated += MkqlInitialMemoryLimit;
+                    if (memoryLimit == 0 || memoryLimit >= memoryAllocated + totalMemoryLimit) {
+                        memoryAllocated += totalMemoryLimit;
                     } else {
                         placementFailure = true;
                         auto& error = *req->Record.MutableError();
@@ -214,6 +224,11 @@ private:
         Schedule(ttl, new NActors::TEvents::TEvWakeup(WU_NodesHealthCheck));
 
         ServiceCounters.Counters->GetCounter("NodesHealthCheck", true)->Inc();
+
+        NActors::TProcStat procStat;
+        procStat.Fill(getpid());
+        AnonRssSize->Set(procStat.AnonRss);
+        AnonRssLimit->Set(procStat.CGroupMemLim);
 
         Fq::Private::NodesHealthCheckRequest request;
         request.set_tenant(Tenant);
@@ -315,6 +330,8 @@ private:
     TString InstanceId;
     TActorId InternalServiceId;
     TString Address;
+    ::NMonitoring::TDynamicCounters::TCounterPtr AnonRssSize;
+    ::NMonitoring::TDynamicCounters::TCounterPtr AnonRssLimit;
 };
 
 TActorId MakeNodesManagerId() {

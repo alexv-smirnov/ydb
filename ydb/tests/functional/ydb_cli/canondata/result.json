@@ -59,6 +59,9 @@
     "test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_multiple_files": {
         "uri": "file://test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_multiple_files/result.output"
     },
+    "test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_script_from_file": {
+        "uri": "file://test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_script_from_file/result.output"
+    },
     "test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_ignore_excess_parameters": {
         "uri": "file://test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_ignore_excess_parameters/result.output"
     },
@@ -67,6 +70,9 @@
     },
     "test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_multiple_files": {
         "uri": "file://test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_multiple_files/result.output"
+    },
+    "test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_script_from_file": {
+        "uri": "file://test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_script_from_file/result.output"
     },
     "test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_struct": {
         "uri": "file://test_ydb_scripting.TestExecuteScriptWithParamsFromJson.test_stream_struct/result.output"
@@ -239,6 +245,9 @@
     "test_ydb_table.TestExecuteQueryWithParamsFromJson.test_data_query_multiple_files": {
         "uri": "file://test_ydb_table.TestExecuteQueryWithParamsFromJson.test_data_query_multiple_files/result.output"
     },
+    "test_ydb_table.TestExecuteQueryWithParamsFromJson.test_data_query_script_from_file": {
+        "uri": "file://test_ydb_table.TestExecuteQueryWithParamsFromJson.test_data_query_script_from_file/result.output"
+    },
     "test_ydb_table.TestExecuteQueryWithParamsFromJson.test_data_query_struct": {
         "uri": "file://test_ydb_table.TestExecuteQueryWithParamsFromJson.test_data_query_struct/result.output"
     },
@@ -256,6 +265,9 @@
     },
     "test_ydb_table.TestExecuteQueryWithParamsFromJson.test_scan_query_multiple_files": {
         "uri": "file://test_ydb_table.TestExecuteQueryWithParamsFromJson.test_scan_query_multiple_files/result.output"
+    },
+    "test_ydb_table.TestExecuteQueryWithParamsFromJson.test_scan_query_script_from_file": {
+        "uri": "file://test_ydb_table.TestExecuteQueryWithParamsFromJson.test_scan_query_script_from_file/result.output"
     },
     "test_ydb_table.TestExecuteQueryWithParamsFromJson.test_scan_query_struct": {
         "uri": "file://test_ydb_table.TestExecuteQueryWithParamsFromJson.test_scan_query_struct/result.output"

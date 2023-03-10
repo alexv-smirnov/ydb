@@ -40,6 +40,26 @@ struct TStageInfoMeta {
     THolder<TKeyDesc> ShardKey;
     NSchemeCache::TSchemeCacheRequest::EKind ShardKind = NSchemeCache::TSchemeCacheRequest::EKind::KindUnknown;
 
+    const NKqpProto::TKqpPhyStage& GetStage(const size_t idx) const {
+        auto& txBody = Tx.Body;
+        YQL_ENSURE(idx < txBody->StagesSize());
+        return txBody->GetStages(idx);
+    }
+
+    template <class TStageIdExt>
+    const NKqpProto::TKqpPhyStage& GetStage(const TStageIdExt& stageId) const {
+        return GetStage(stageId.StageId);
+    }
+
+    bool HasReads() const {
+        return ShardOperations.contains(TKeyDesc::ERowOperation::Read);
+    }
+
+    bool HasWrites() const {
+        return ShardOperations.contains(TKeyDesc::ERowOperation::Update) ||
+            ShardOperations.contains(TKeyDesc::ERowOperation::Erase);
+    }
+
     explicit TStageInfoMeta(const IKqpGateway::TPhysicalTxData& tx)
         : Tx(tx)
         , TableKind(ETableKind::Unknown)
@@ -107,6 +127,7 @@ struct TTaskMeta {
     struct TColumn {
         ui32 Id = 0;
         NScheme::TTypeInfo Type;
+        TString TypeMod;
         TString Name;
     };
 
@@ -127,9 +148,14 @@ struct TTaskMeta {
     };
 
     struct TReadInfo {
+        enum class EReadType {
+            Rows,
+            Blocks
+        };
         ui64 ItemsLimit = 0;
         bool Reverse = false;
         bool Sorted = false;
+        EReadType ReadType = EReadType::Rows;
         TKqpOlapProgram OlapProgram;
         TVector<NScheme::TTypeInfo> ResultColumnsTypes;
     };
@@ -180,8 +206,10 @@ TVector<TTaskMeta::TColumn> BuildKqpColumns(const Proto& op, const TKqpTableKeys
 
     for (const auto& column : op.GetColumns()) {
         TTaskMeta::TColumn c;
+        const auto& tableColumn = table.Columns.at(column.GetName());
         c.Id = column.GetId();
-        c.Type = table.Columns.at(column.GetName()).Type;
+        c.Type = tableColumn.Type;
+        c.TypeMod = tableColumn.TypeMod;
         c.Name = column.GetName();
 
         columns.emplace_back(std::move(c));
@@ -196,12 +224,7 @@ struct TKqpTaskOutputType {
     };
 };
 
-const NKqpProto::TKqpPhyStage& GetStage(const TStageInfo& stageInfo);
-
 void LogStage(const NActors::TActorContext& ctx, const TStageInfo& stageInfo);
-
-bool HasReads(const TStageInfo& stageInfo);
-bool HasWrites(const TStageInfo& stageInfo);
 
 bool IsCrossShardChannel(TKqpTasksGraph& tasksGraph, const NYql::NDq::TChannel& channel);
 

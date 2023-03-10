@@ -30,6 +30,11 @@ struct TKqpEvents {
         EvDataQueryStreamPart,
         EvDataQueryStreamPartAck,
         EvRecompileRequest,
+        EvScriptRequest,
+        EvScriptResponse,
+        EvFetchScriptResultsRequest,
+        EvFetchScriptResultsResponse,
+        EvKqpProxyPublishRequest,
     };
 
     static_assert (EvCompileInvalidateRequest + 1 == EvAbortExecution);

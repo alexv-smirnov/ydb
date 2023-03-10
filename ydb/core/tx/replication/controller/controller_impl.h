@@ -1,6 +1,7 @@
 #pragma once
 
 #include "logging.h"
+#include "nodes_manager.h"
 #include "private_events.h"
 #include "public_events.h"
 #include "replication.h"
@@ -15,9 +16,7 @@
 
 #include <util/generic/hash.h>
 
-namespace NKikimr {
-namespace NReplication {
-namespace NController {
+namespace NKikimr::NReplication::NController {
 
 class TController
     : public TActor<TController>
@@ -64,10 +63,17 @@ private:
     // handlers
     void Handle(TEvController::TEvCreateReplication::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvController::TEvDropReplication::TPtr& ev, const TActorContext& ctx);
-    void Handle(TEvPrivate::TEvDiscoveryResult::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvDropReplication::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvDiscoveryTargetsResult::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPrivate::TEvAssignStreamName::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPrivate::TEvCreateStreamResult::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvDropStreamResult::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvPrivate::TEvCreateDstResult::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvDropDstResult::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvResolveTenantResult::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvPrivate::TEvUpdateTenantNodes::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvStateStorage::TEvBoardInfo::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvDiscovery::TEvError::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvents::TEvPoison::TPtr& ev, const TActorContext& ctx);
 
     // local transactions
@@ -75,20 +81,25 @@ private:
     class TTxInit;
     class TTxCreateReplication;
     class TTxDropReplication;
-    class TTxDiscoveryResult;
+    class TTxDiscoveryTargetsResult;
     class TTxAssignStreamName;
     class TTxCreateStreamResult;
+    class TTxDropStreamResult;
     class TTxCreateDstResult;
+    class TTxDropDstResult;
 
     // tx runners
     void RunTxInitSchema(const TActorContext& ctx);
     void RunTxInit(const TActorContext& ctx);
     void RunTxCreateReplication(TEvController::TEvCreateReplication::TPtr& ev, const TActorContext& ctx);
     void RunTxDropReplication(TEvController::TEvDropReplication::TPtr& ev, const TActorContext& ctx);
-    void RunTxDiscoveryResult(TEvPrivate::TEvDiscoveryResult::TPtr& ev, const TActorContext& ctx);
+    void RunTxDropReplication(TEvPrivate::TEvDropReplication::TPtr& ev, const TActorContext& ctx);
+    void RunTxDiscoveryTargetsResult(TEvPrivate::TEvDiscoveryTargetsResult::TPtr& ev, const TActorContext& ctx);
     void RunTxAssignStreamName(TEvPrivate::TEvAssignStreamName::TPtr& ev, const TActorContext& ctx);
     void RunTxCreateStreamResult(TEvPrivate::TEvCreateStreamResult::TPtr& ev, const TActorContext& ctx);
+    void RunTxDropStreamResult(TEvPrivate::TEvDropStreamResult::TPtr& ev, const TActorContext& ctx);
     void RunTxCreateDstResult(TEvPrivate::TEvCreateDstResult::TPtr& ev, const TActorContext& ctx);
+    void RunTxDropDstResult(TEvPrivate::TEvDropDstResult::TPtr& ev, const TActorContext& ctx);
 
     // other
     template <typename T>
@@ -108,6 +119,7 @@ private:
 
     TReplication::TPtr Find(ui64 id);
     TReplication::TPtr Find(const TPathId& pathId);
+    void Remove(ui64 id);
 
 private:
     const TTabletLogPrefix LogPrefix;
@@ -116,8 +128,10 @@ private:
     THashMap<ui64, TReplication::TPtr> Replications;
     THashMap<TPathId, TReplication::TPtr> ReplicationsByPathId;
 
+    // discovery
+    TActorId DiscoveryCache;
+    TNodesManager NodesManager;
+
 }; // TController
 
-} // NController
-} // NReplication
-} // NKikimr
+}

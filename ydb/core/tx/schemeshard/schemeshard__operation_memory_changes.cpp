@@ -82,6 +82,14 @@ void TMemoryChanges::GrabLongLock(TSchemeShard* ss, const TPathId& pathId, TTxId
     LockedPaths.emplace(pathId, lockTxId); // will be restored on UnDo()
 }
 
+void TMemoryChanges::GrabExternalTable(TSchemeShard* ss, const TPathId& pathId) {
+    Grab<TExternalTableInfo>(pathId, ss->ExternalTables, ExternalTables);
+}
+
+void TMemoryChanges::GrabExternalDataSource(TSchemeShard* ss, const TPathId& pathId) {
+    Grab<TExternalDataSourceInfo>(pathId, ss->ExternalDataSources, ExternalDataSources);
+}
+
 void TMemoryChanges::UnDo(TSchemeShard* ss) {
     // be aware of the order of grab & undo ops
     // stack is the best way to manage it right
@@ -180,6 +188,26 @@ void TMemoryChanges::UnDo(TSchemeShard* ss) {
             Y_FAIL("No such cases are exist");
         }
         TxStates.pop();
+    }
+
+    while (ExternalTables) {
+        const auto& [id, elem] = ExternalTables.top();
+        if (elem) {
+            ss->ExternalTables[id] = elem;
+        } else {
+            ss->ExternalTables.erase(id);
+        }
+        ExternalTables.pop();
+    }
+
+    while (ExternalDataSources) {
+        const auto& [id, elem] = ExternalDataSources.top();
+        if (elem) {
+            ss->ExternalDataSources[id] = elem;
+        } else {
+            ss->ExternalDataSources.erase(id);
+        }
+        ExternalDataSources.pop();
     }
 }
 

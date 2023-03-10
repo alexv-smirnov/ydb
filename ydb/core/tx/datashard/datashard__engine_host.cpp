@@ -193,7 +193,11 @@ TIntrusivePtr<TThrRefBase> InitDataShardSysTables(TDataShard* self) {
 }
 
 ///
-class TDataShardEngineHost : public TEngineHost, public IDataShardUserDb {
+class TDataShardEngineHost final
+    : public TEngineHost
+    , public IDataShardUserDb
+    , public IDataShardChangeGroupProvider
+{
 public:
     TDataShardEngineHost(TDataShard* self, TEngineBay& engineBay, NTable::TDatabase& db, TEngineHostCounters& counters, ui64& lockTxId, ui32& lockNodeId, TInstant now)
         : TEngineHost(db, counters,
@@ -271,6 +275,24 @@ public:
         IsRepeatableSnapshot = true;
     }
 
+    bool HasChangeGroup() const override {
+        return bool(ChangeGroup);
+    }
+
+    ui64 GetChangeGroup() override {
+        if (!ChangeGroup) {
+            if (IsImmediateTx) {
+                NIceDb::TNiceDb db(DB);
+                ChangeGroup = Self->AllocateChangeRecordGroup(db);
+            } else {
+                // Distributed transactions have their group set to zero
+                ChangeGroup = 0;
+            }
+        }
+
+        return *ChangeGroup;
+    }
+
     IDataShardChangeCollector* GetChangeCollector(const TTableId& tableId) const override {
         auto it = ChangeCollectors.find(tableId.PathId);
         if (it != ChangeCollectors.end()) {
@@ -282,16 +304,29 @@ public:
             return it->second.Get();
         }
 
-        it->second.Reset(CreateChangeCollector(*Self, *const_cast<TDataShardEngineHost*>(this), DB, tableId.PathId.LocalPathId, IsImmediateTx));
+        it->second.Reset(CreateChangeCollector(
+            *Self,
+            *const_cast<TDataShardEngineHost*>(this),
+            *const_cast<TDataShardEngineHost*>(this),
+            DB,
+            tableId.PathId.LocalPathId));
         return it->second.Get();
     }
 
-    void CommitChanges(const TTableId& tableId, ui64 lockId, const TRowVersion& writeVersion, TTransactionContext& txc) {
+    void CommitChanges(const TTableId& tableId, ui64 lockId, const TRowVersion& writeVersion) {
         auto localTid = Self->GetLocalTableId(tableId);
         Y_VERIFY_S(localTid, "Unexpected failure to find table " << tableId << " in datashard " << Self->TabletID());
 
         if (!DB.HasOpenTx(localTid, lockId)) {
             return;
+        }
+
+        if (auto lock = Self->SysLocksTable().GetRawLock(lockId, TRowVersion::Min())) {
+            lock->ForAllVolatileDependencies([this](ui64 txId) {
+                if (VolatileDependencies.insert(txId).second && !VolatileTxId) {
+                    VolatileTxId = EngineBay.GetTxId();
+                }
+            });
         }
 
         if (VolatileTxId) {
@@ -311,19 +346,16 @@ public:
             "Committing changes lockId# " << lockId << " in localTid# " << localTid << " shard# " << Self->TabletID());
         DB.CommitTx(localTid, lockId, writeVersion);
 
-        if (!CommittedLockChanges.contains(lockId)) {
-            if (const auto& lockChanges = Self->GetLockChangeRecords(lockId)) {
-                if (auto* collector = GetChangeCollector(tableId)) {
-                    collector->SetWriteVersion(WriteVersion);
-                    collector->CommitLockChanges(lockId, lockChanges, txc);
-                    CommittedLockChanges.insert(lockId);
-                }
+        if (!CommittedLockChanges.contains(lockId) && Self->HasLockChangeRecords(lockId)) {
+            if (auto* collector = GetChangeCollector(tableId)) {
+                collector->CommitLockChanges(lockId, WriteVersion);
+                CommittedLockChanges.insert(lockId);
             }
         }
     }
 
-    TVector<IChangeCollector::TChange> GetCollectedChanges() const {
-        TVector<IChangeCollector::TChange> total;
+    TVector<IDataShardChangeCollector::TChange> GetCollectedChanges() const {
+        TVector<IDataShardChangeCollector::TChange> total;
 
         for (auto& [_, collector] : ChangeCollectors) {
             if (!collector) {
@@ -340,7 +372,7 @@ public:
     void ResetCollectedChanges() {
         for (auto& pr : ChangeCollectors) {
             if (pr.second) {
-                pr.second->Reset();
+                pr.second->OnRestart();
             }
         }
     }
@@ -369,6 +401,10 @@ public:
         }
 
         return dependencies;
+    }
+
+    std::optional<ui64> GetVolatileChangeGroup() const {
+        return ChangeGroup;
     }
 
     bool IsValidKey(TKeyDesc& key, std::pair<ui64, ui64>& maxSnapshotTime) const override {
@@ -730,6 +766,24 @@ public:
         }
     }
 
+    bool NeedToReadBeforeWrite(const TTableId& tableId) const override {
+        if (Self->GetVolatileTxManager().GetTxMap()) {
+            return true;
+        }
+
+        if (Self->SysLocksTable().HasWriteLocks(tableId)) {
+            return true;
+        }
+
+        if (auto* collector = GetChangeCollector(tableId)) {
+            if (collector->NeedToReadKeys()) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     void CheckWriteConflicts(const TTableId& tableId, TArrayRef<const TCell> row) {
         if (!Self->GetVolatileTxManager().GetTxMap() &&
             !Self->SysLocksTable().HasWriteLocks(tableId))
@@ -856,7 +910,9 @@ public:
 
     void AddWriteConflict(ui64 txId) const {
         if (auto* info = Self->GetVolatileTxManager().FindByCommitTxId(txId)) {
-            Y_FAIL("TODO: add future lock dependency from %" PRIu64 " on %" PRIu64, LockTxId, info->TxId);
+            if (info->State != EVolatileTxState::Aborting) {
+                Self->SysLocksTable().AddVolatileDependency(info->TxId);
+            }
         } else {
             Self->SysLocksTable().AddWriteConflict(txId);
         }
@@ -912,6 +968,7 @@ private:
     mutable absl::flat_hash_map<TPathId, NTable::ITransactionObserverPtr> TxObservers;
     mutable absl::flat_hash_set<ui64> VolatileCommitTxIds;
     mutable absl::flat_hash_set<ui64> VolatileDependencies;
+    std::optional<ui64> ChangeGroup = std::nullopt;
 };
 
 //
@@ -1108,14 +1165,14 @@ void TEngineBay::SetIsRepeatableSnapshot() {
     host->SetIsRepeatableSnapshot();
 }
 
-void TEngineBay::CommitChanges(const TTableId& tableId, ui64 lockId, const TRowVersion& writeVersion, TTransactionContext& txc) {
+void TEngineBay::CommitChanges(const TTableId& tableId, ui64 lockId, const TRowVersion& writeVersion) {
     Y_VERIFY(EngineHost);
 
     auto* host = static_cast<TDataShardEngineHost*>(EngineHost.Get());
-    host->CommitChanges(tableId, lockId, writeVersion, txc);
+    host->CommitChanges(tableId, lockId, writeVersion);
 }
 
-TVector<IChangeCollector::TChange> TEngineBay::GetCollectedChanges() const {
+TVector<IDataShardChangeCollector::TChange> TEngineBay::GetCollectedChanges() const {
     Y_VERIFY(EngineHost);
 
     auto* host = static_cast<TDataShardEngineHost*>(EngineHost.Get());
@@ -1139,6 +1196,13 @@ TVector<ui64> TEngineBay::GetVolatileDependencies() const {
 
     auto* host = static_cast<TDataShardEngineHost*>(EngineHost.Get());
     return host->GetVolatileDependencies();
+}
+
+std::optional<ui64> TEngineBay::GetVolatileChangeGroup() const {
+    Y_VERIFY(EngineHost);
+
+    auto* host = static_cast<TDataShardEngineHost*>(EngineHost.Get());
+    return host->GetVolatileChangeGroup();
 }
 
 IEngineFlat * TEngineBay::GetEngine() {

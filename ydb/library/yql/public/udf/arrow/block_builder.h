@@ -2,24 +2,52 @@
 
 #include "util.h"
 #include "bit_util.h"
+#include "block_io_buffer.h"
+#include "block_item.h"
 
+#include <ydb/library/yql/public/udf/udf_value.h>
 #include <ydb/library/yql/public/udf/udf_type_inspection.h>
 
 #include <arrow/datum.h>
 #include <arrow/c/bridge.h>
+
+#include <deque>
 
 namespace NYql {
 namespace NUdf {
 
 class IArrayBuilder {
 public:
+    struct TArrayDataItem {
+        const arrow::ArrayData* Data = nullptr;
+        ui64 StartOffset;
+    };
     virtual ~IArrayBuilder() = default;
     virtual size_t MaxLength() const = 0;
     virtual void Add(NUdf::TUnboxedValuePod value) = 0;
     virtual void Add(TBlockItem value) = 0;
+    virtual void Add(TInputBuffer& input) = 0;
     virtual void AddMany(const arrow::ArrayData& array, size_t popCount, const ui8* sparseBitmap, size_t bitmapSize) = 0;
+    virtual void AddMany(const TArrayDataItem* arrays, size_t arrayCount, ui64 beginIndex, size_t count) = 0;
+    virtual void AddMany(const TArrayDataItem* arrays, size_t arrayCount, const ui64* indexes, size_t count) = 0;
     virtual arrow::Datum Build(bool finish) = 0;
 };
+
+inline const IArrayBuilder::TArrayDataItem* LookupArrayDataItem(const IArrayBuilder::TArrayDataItem* arrays, size_t arrayCount, ui64& idx) {
+    IArrayBuilder::TArrayDataItem lookup{ nullptr, idx };
+
+    auto it = std::lower_bound(arrays, arrays + arrayCount, lookup, [](const auto& left, const auto& right) {
+        return left.StartOffset < right.StartOffset; 
+    });
+
+    if (it == arrays + arrayCount || it->StartOffset > idx) {
+        --it;
+    }
+
+    Y_VERIFY_DEBUG(it->StartOffset <= idx);
+    idx -= it->StartOffset;
+    return it;
+}
 
 class IScalarBuilder {
 public:
@@ -36,6 +64,7 @@ inline std::shared_ptr<arrow::DataType> GetArrowType(const ITypeInfoHelper& type
 }
 
 class TArrayBuilderBase : public IArrayBuilder {
+    using Self = TArrayBuilderBase;
 public:
     using Ptr = std::unique_ptr<TArrayBuilderBase>;
 
@@ -45,14 +74,19 @@ public:
         std::vector<TBlockArrayTree::Ptr> Children;
     };
 
-    TArrayBuilderBase(const ITypeInfoHelper& typeInfoHelper, const TType* type, arrow::MemoryPool& pool, size_t maxLen)
-        : ArrowType(GetArrowType(typeInfoHelper, type))
+    TArrayBuilderBase(const ITypeInfoHelper& typeInfoHelper, std::shared_ptr<arrow::DataType> arrowType, arrow::MemoryPool& pool, size_t maxLen)
+        : ArrowType(std::move(arrowType))
         , Pool(&pool)
         , MaxLen(maxLen)
         , MaxBlockSizeInBytes(typeInfoHelper.GetMaxBlockBytes())
     {
         Y_VERIFY(ArrowType);
         Y_VERIFY(maxLen > 0);
+    }
+
+    TArrayBuilderBase(const ITypeInfoHelper& typeInfoHelper, const TType* type, arrow::MemoryPool& pool, size_t maxLen)
+        : TArrayBuilderBase(typeInfoHelper, GetArrowType(typeInfoHelper, type), pool, maxLen)
+    {
     }
 
     size_t MaxLength() const final {
@@ -72,10 +106,26 @@ public:
     }
 
 
+    void Add(TInputBuffer& input) final {
+        Y_VERIFY(CurrLen < MaxLen);
+        DoAdd(input);
+        CurrLen++;
+    }
+
     void AddDefault() {
         Y_VERIFY(CurrLen < MaxLen);
         DoAddDefault();
         CurrLen++;
+    }
+
+    inline void AddMany(const arrow::ArrayData& array, ui64 beginIndex, size_t count) {
+        TArrayDataItem item = { &array, 0 };
+        Self::AddMany(&item, 1, beginIndex, count);
+    }
+
+    inline void AddMany(const arrow::ArrayData& array, const ui64* indexes, size_t count) {
+        TArrayDataItem item = { &array, 0 };
+        Self::AddMany(&item, 1, indexes, count);
     }
 
     void AddMany(const arrow::ArrayData& array, size_t popCount, const ui8* sparseBitmap, size_t bitmapSize) final {
@@ -88,6 +138,68 @@ public:
         }
 
         CurrLen += popCount;
+    }
+
+    void AddMany(const TArrayDataItem* arrays, size_t arrayCount, ui64 beginIndex, size_t count) final {
+        Y_VERIFY(arrays);
+        Y_VERIFY(arrayCount > 0);
+        if (arrayCount == 1) {
+            Y_VERIFY(arrays->Data);
+            DoAddMany(*arrays->Data, beginIndex, count);
+        } else {
+            ui64 idx = beginIndex;
+            auto item = LookupArrayDataItem(arrays, arrayCount, idx);
+            size_t avail = item->Data->length;
+            size_t toAdd = count;
+            Y_VERIFY(idx <= avail);
+            while (toAdd) {
+                size_t adding = std::min(avail, toAdd);
+                DoAddMany(*item->Data, idx, adding);
+                avail -= adding;
+                toAdd -= adding;
+
+                if (!avail && toAdd) {
+                    ++item;
+                    Y_VERIFY(item < arrays + arrayCount);
+                    avail = item->Data->length;
+                    idx = 0;
+                }
+            }
+        }
+        CurrLen += count;
+    }
+
+    void AddMany(const TArrayDataItem* arrays, size_t arrayCount, const ui64* indexes, size_t count) final {
+        Y_VERIFY(arrays);
+        Y_VERIFY(arrayCount > 0);
+        Y_VERIFY(indexes);
+        Y_VERIFY(CurrLen + count <= MaxLen);
+
+        if (arrayCount == 1) {
+            Y_VERIFY(arrays->Data);
+            DoAddMany(*arrays->Data, indexes, count);
+        } else {
+            const IArrayBuilder::TArrayDataItem* currData = nullptr;
+            TVector<ui64> currDataIndexes;
+            for (size_t i = 0; i < count; ++i) {
+                ui64 idx = indexes[i];
+                const IArrayBuilder::TArrayDataItem* data = LookupArrayDataItem(arrays, arrayCount, idx);
+                if (!currData) {
+                    currData = data;
+                }
+
+                if (data != currData) {
+                    DoAddMany(*currData->Data, currDataIndexes.data(), currDataIndexes.size());
+                    currDataIndexes.clear();
+                    currData = data;
+                }
+                currDataIndexes.push_back(idx);
+            }
+            if (!currDataIndexes.empty()) {
+                DoAddMany(*currData->Data, currDataIndexes.data(), currDataIndexes.size());
+            }
+        }
+        CurrLen += count;
     }
 
     arrow::Datum Build(bool finish) final {
@@ -108,8 +220,11 @@ public:
 protected:
     virtual void DoAdd(NUdf::TUnboxedValuePod value) = 0;
     virtual void DoAdd(TBlockItem value) = 0;
+    virtual void DoAdd(TInputBuffer& input) = 0;
     virtual void DoAddDefault() = 0;
     virtual void DoAddMany(const arrow::ArrayData& array, const ui8* sparseBitmap, size_t popCount) = 0;
+    virtual void DoAddMany(const arrow::ArrayData& array, ui64 beginIndex, size_t count) = 0;
+    virtual void DoAddMany(const arrow::ArrayData& array, const ui64* indexes, size_t count) = 0;
     virtual TBlockArrayTree::Ptr DoBuildTree(bool finish) = 0;
 
 private:
@@ -179,9 +294,15 @@ private:
     size_t CurrLen = 0;
 };
 
-template <typename T, bool Nullable>
-class TFixedSizeArrayBuilder : public TArrayBuilderBase {
+template<typename T, bool Nullable>
+class TFixedSizeArrayBuilder final : public TArrayBuilderBase {
 public:
+    TFixedSizeArrayBuilder(const ITypeInfoHelper& typeInfoHelper, std::shared_ptr<arrow::DataType> arrowType, arrow::MemoryPool& pool, size_t maxLen)
+        : TArrayBuilderBase(typeInfoHelper, std::move(arrowType), pool, maxLen)
+    {
+        Reserve();
+    }
+
     TFixedSizeArrayBuilder(const ITypeInfoHelper& typeInfoHelper, const TType* type, arrow::MemoryPool& pool, size_t maxLen)
         : TArrayBuilderBase(typeInfoHelper, type, pool, maxLen)
     {
@@ -210,6 +331,15 @@ public:
         DataBuilder->UnsafeAppend(value.As<T>());
     }
 
+    void DoAdd(TInputBuffer& input) final {
+        if constexpr (Nullable) {
+            if (!input.PopChar()) {
+                return DoAdd(TBlockItem{});
+            }
+        }
+        DoAdd(TBlockItem(input.PopNumber<T>()));
+    }
+
     void DoAddDefault() final {
         if constexpr (Nullable) {
             NullBuilder->UnsafeAppend(1);
@@ -234,6 +364,36 @@ public:
         T* dst = DataBuilder->End();
         CompressArray(src, sparseBitmap, dst, array.length);
         DataBuilder->UnsafeAdvance(popCount);
+    }
+
+    void DoAddMany(const arrow::ArrayData& array, ui64 beginIndex, size_t count) final {
+        Y_VERIFY(array.buffers.size() > 1);
+        if constexpr (Nullable) {
+            Y_VERIFY(NullBuilder->Length() == DataBuilder->Length());
+            for (size_t i = beginIndex; i < beginIndex + count; ++i) {
+                NullBuilder->UnsafeAppend(!IsNull(array, i));
+            }
+        }
+
+        const T* values = array.GetValues<T>(1);
+        for (size_t i = beginIndex; i < beginIndex + count; ++i) {
+            DataBuilder->UnsafeAppend(T(values[i]));
+        }
+    }
+
+    void DoAddMany(const arrow::ArrayData& array, const ui64* indexes, size_t count) final {
+        Y_VERIFY(array.buffers.size() > 1);
+        if constexpr (Nullable) {
+            Y_VERIFY(NullBuilder->Length() == DataBuilder->Length());
+            for (size_t i = 0; i < count; ++i) {
+                NullBuilder->UnsafeAppend(!IsNull(array, indexes[i]));
+            }
+        }
+
+        const T* values = array.GetValues<T>(1);
+        for (size_t i = 0; i < count; ++i) {
+            DataBuilder->UnsafeAppend(T(values[indexes[i]]));
+        }
     }
 
     TBlockArrayTree::Ptr DoBuildTree(bool finish) final {
@@ -272,9 +432,14 @@ private:
 };
 
 template<typename TStringType, bool Nullable>
-class TStringArrayBuilder : public TArrayBuilderBase {
+class TStringArrayBuilder final : public TArrayBuilderBase {
 public:
     using TOffset = typename TStringType::offset_type;
+    TStringArrayBuilder(const ITypeInfoHelper& typeInfoHelper, std::shared_ptr<arrow::DataType> arrowType, arrow::MemoryPool& pool, size_t maxLen)
+        : TArrayBuilderBase(typeInfoHelper, std::move(arrowType), pool, maxLen)
+    {
+        Reserve();
+    }
 
     TStringArrayBuilder(const ITypeInfoHelper& typeInfoHelper, const TType* type, arrow::MemoryPool& pool, size_t maxLen)
         : TArrayBuilderBase(typeInfoHelper, type, pool, maxLen)
@@ -319,6 +484,18 @@ public:
         if constexpr (Nullable) {
             NullBuilder->UnsafeAppend(1);
         }
+    }
+
+    void DoAdd(TInputBuffer& input) final {
+        if constexpr (Nullable) {
+            if (!input.PopChar()) {
+                return DoAdd(TBlockItem{});
+            }
+        }
+
+        auto str = input.PopString();
+        TStringRef ref(str.data(), str.size());
+        DoAdd(TBlockItem(ref));
     }
 
 
@@ -413,6 +590,86 @@ public:
         }
     }
 
+    void DoAddMany(const arrow::ArrayData& array, ui64 beginIndex, size_t count) final {
+        Y_VERIFY(array.buffers.size() > 2);
+        Y_VERIFY(!Nullable || NullBuilder->Length() == OffsetsBuilder->Length());
+
+        size_t dataLen = DataBuilder->Length();
+
+        const TOffset* offsets = array.GetValues<TOffset>(1);
+        const ui8* srcData = array.GetValues<ui8>(2, 0);
+        const ui8* chunkStart = srcData + offsets[beginIndex];
+        const ui8* chunkEnd = chunkStart;
+        for (size_t i = beginIndex; i < beginIndex + count; ++i) {
+            const ui8* begin = srcData + offsets[i];
+            const ui8* end   = srcData + offsets[i + 1];
+            const size_t strSize = end - begin;
+
+            size_t availBytes = std::max(dataLen, MaxBlockSizeInBytes) - dataLen;
+            for (;;) {
+                if (strSize <= availBytes) {
+                    if constexpr (Nullable) {
+                        NullBuilder->UnsafeAppend(!IsNull(array, i));
+                    }
+                    OffsetsBuilder->UnsafeAppend(TOffset(dataLen));
+                    chunkEnd = end;
+                    dataLen += strSize;
+                    break;
+                }
+
+                if (dataLen) {
+                    DataBuilder->UnsafeAppend(chunkStart, chunkEnd - chunkStart);
+                    chunkStart = begin;
+                    chunkEnd = end;
+                    FlushChunk(false);
+                    dataLen = 0;
+                } else {
+                    DataBuilder->Reserve(strSize);
+                    availBytes = strSize;
+                }
+            }
+        }
+        if (chunkStart != chunkEnd) {
+            DataBuilder->UnsafeAppend(chunkStart, chunkEnd - chunkStart);
+        }
+    }
+
+    void DoAddMany(const arrow::ArrayData& array, const ui64* indexes, size_t count) final {
+        Y_VERIFY(array.buffers.size() > 2);
+        Y_VERIFY(!Nullable || NullBuilder->Length() == OffsetsBuilder->Length());
+
+        size_t dataLen = DataBuilder->Length();
+
+        const TOffset* offsets = array.GetValues<TOffset>(1);
+        const char* strData = array.GetValues<char>(2, 0);
+        for (size_t i = 0; i < count; ++i) {
+            ui64 idx = indexes[i];
+            std::string_view str(strData + offsets[idx], offsets[idx + 1] - offsets[idx]);
+
+            size_t availBytes = std::max(dataLen, MaxBlockSizeInBytes) - dataLen;
+            for (;;) {
+                if (str.size() <= availBytes) {
+                    if constexpr (Nullable) {
+                        NullBuilder->UnsafeAppend(!IsNull(array, idx));
+                    }
+                    OffsetsBuilder->UnsafeAppend(TOffset(dataLen));
+                    DataBuilder->UnsafeAppend((const ui8*)str.data(), str.size());
+                    dataLen += str.size();
+                    break;
+                }
+
+                if (dataLen) {
+                    FlushChunk(false);
+                    dataLen = 0;
+                } else {
+                    DataBuilder->Reserve(str.size());
+                    availBytes = str.size();
+                }
+            }
+        }
+    }
+
+
     TBlockArrayTree::Ptr DoBuildTree(bool finish) final {
         FlushChunk(finish);
         TBlockArrayTree::Ptr result = std::make_shared<TBlockArrayTree>();
@@ -465,7 +722,7 @@ private:
 };
 
 template<bool Nullable>
-class TTupleArrayBuilder : public TArrayBuilderBase {
+class TTupleArrayBuilder final : public TArrayBuilderBase {
 public:
     TTupleArrayBuilder(const ITypeInfoHelper& typeInfoHelper, const TType* type, arrow::MemoryPool& pool, size_t maxLen,
                        TVector<TArrayBuilderBase::Ptr>&& children)
@@ -518,6 +775,18 @@ public:
         }
     }
 
+    void DoAdd(TInputBuffer& input) final {
+        if constexpr (Nullable) {
+            if (!input.PopChar()) {
+                return DoAdd(TBlockItem{});
+            }
+        }
+
+        for (ui32 i = 0; i < Children.size(); ++i) {
+            Children[i]->Add(input);
+        }
+    }
+
     void DoAddDefault() final {
         if constexpr (Nullable) {
             NullBuilder->UnsafeAppend(1);
@@ -543,6 +812,36 @@ public:
 
         for (size_t i = 0; i < Children.size(); ++i) {
             Children[i]->AddMany(*array.child_data[i], popCount, sparseBitmap, array.length);
+        }
+    }
+
+    void DoAddMany(const arrow::ArrayData& array, ui64 beginIndex, size_t count) final {
+        Y_VERIFY(!array.buffers.empty());
+        Y_VERIFY(array.child_data.size() == Children.size());
+
+        if constexpr (Nullable) {
+            for (ui64 i = beginIndex; i < beginIndex + count; ++i) {
+                NullBuilder->UnsafeAppend(!IsNull(array, i));
+            }
+        }
+
+        for (size_t i = 0; i < Children.size(); ++i) {
+            Children[i]->AddMany(*array.child_data[i], beginIndex, count);
+        }
+    }
+
+    void DoAddMany(const arrow::ArrayData& array, const ui64* indexes, size_t count) final {
+        Y_VERIFY(!array.buffers.empty());
+        Y_VERIFY(array.child_data.size() == Children.size());
+
+        if constexpr (Nullable) {
+            for (size_t i = 0; i < count; ++i) {
+                NullBuilder->UnsafeAppend(!IsNull(array, indexes[i]));
+            }
+        }
+
+        for (size_t i = 0; i < Children.size(); ++i) {
+            Children[i]->AddMany(*array.child_data[i], indexes, count);
         }
     }
 
@@ -584,7 +883,7 @@ private:
     std::unique_ptr<TTypedBufferBuilder<ui8>> NullBuilder;
 };
 
-class TExternalOptionalArrayBuilder : public TArrayBuilderBase {
+class TExternalOptionalArrayBuilder final : public TArrayBuilderBase {
 public:
     TExternalOptionalArrayBuilder(const ITypeInfoHelper& typeInfoHelper, const TType* type, arrow::MemoryPool& pool, size_t maxLen, std::unique_ptr<TArrayBuilderBase>&& inner)
         : TArrayBuilderBase(typeInfoHelper, type, pool, maxLen)
@@ -615,6 +914,16 @@ public:
         Inner->Add(value.GetOptionalValue());
     }
 
+    void DoAdd(TInputBuffer& input) final {
+        if (!input.PopChar()) {
+            NullBuilder->UnsafeAppend(0);
+            Inner->AddDefault();
+            return;
+        }
+
+        Inner->Add(input);
+    }
+
     void DoAddDefault() final {
         NullBuilder->UnsafeAppend(1);
         Inner->AddDefault();
@@ -633,6 +942,28 @@ public:
         }
 
         Inner->AddMany(*array.child_data[0], popCount, sparseBitmap, array.length);
+    }
+
+    void DoAddMany(const arrow::ArrayData& array, ui64 beginIndex, size_t count) final {
+        Y_VERIFY(!array.buffers.empty());
+        Y_VERIFY(array.child_data.size() == 1);
+
+        for (ui64 i = beginIndex; i < beginIndex + count; ++i) {
+            NullBuilder->UnsafeAppend(!IsNull(array, i));
+        }
+
+        Inner->AddMany(*array.child_data[0], beginIndex, count);
+    }
+
+    void DoAddMany(const arrow::ArrayData& array, const ui64* indexes, size_t count) final {
+        Y_VERIFY(!array.buffers.empty());
+        Y_VERIFY(array.child_data.size() == 1);
+
+        for (size_t i = 0; i < count; ++i) {
+            NullBuilder->UnsafeAppend(!IsNull(array, indexes[i]));
+        }
+
+        Inner->AddMany(*array.child_data[0], indexes, count);
     }
 
     TBlockArrayTree::Ptr DoBuildTree(bool finish) final {

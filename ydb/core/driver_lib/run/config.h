@@ -66,7 +66,8 @@ union TBasicKikimrServicesMask {
         bool EnableYandexQuery:1;
         bool EnableSequenceProxyService:1;
         bool EnableHttpProxy:1;
-        bool EnableMetadataProvider : 1;
+        bool EnableMetadataProvider:1;
+        bool EnableReplicationService:1;
     };
 
     ui64 Raw;
@@ -113,6 +114,8 @@ struct TKikimrRunConfig {
     TBasicKikimrServicesMask   ServicesMask;
 
     TMap<TString, TString>     Labels;
+
+    TString                    ClusterName;
 
     TKikimrRunConfig(NKikimrConfig::TAppConfig& appConfig,
                      ui32 nodeId = 0, const TKikimrScopeId& scopeId = {});

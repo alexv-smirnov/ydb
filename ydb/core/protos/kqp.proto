@@ -38,6 +38,7 @@ enum EQueryType {
     QUERY_TYPE_SQL_SCRIPT_STREAMING = 11;
 
     QUERY_TYPE_SQL_QUERY = 12;
+    QUERY_TYPE_FEDERATED_QUERY = 13;
 };
 
 enum EQueryAction {
@@ -69,7 +70,7 @@ enum EQueryReplyFlags {
 
 message TTopicOperations {
     optional string Consumer = 1;
-    repeated Ydb.Topic.AddOffsetsToTransactionRequest.TopicOffsets Topics = 2;
+    repeated Ydb.Topic.UpdateOffsetsInTransactionRequest.TopicOffsets Topics = 2;
 }
 
 message TQueryRequest {
@@ -521,6 +522,8 @@ message TKqpNodeResources {
     }
     repeated TMemory Memory = 8;
     optional uint32 ExecutionUnits = 9;
+
+    optional TKqpProxyNodeResources KqpProxyNodeResources = 10;
 }
 
 /// Scans
@@ -586,9 +589,22 @@ message TEvKillScanTablet {
 
 message TKqpStreamLookupSettings {
      optional NKqpProto.TKqpPhyTableId Table = 1;
-     repeated string KeyColumns = 2;
-     repeated string Columns = 3;
+     repeated TKqpColumnMetadataProto KeyColumns = 2;
+     repeated TKqpColumnMetadataProto Columns = 3;
      optional TKqpSnapshot Snapshot = 4;
      optional uint64 LockTxId = 5;
      optional bool ImmediateTx = 6;
+     repeated string LookupKeyColumns = 7;
+}
+
+message TEvFetchScriptResultsRequest {
+    optional uint64 RowsOffset = 1;
+    optional uint64 RowsLimit = 2;
+}
+
+message TEvFetchScriptResultsResponse {
+    optional Ydb.StatusIds.StatusCode Status = 1;
+    repeated Ydb.Issue.IssueMessage Issues = 2;
+    optional uint64 ResultSetIndex = 3;
+    optional Ydb.ResultSet ResultSet = 4;
 }

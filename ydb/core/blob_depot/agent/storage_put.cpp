@@ -124,6 +124,7 @@ namespace NKikimr::NBlobDepot {
                     ev->ExtraBlockChecks.emplace_back(Request.Id.TabletID(), Request.Id.Generation());
                     BDEV_QUERY(BDEV10, "TEvPut_sendToProxy", (BlobSeqId, BlobSeqId), (GroupId, groupId), (BlobId, id));
                     Agent.SendToProxy(groupId, std::move(ev), this, nullptr);
+                    Agent.BytesWritten += id.BlobSize();
                     ++PutsInFlight;
                 };
 
@@ -188,8 +189,12 @@ namespace NKikimr::NBlobDepot {
                 CheckBlocks(); // just restart request
             }
 
-            void OnIdAllocated() override {
-                IssuePuts();
+            void OnIdAllocated(bool success) override {
+                if (success) {
+                    IssuePuts();
+                } else {
+                    EndWithError(NKikimrProto::ERROR, "out of space");
+                }
             }
 
             void ProcessResponse(ui64 /*id*/, TRequestContext::TPtr context, TResponse response) override {

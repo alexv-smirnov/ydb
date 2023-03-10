@@ -2,6 +2,7 @@
 
 #include "kqp_executer.h"
 #include "kqp_executer_stats.h"
+#include "kqp_planner.h"
 #include "kqp_partition_helper.h"
 #include "kqp_table_resolver.h"
 #include "kqp_shards_resolver.h"
@@ -60,11 +61,7 @@ enum class EExecType {
 
 const ui64 MaxTaskSize = 48_MB;
 
-void PrepareKqpTaskParameters(const NKqpProto::TKqpPhyStage& stage, const TStageInfo& stageInfo, const TTask& task,
-    NYql::NDqProto::TDqTask& dqTask, const NMiniKQL::TTypeEnvironment& typeEnv, const NMiniKQL::THolderFactory& holderFactory);
-
-std::pair<TString, TString> SerializeKqpTasksParametersForOlap(const NKqpProto::TKqpPhyStage& stage,
-    const TStageInfo& stageInfo, const TTask& task);
+std::pair<TString, TString> SerializeKqpTasksParametersForOlap(const TStageInfo& stageInfo, const TTask& task);
 
 inline bool IsDebugLogEnabled() {
     return TlsActivationContext->LoggerSettings() &&
@@ -76,14 +73,51 @@ TActorId ReportToRl(ui64 ru, const TString& database, const TString& userToken,
 
 template <class TDerived, EExecType ExecType>
 class TKqpExecuterBase : public TActorBootstrapped<TDerived> {
+protected:
+    struct TEvPrivate {
+        enum EEv {
+            EvRetry = EventSpaceBegin(TEvents::ES_PRIVATE),
+            EvResourcesSnapshot,
+            EvReattachToShard,
+        };
+
+        struct TEvRetry : public TEventLocal<TEvRetry, EEv::EvRetry> {
+            ui32 RequestId;
+            TActorId Target;
+
+            TEvRetry(ui64 requestId, const TActorId& target)
+                : RequestId(requestId)
+                , Target(target) {}
+        };
+
+        struct TEvResourcesSnapshot : public TEventLocal<TEvResourcesSnapshot, EEv::EvResourcesSnapshot> {
+            TVector<NKikimrKqp::TKqpNodeResources> Snapshot;
+
+            TEvResourcesSnapshot(TVector<NKikimrKqp::TKqpNodeResources>&& snapshot)
+                : Snapshot(std::move(snapshot)) {}
+        };
+
+        struct TEvReattachToShard : public TEventLocal<TEvReattachToShard, EvReattachToShard> {
+            const ui64 TabletId;
+
+            explicit TEvReattachToShard(ui64 tabletId)
+                : TabletId(tabletId) {}
+        };
+    };
+
 public:
-    TKqpExecuterBase(IKqpGateway::TExecPhysicalRequest&& request, const TString& database, const TMaybe<TString>& userToken,
-        TKqpRequestCounters::TPtr counters, ui64 spanVerbosity = 0, TString spanName = "no_name")
+    TKqpExecuterBase(IKqpGateway::TExecPhysicalRequest&& request, const TString& database,
+        const TIntrusiveConstPtr<NACLib::TUserToken>& userToken,
+        TKqpRequestCounters::TPtr counters,
+        const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig& executerRetriesConfig,
+        ui64 spanVerbosity = 0, TString spanName = "no_name")
         : Request(std::move(request))
         , Database(database)
         , UserToken(userToken)
         , Counters(counters)
         , ExecuterSpan(spanVerbosity, std::move(Request.TraceId), spanName)
+        , Planner(nullptr)
+        , ExecuterRetriesConfig(executerRetriesConfig)
     {
         ResponseEv = std::make_unique<TEvKqpExecuter::TEvTxResponse>(Request.TxAlloc);
         ResponseEv->Orbit = std::move(Request.Orbit);
@@ -267,6 +301,7 @@ protected:
     STATEFN(ReadyState) {
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvKqpExecuter::TEvTxRequest, HandleReady);
+            hFunc(TEvKqp::TEvAbortExecution, HandleAbortExecution);
             default: {
                 UnexpectedEvent("ReadyState", ev->GetTypeRewrite());
             }
@@ -284,25 +319,6 @@ protected:
         auto progressEv = MakeHolder<TEvKqpExecuter::TEvExecuterProgress>();
         ActorIdToProto(this->SelfId(), progressEv->Record.MutableExecuterActorId());
         this->Send(Target, progressEv.Release());
-
-        const auto now = TAppData::TimeProvider->Now();
-        const auto& ctx = TlsActivationContext->AsActorContext();
-        TMaybe<TDuration> timeout;
-        if (Deadline) {
-            timeout = *Deadline - now;
-            DeadlineActor = CreateLongTimer(ctx, *timeout,
-                new IEventHandle(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup(0)));
-        }
-
-        TMaybe<TDuration> cancelAfter;
-        if (CancelAt) {
-            cancelAfter = *CancelAt - now;
-            CancelAtActor = CreateLongTimer(ctx, *cancelAfter,
-                new IEventHandle(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup(1)));
-        }
-
-        LOG_I("Begin execution. Operation timeout: " << timeout << ", cancelAfter: " << cancelAfter
-            << ", txs: " << Request.Transactions.size());
 
         if (IsDebugLogEnabled()) {
             for (auto& tx : Request.Transactions) {
@@ -323,6 +339,7 @@ protected:
 
         ExecuterTableResolveSpan = NWilson::TSpan(TWilsonKqp::ExecuterTableResolve, ExecuterStateSpan.GetTraceId(), "ExecuterTableResolve", NWilson::EFlags::AUTO_END);
 
+        auto now = TAppData::TimeProvider->Now();
         StartResolveTime = now;
 
         if (Stats) {
@@ -380,7 +397,12 @@ protected:
         auto reason = ev->Get()->Reason;
         switch (eventType) {
             case TEvKqpNode::TEvStartKqpTasksRequest::EventType: {
-                InvalidateNode(ev->Cookie);
+                if (reason == TEvents::TEvUndelivered::EReason::ReasonActorUnknown) {
+                    LOG_D("Schedule a retry by ActorUnknown reason, nodeId:" << ev->Sender.NodeId() << " requestId: " << ev->Cookie);
+                    this->Schedule(TDuration::MilliSeconds(Planner->GetCurrentRetryDelay(ev->Cookie)), new typename TEvPrivate::TEvRetry(ev->Cookie, ev->Sender));
+                    return;
+                }
+                InvalidateNode(ev->Sender.NodeId());
                 return InternalError(TStringBuilder()
                     << "TEvKqpNode::TEvStartKqpTasksRequest lost: " << reason);
             }
@@ -388,6 +410,15 @@ protected:
                 LOG_E("Event lost, type: " << eventType << ", reason: " << reason);
             }
         }
+    }
+
+    void HandleRetry(typename TEvPrivate::TEvRetry::TPtr& ev) {
+        if (Planner && Planner->SendStartKqpTasksRequest(ev->Get()->RequestId, ev->Get()->Target)) {
+            return;
+        }
+        InvalidateNode(Target.NodeId());
+        return InternalError(TStringBuilder()
+            << "TEvKqpNode::TEvStartKqpTasksRequest lost: ActorUnknown");
     }
 
     void HandleDisconnected(TEvInterconnect::TEvNodeDisconnected::TPtr& ev) {
@@ -484,21 +515,9 @@ protected:
         if (statusCode == Ydb::StatusIds::INTERNAL_ERROR) {
             InternalError(issues);
         } else if (statusCode == Ydb::StatusIds::TIMEOUT) {
-            AbortExecutionAndDie(NYql::NDqProto::StatusIds::TIMEOUT, "Request timeout exceeded");
+            AbortExecutionAndDie(ev->Sender, NYql::NDqProto::StatusIds::TIMEOUT, "Request timeout exceeded");
         } else {
             RuntimeError(NYql::NDq::DqStatusToYdbStatus(msg.GetStatusCode()), issues);
-        }
-    }
-
-    void HandleTimeout(TEvents::TEvWakeup::TPtr& ev) {
-        bool cancel = ev->Get()->Tag == 1;
-        LOG_I((cancel ? "CancelAt" : "Timeout") << " exceeded. Send timeout event to the rpc actor " << Target);
-        if (cancel) {
-            CancelAtActor = {};
-            AbortExecutionAndDie(NYql::NDqProto::StatusIds::CANCELLED, "Request timeout exceeded");
-        } else {
-            DeadlineActor = {};
-            AbortExecutionAndDie(NYql::NDqProto::StatusIds::TIMEOUT, "Request timeout exceeded");
         }
     }
 
@@ -599,8 +618,7 @@ protected:
         }
 
         if (Request.RlPath) {
-            auto actorId = ReportToRl(ru, Database, UserToken.GetOrElse(""),
-                Request.RlPath.GetRef());
+            auto actorId = ReportToRl(ru, Database, UserToken->GetSerializedToken(), Request.RlPath.GetRef());
 
             LOG_D("Resource usage for last stat interval: " << consumption
                   << " ru: " << ru << " rl path: " << Request.RlPath.GetRef()
@@ -619,7 +637,7 @@ protected:
     void BuildSysViewScanTasks(TStageInfo& stageInfo) {
         Y_VERIFY_DEBUG(stageInfo.Meta.IsSysView());
 
-        auto& stage = GetStage(stageInfo);
+        auto& stage = stageInfo.Meta.GetStage(stageInfo.Id);
 
         const auto& table = TableKeys.GetTable(stageInfo.Meta.TableId);
         const auto& keyTypes = table.KeyColumnTypes;
@@ -665,7 +683,7 @@ protected:
         THashMap<ui64, std::vector<ui64>> nodeTasks;
         THashMap<ui64, ui64> assignedShardsCount;
 
-        auto& stage = GetStage(stageInfo);
+        auto& stage = stageInfo.Meta.GetStage(stageInfo.Id);
 
         YQL_ENSURE(stage.GetSources(0).HasReadRangesSource());
         YQL_ENSURE(stage.InputsSize() == 0 && stage.SourcesSize() == 1, "multiple sources or sources mixed with connections");
@@ -705,7 +723,7 @@ protected:
             FillTableMeta(stageInfo, settings.MutableTable());
 
             for (auto& keyColumn : keyTypes) {
-                auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(keyColumn);
+                auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(keyColumn, "");
                 if (columnType.TypeInfo) {
                     *settings.AddKeyColumnTypeInfos() = *columnType.TypeInfo;
                 } else {
@@ -717,7 +735,7 @@ protected:
             for (auto& column : columns) {
                 auto* protoColumn = settings.AddColumns();
                 protoColumn->SetId(column.Id);
-                auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(column.Type);
+                auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(column.Type, column.TypeMod);
                 protoColumn->SetType(columnType.TypeId);
                 if (columnType.TypeInfo) {
                     *protoColumn->MutableTypeInfo() = *columnType.TypeInfo;
@@ -867,6 +885,33 @@ protected:
         }
     }
 
+    NYql::NDqProto::TDqTask PrepareKqpTaskParameters(const TStageInfo& stageInfo, const TTask& task, const NMiniKQL::TTypeEnvironment& typeEnv) {
+        NYql::NDqProto::TDqTask result;
+        result.SetId(task.Id);
+        result.SetStageId(stageInfo.Id.StageId);
+
+        for (auto& input : task.Inputs) {
+            FillInputDesc(*result.AddInputs(), input);
+        }
+
+        for (auto& output : task.Outputs) {
+            FillOutputDesc(*result.AddOutputs(), output);
+        }
+
+        const NKqpProto::TKqpPhyStage& stage = stageInfo.Meta.GetStage(stageInfo.Id);
+        result.MutableProgram()->CopyFrom(stage.GetProgram());
+        auto g = typeEnv.BindAllocator();
+        for (auto& paramName : stage.GetProgramParameters()) {
+            auto& dqParams = *result.MutableParameters();
+            if (auto* taskParam = task.Meta.Params.FindPtr(paramName)) {
+                dqParams[paramName] = *taskParam;
+            } else {
+                dqParams[paramName] = stageInfo.Meta.Tx.Params->SerializeParamValue(paramName);
+            }
+        }
+        return result;
+    }
+
     void FillTableMeta(const TStageInfo& stageInfo, NKikimrTxDataShard::TKqpTransaction_TTableMeta* meta) {
         meta->SetTablePath(stageInfo.Meta.TablePath);
         meta->MutableTableId()->SetTableId(stageInfo.Meta.TableId.PathId.LocalPathId);
@@ -942,14 +987,18 @@ protected:
         ReplyErrorAndDie(status, &issues);
     }
 
-    void AbortExecutionAndDie(NYql::NDqProto::StatusIds::StatusCode status, const TString& message) {
+    void AbortExecutionAndDie(TActorId abortSender, NYql::NDqProto::StatusIds::StatusCode status, const TString& message) {
         LOG_E("Abort execution: " << NYql::NDqProto::StatusIds_StatusCode_Name(status) << "," << message);
-        auto abortEv = MakeHolder<TEvKqp::TEvAbortExecution>(status, "Request timeout exceeded");
         if (ExecuterSpan) {
             ExecuterSpan.EndError(TStringBuilder() << NYql::NDqProto::StatusIds_StatusCode_Name(status));
         }
 
-        this->Send(Target, abortEv.Release());
+        // TEvAbortExecution can come from either ComputeActor or SessionActor (== Target).
+        // If it have come from SessionActor there is no need to send new TEvAbortExecution back
+        if (abortSender != Target) {
+            auto abortEv = MakeHolder<TEvKqp::TEvAbortExecution>(status, "Request timeout exceeded");
+            this->Send(Target, abortEv.Release());
+        }
         Request.Transactions.crop(0);
         TerminateComputeActors(Ydb::StatusIds::TIMEOUT, message);
         this->PassAway();
@@ -1038,12 +1087,6 @@ protected:
 protected:
     void PassAway() override {
         LOG_D("terminate execution.");
-        if (DeadlineActor) {
-            this->Send(DeadlineActor, new TEvents::TEvPoison);
-        }
-        if (CancelAtActor) {
-            this->Send(CancelAtActor, new TEvents::TEvPoison);
-        }
         if (KqpShardsResolverId) {
             this->Send(KqpShardsResolverId, new TEvents::TEvPoison);
         }
@@ -1093,14 +1136,12 @@ protected:
 protected:
     IKqpGateway::TExecPhysicalRequest Request;
     const TString Database;
-    const TMaybe<TString> UserToken;
+    const TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
     TKqpRequestCounters::TPtr Counters;
     std::unique_ptr<TQueryExecutionStats> Stats;
     TInstant StartTime;
     TMaybe<TInstant> Deadline;
-    TActorId DeadlineActor;
     TMaybe<TInstant> CancelAt;
-    TActorId CancelAtActor;
     TActorId Target;
     ui64 TxId = 0;
 
@@ -1130,19 +1171,23 @@ protected:
     ui64 LastTaskId = 0;
     TString LastComputeActorId = "";
 
+    std::unique_ptr<TKqpPlanner> Planner;
+    const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig ExecuterRetriesConfig;
+
 private:
     static constexpr TDuration ResourceUsageUpdateInterval = TDuration::MilliSeconds(100);
 };
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-IActor* CreateKqpLiteralExecuter(IKqpGateway::TExecPhysicalRequest&& request, TKqpRequestCounters::TPtr counters);
-
 IActor* CreateKqpDataExecuter(IKqpGateway::TExecPhysicalRequest&& request, const TString& database,
-    const TMaybe<TString>& userToken, TKqpRequestCounters::TPtr counters, bool streamResult);
+    const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, TKqpRequestCounters::TPtr counters, bool streamResult,
+    const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig& executerRetriesConfig);
 
 IActor* CreateKqpScanExecuter(IKqpGateway::TExecPhysicalRequest&& request, const TString& database,
-    const TMaybe<TString>& userToken, TKqpRequestCounters::TPtr counters, const NKikimrConfig::TTableServiceConfig::TAggregationConfig& aggregation);
+    const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, TKqpRequestCounters::TPtr counters,
+    const NKikimrConfig::TTableServiceConfig::TAggregationConfig& aggregation,
+    const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig& executerRetriesConfig);
 
 } // namespace NKqp
 } // namespace NKikimr

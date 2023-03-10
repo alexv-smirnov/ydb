@@ -321,8 +321,8 @@ public:
         }
 
         if (defaultToken.empty()) {
-            if (!Types.UserCredentials.OauthToken.empty()) {
-                defaultToken = Types.UserCredentials.OauthToken;
+            if (!Types.Credentials->GetUserCredentials().OauthToken.empty()) {
+                defaultToken = Types.Credentials->GetUserCredentials().OauthToken;
             }
         }
 
@@ -341,8 +341,9 @@ public:
                 token = credential->Content;
             }
 
+            TIntrusiveConstPtr<NACLib::TUserToken> tokenPtr = new NACLib::TUserToken(token);
             if (!token.empty()) {
-                Gateway->SetToken(cluster, token);
+                Gateway->SetToken(cluster, tokenPtr);
             }
         }
 

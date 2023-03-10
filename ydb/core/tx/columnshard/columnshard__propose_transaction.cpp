@@ -1,6 +1,8 @@
 #include "columnshard_impl.h"
 #include "columnshard_private_events.h"
 #include "columnshard_schema.h"
+#include <ydb/library/yql/dq/actors/compute/dq_compute_actor.h>
+#include <ydb/library/yql/dq/actors/dq.h>
 
 namespace NKikimr::NColumnShard {
 
@@ -115,8 +117,20 @@ bool TTxProposeTransaction::Execute(TTransactionContext& txc, const TActorContex
         }
         case NKikimrTxColumnShard::TX_KIND_COMMIT: {
             if (Self->CommitsInFlight.contains(txId)) {
-                statusMessage = TStringBuilder()
-                    << "Commit TxId# " << txId << " has already been proposed";
+                LOG_S_DEBUG("TTxProposeTransaction CommitTx (retry) TxId " << txId << " at tablet " << Self->TabletID());
+
+                Y_VERIFY(Self->BasicTxInfo.contains(txId));
+                const auto& txInfo = Self->BasicTxInfo[txId];
+
+                if (txInfo.Source != Ev->Get()->GetSource() || txInfo.Cookie != Ev->Cookie) {
+                    statusMessage = TStringBuilder()
+                        << "Another commit TxId# " << txId << " has already been proposed";
+                    break;
+                }
+
+                maxStep = txInfo.MaxStep;
+                minStep = maxStep - Self->MaxCommitTxDelay.MilliSeconds(); // TODO: improve this code
+                status = NKikimrTxColumnShard::EResultStatus::PREPARED;
                 break;
             }
 
@@ -189,6 +203,50 @@ bool TTxProposeTransaction::Execute(TTransactionContext& txc, const TActorContex
             status = NKikimrTxColumnShard::EResultStatus::PREPARED;
             break;
         }
+        case NKikimrTxColumnShard::TX_KIND_DATA: {
+            NKikimrTxDataShard::TDataTransaction dataTransaction;
+            Y_VERIFY(dataTransaction.ParseFromString(record.GetTxBody()));
+
+            LOG_S_DEBUG("TTxProposeTransaction immediate data tx txId " << txId
+                << " '" << dataTransaction.DebugString()
+                << "' at tablet " << Self->TabletID());
+
+            bool isImmediate = record.GetFlags() & NKikimrTxColumnShard::ETransactionFlag::TX_FLAG_IMMEDIATE;
+            if (isImmediate) {
+                for (auto&& task : dataTransaction.GetKqpTransaction().GetTasks()) {
+                    for (auto&& o : task.GetOutputs()) {
+                        for (auto&& c : o.GetChannels()) {
+                            TActorId actorId(c.GetDstEndpoint().GetActorId().GetRawX1(),
+                                             c.GetDstEndpoint().GetActorId().GetRawX2());
+                            NYql::NDqProto::TEvComputeChannelData evProto;
+                            evProto.MutableChannelData()->SetChannelId(c.GetId());
+                            evProto.MutableChannelData()->SetFinished(true);
+                            evProto.SetNoAck(true);
+                            evProto.SetSeqNo(1);
+                            auto ev = std::make_unique<NYql::NDq::TEvDqCompute::TEvChannelData>();
+                            ev->Record = evProto;
+                            ctx.Send(actorId, ev.release());
+                        }
+                    }
+                }
+                status = NKikimrTxColumnShard::EResultStatus::SUCCESS;
+            } else {
+#if 0 // TODO
+                minStep = Self->GetAllowedStep();
+                maxStep = minStep + Self->MaxCommitTxDelay.MilliSeconds();
+                auto& txInfo = Self->BasicTxInfo[txId];
+                txInfo.TxId = txId;
+                txInfo.TxKind = txKind;
+                txInfo.Source = Ev->Get()->GetSource();
+                txInfo.Cookie = Ev->Cookie;
+                Schema::SaveTxInfo(db, txInfo.TxId, txInfo.TxKind, txBody, txInfo.MaxStep, txInfo.Source, txInfo.Cookie);
+#endif
+                statusMessage = TStringBuilder() << "Planned data tx is not supported at ColumnShard txId "
+                    << txId << " '" << dataTransaction.DebugString() << "'";
+                //status = NKikimrTxColumnShard::EResultStatus::PREPARED;
+            }
+            break;
+        }
         case NKikimrTxColumnShard::TX_KIND_TTL: {
             /// @note There's no tx guaranties now. For now TX_KIND_TTL is used to trigger TTL in tests only.
             /// In future we could trigger TTL outside of tablet. Then we need real tx with complete notification.
@@ -243,7 +301,7 @@ bool TTxProposeTransaction::Execute(TTransactionContext& txc, const TActorContex
 
             if (statusMessage.empty()) {
                 if (auto event = Self->SetupTtl(pathTtls, true)) {
-                    if (event->NeedWrites()) {
+                    if (event->NeedDataReadWrite()) {
                         ctx.Send(Self->EvictionActor, event.release());
                     } else {
                         ctx.Send(Self->SelfId(), event->TxEvent.release());

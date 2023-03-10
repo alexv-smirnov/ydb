@@ -19,21 +19,21 @@ namespace NKqpHelpers {
 
     template<class TResp>
     inline TResp AwaitResponse(TTestActorRuntime& runtime, NThreading::TFuture<TResp> f) {
-        size_t responses = 0;
-        TResp response;
-        f.Subscribe([&](NThreading::TFuture<TResp> fut){
-            ++responses;
-            TResp r = fut.ExtractValueSync();
-            response.Swap(&r);
-        });
+        if (!f.HasValue() && !f.HasException()) {
+            TDispatchOptions options;
+            options.CustomFinalCondition = [&]() {
+                return f.HasValue() || f.HasException();
+            };
+            options.FinalEvents.emplace_back([&](IEventHandle&) {
+                return f.HasValue() || f.HasException();
+            });
 
-        TDispatchOptions options;
-        options.FinalEvents.emplace_back(
-            [&](IEventHandle& ) -> bool { return responses >= 1; }
-        );
+            runtime.DispatchEvents(options);
 
-        runtime.DispatchEvents(options);
-        return response;
+            UNIT_ASSERT(f.HasValue() || f.HasException());
+        }
+
+        return f.ExtractValueSync();
     }
 
     inline TString CreateSessionRPC(TTestActorRuntime& runtime, const TString& database = {}) {
@@ -85,7 +85,7 @@ namespace NKqpHelpers {
             THolder<NKqp::TEvKqp::TEvQueryRequest> request)
     {
         runtime.Send(
-            new IEventHandle(NKqp::MakeKqpProxyID(runtime.GetNodeId()), sender, request.Release()),
+            new IEventHandleFat(NKqp::MakeKqpProxyID(runtime.GetNodeId()), sender, request.Release()),
             0, /* via actor system */ true);
     }
 

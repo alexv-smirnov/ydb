@@ -1,5 +1,6 @@
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h> // Y_UNIT_TEST_(TWIN|QUAD), Q_
 #include <ydb/core/load_test/events.h>
+#include <ydb/core/load_test/ycsb/common.h>
 #include <ydb/core/load_test/ycsb/test_load_actor.h>
 #include <ydb/core/scheme/scheme_types_defs.h>
 #include <ydb/core/scheme/scheme_types_proto.h>
@@ -22,11 +23,6 @@ const TString DefaultTableName = "usertable";
 const TString FieldPrefix = "field";
 const size_t ValueColumnsCount = 10;
 
-TString GetKey(size_t n) {
-    // user1000385178204227360
-    return Sprintf("user%.19lu", n);
-}
-
 void InitRoot(Tests::TServer::TPtr server,
     TActorId sender) {
     server->SetupRootStoragePools(sender);
@@ -43,7 +39,7 @@ ui64 RunSchemeTx(
         sender = runtime.AllocateEdgeActor();
     }
 
-    runtime.Send(new IEventHandle(MakeTxProxyID(), sender, request.Release()), 0, viaActorSystem);
+    runtime.Send(new IEventHandleFat(MakeTxProxyID(), sender, request.Release()), 0, viaActorSystem);
     auto ev = runtime.GrabEdgeEventRethrow<TEvTxUserProxy::TEvProposeTransactionStatus>(sender);
     UNIT_ASSERT_VALUES_EQUAL(ev->Get()->Record.GetStatus(), expectedStatus);
 
@@ -123,7 +119,7 @@ NKikimrScheme::TEvDescribeSchemeResult DescribeTable(Tests::TServer::TPtr server
     auto request = MakeHolder<TEvTxUserProxy::TEvNavigate>();
     request->Record.MutableDescribePath()->SetPath(path);
     request->Record.MutableDescribePath()->MutableOptions()->SetShowPrivateTable(true);
-    runtime.Send(new IEventHandle(MakeTxProxyID(), sender, request.Release()));
+    runtime.Send(new IEventHandleFat(MakeTxProxyID(), sender, request.Release()));
     auto reply = runtime.GrabEdgeEventRethrow<TEvSchemeShard::TEvDescribeSchemeResult>(handle);
 
     return *reply->MutableRecord();
@@ -285,8 +281,7 @@ struct TTestHelper {
         if (!handle) {
             return nullptr;
         }
-        auto event = handle->Release<TEvDataShard::TEvReadResult>();
-        return std::unique_ptr<TEvDataShard::TEvReadResult>(event.Release());
+        return std::unique_ptr<TEvDataShard::TEvReadResult>(IEventHandle::Release<TEvDataShard::TEvReadResult>(handle));
     }
 
     std::unique_ptr<TEvDataShard::TEvReadResult> SendRead(TEvDataShard::TEvRead* request)
@@ -347,10 +342,10 @@ struct TTestHelper {
             TAutoPtr<IEventHandle> handle;
             runtime.GrabEdgeEventRethrow<TEvLoad::TEvLoadTestFinished>(handle);
             UNIT_ASSERT(handle);
-            auto response = handle->Release<TEvLoad::TEvLoadTestFinished>();
+            auto response = IEventHandle::Release<TEvLoad::TEvLoadTestFinished>(handle);
             UNIT_ASSERT(response->ErrorReason.Empty());
 
-            return std::unique_ptr<TEvLoad::TEvLoadTestFinished>(response.Release());
+            return std::unique_ptr<TEvLoad::TEvLoadTestFinished>(response);
         }
     }
 
@@ -702,6 +697,89 @@ Y_UNIT_TEST_SUITE(ReadLoad) {
 
         UNIT_ASSERT_VALUES_EQUAL(result->JsonResult["subtests"].GetInteger(), 4);
         UNIT_ASSERT_VALUES_EQUAL(result->JsonResult["oks"].GetInteger(), (4 * expectedRowCount));
+
+        // sanity check that there was data in table
+        helper.CheckKeys(0, expectedRowCount);
+    }
+
+    Y_UNIT_TEST(ShouldReadIterateMoreThanRows) {
+        // 10 rows, but ask to read 1000
+        TTestHelper helper;
+
+        const ui64 expectedRowCount = 10;
+        const ui64 expectedReadCount = 1000;
+
+        std::unique_ptr<TEvDataShardLoad::TEvYCSBTestLoadRequest> request(new TEvDataShardLoad::TEvYCSBTestLoadRequest());
+        auto& record = request->Record;
+        auto& command = *record.MutableReadIteratorStart();
+
+        command.AddChunks(0);
+        command.AddChunks(1);
+        command.AddChunks(10);
+
+        command.AddInflights(1);
+        command.SetRowCount(expectedRowCount);
+        command.SetReadCount(expectedReadCount);
+
+        auto& setupTable = *record.MutableTableSetup();
+        setupTable.SetWorkingDir("/Root");
+        setupTable.SetTableName("usertable");
+
+        auto result = helper.RunTestLoad(std::move(request));
+
+        UNIT_ASSERT_VALUES_EQUAL(result->JsonResult["subtests"].GetInteger(), 4);
+        UNIT_ASSERT_VALUES_EQUAL(result->JsonResult["oks"].GetInteger(), (3 * expectedRowCount + expectedReadCount));
+
+        // sanity check that there was data in table
+        helper.CheckKeys(0, expectedRowCount);
+    }
+
+    Y_UNIT_TEST(ShouldReadKqp) {
+        TTestHelper helper;
+
+        const ui64 expectedRowCount = 100;
+
+        std::unique_ptr<TEvDataShardLoad::TEvYCSBTestLoadRequest> request(new TEvDataShardLoad::TEvYCSBTestLoadRequest());
+        auto& record = request->Record;
+        auto& command = *record.MutableReadKqpStart();
+
+        command.AddInflights(10);
+        command.SetRowCount(expectedRowCount);
+
+        auto& setupTable = *record.MutableTableSetup();
+        setupTable.SetWorkingDir("/Root");
+        setupTable.SetTableName("usertable");
+
+        auto result = helper.RunTestLoad(std::move(request));
+
+        UNIT_ASSERT_VALUES_EQUAL(result->JsonResult["oks"].GetInteger(), (10 * expectedRowCount));
+
+        // sanity check that there was data in table
+        helper.CheckKeys(0, expectedRowCount);
+    }
+
+    Y_UNIT_TEST(ShouldReadKqpMoreThanRows) {
+        // 10 rows, but ask to read 100
+        TTestHelper helper;
+
+        const ui64 expectedRowCount = 10;
+        const ui64 expectedReadCount = 100;
+
+        std::unique_ptr<TEvDataShardLoad::TEvYCSBTestLoadRequest> request(new TEvDataShardLoad::TEvYCSBTestLoadRequest());
+        auto& record = request->Record;
+        auto& command = *record.MutableReadKqpStart();
+
+        command.AddInflights(10);
+        command.SetRowCount(expectedRowCount);
+        command.SetReadCount(expectedReadCount);
+
+        auto& setupTable = *record.MutableTableSetup();
+        setupTable.SetWorkingDir("/Root");
+        setupTable.SetTableName("usertable");
+
+        auto result = helper.RunTestLoad(std::move(request));
+
+        UNIT_ASSERT_VALUES_EQUAL(result->JsonResult["oks"].GetInteger(), (10 * expectedReadCount));
 
         // sanity check that there was data in table
         helper.CheckKeys(0, expectedRowCount);

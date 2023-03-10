@@ -82,7 +82,7 @@ private:
     })
 
     TAutoPtr<IEventHandle> AfterRegister(const TActorId& self, const TActorId& parentId) override {
-        return new IEventHandle(self, parentId, new TEvents::TEvBootstrap(), 0);
+        return new IEventHandleFat(self, parentId, new TEvents::TEvBootstrap(), 0);
     }
 
     void Bootstrap() {
@@ -105,7 +105,7 @@ private:
 
         FreeOnDeadline();
 
-        TActivationContext::Schedule(TDuration::MilliSeconds(800), new IEventHandle(SelfId(), SelfId(), new TEvents::TEvWakeup(), 0));
+        TActivationContext::Schedule(TDuration::MilliSeconds(800), new IEventHandleFat(SelfId(), SelfId(), new TEvents::TEvWakeup(), 0));
     }
 
     void DoPassAway() override {
@@ -215,7 +215,23 @@ private:
         auto count = ev->Get()->Record.GetCount();
         Y_VERIFY(count > 0);
 
-        bool canAllocate = MemoryQuoter->Allocate(traceId, 0, count * Options.MkqlInitialMemoryLimit);
+        auto& tasks = *ev->Get()->Record.MutableTask();
+
+        ui64 totalInitialTaskMemoryLimit = 0;
+        if (createComputeActor) {
+            Y_VERIFY(static_cast<int>(tasks.size()) == static_cast<int>(count));
+            for (auto& task : tasks) {
+                auto taskLimit = task.GetInitialTaskMemoryLimit();
+                if (taskLimit == 0) {
+                    taskLimit = Options.MkqlInitialMemoryLimit;
+                }
+                totalInitialTaskMemoryLimit += taskLimit;
+            }
+        } else {
+            totalInitialTaskMemoryLimit = count * Options.MkqlInitialMemoryLimit;
+        }
+
+        bool canAllocate = MemoryQuoter->Allocate(traceId, 0, totalInitialTaskMemoryLimit);
         if (!canAllocate) {
             Send(ev->Sender, MakeHolder<TEvAllocateWorkersResponse>("Not enough memory to allocate tasks", NYql::NDqProto::StatusIds::OVERLOADED), 0, ev->Cookie);
             return;
@@ -232,11 +248,6 @@ private:
                     TInstant::Now() + TDuration::MilliSeconds(ev->Get()->Record.GetFreeWorkerAfterMs());
             }
 
-            auto& tasks = *ev->Get()->Record.MutableTask();
-
-            if (createComputeActor) {
-                Y_VERIFY(static_cast<int>(tasks.size()) == static_cast<int>(count));
-            }
             auto resultId = ActorIdFromProto(ev->Get()->Record.GetResultActorId());
             ::NMonitoring::TDynamicCounterPtr taskCounters;
 

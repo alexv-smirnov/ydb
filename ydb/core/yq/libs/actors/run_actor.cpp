@@ -23,9 +23,10 @@
 #include <ydb/library/yql/providers/dq/provider/yql_dq_gateway.h>
 #include <ydb/library/yql/providers/dq/provider/yql_dq_provider.h>
 #include <ydb/library/yql/providers/dq/provider/exec/yql_dq_exectransformer.h>
-#include <ydb/library/yql/providers/dq/interface/yql_dq_task_transform.h>
+#include <ydb/library/yql/dq/integration/transform/yql_dq_task_transform.h>
 #include <ydb/library/yql/providers/pq/gateway/native/yql_pq_gateway.h>
 #include <ydb/library/yql/providers/pq/provider/yql_pq_provider.h>
+#include <ydb/library/yql/providers/pq/proto/dq_io.pb.h>
 #include <ydb/library/yql/providers/pq/task_meta/task_meta.h>
 #include <ydb/library/yql/providers/s3/provider/yql_s3_provider.h>
 #include <ydb/library/yql/providers/ydb/provider/yql_ydb_provider.h>
@@ -281,9 +282,10 @@ public:
         , Params(std::move(params))
         , CreatedAt(Params.CreatedAt)
         , QueryCounters(queryCounters)
-        , EnableCheckpointCoordinator(Params.QueryType == YandexQuery::QueryContent::STREAMING && Params.CheckpointCoordinatorConfig.GetEnabled())
-        , MaxTasksPerOperation(Params.CommonConfig.GetMaxTasksPerOperation() ? Params.CommonConfig.GetMaxTasksPerOperation() : 40)
-        , Compressor(Params.CommonConfig.GetQueryArtifactsCompressionMethod(), Params.CommonConfig.GetQueryArtifactsCompressionMinSize())
+        , EnableCheckpointCoordinator(Params.QueryType == YandexQuery::QueryContent::STREAMING && Params.Config.GetCheckpointCoordinator().GetEnabled())
+        , MaxTasksPerStage(Params.Config.GetCommon().GetMaxTasksPerStage() ? Params.Config.GetCommon().GetMaxTasksPerStage() : 500)
+        , MaxTasksPerOperation(Params.Config.GetCommon().GetMaxTasksPerOperation() ? Params.Config.GetCommon().GetMaxTasksPerOperation() : 40)
+        , Compressor(Params.Config.GetCommon().GetQueryArtifactsCompressionMethod(), Params.Config.GetCommon().GetQueryArtifactsCompressionMinSize())
     {
         QueryCounters.SetUptimePublicAndServiceCounter(0);
     }
@@ -306,7 +308,7 @@ public:
                 Params.QueryId,
                 Params.Owner,
                 SelfId(),
-                Params.PingerConfig,
+                Params.Config.GetPinger(),
                 Params.Deadline,
                 QueryCounters,
                 CreatedAt
@@ -491,15 +493,15 @@ private:
             return;
         }
 
-        if (QueryStateUpdateRequest.resources().read_rules() == Fq::Private::TaskResources::PREPARE) {
+        if (QueryStateUpdateRequest.resources().topic_consumers_state() == Fq::Private::TaskResources::PREPARE) {
             if (!ReadRulesCreatorId) {
                 ReadRulesCreatorId = Register(
                     ::NYq::MakeReadRuleCreatorActor(
                         SelfId(),
                         Params.QueryId,
                         Params.YqSharedResources->UserSpaceYdbDriver,
-                        std::move(TopicsForConsumersCreation),
-                        std::move(CredentialsForConsumersCreation)
+                        Params.Resources.topic_consumers(),
+                        PrepareReadRuleCredentials()
                     )
                 );
             }
@@ -543,7 +545,7 @@ private:
             break;
         case YandexQuery::QueryMeta::STARTING:
             QueryStateUpdateRequest.mutable_resources()->set_rate_limiter(
-                Params.RateLimiterConfig.GetEnabled() ? Fq::Private::TaskResources::PREPARE : Fq::Private::TaskResources::NOT_NEEDED);
+                Params.Config.GetRateLimiter().GetEnabled() ? Fq::Private::TaskResources::PREPARE : Fq::Private::TaskResources::NOT_NEEDED);
             QueryStateUpdateRequest.mutable_resources()->set_compilation(Fq::Private::TaskResources::PREPARE);
             // know nothing about read rules yet
             Params.Status = YandexQuery::QueryMeta::RUNNING; // ???
@@ -579,7 +581,7 @@ private:
         Issues.AddIssue("Internal Error");
 
         if (!ConsumersAreDeleted) {
-            for (const Fq::Private::TopicConsumer& c : Params.CreatedTopicConsumers) {
+            for (const Fq::Private::TopicConsumer& c : Params.Resources.topic_consumers()) {
                 TransientIssues.AddIssue(TStringBuilder() << "Created read rule `" << c.consumer_name() << "` for topic `" << c.topic_path() << "` (database id " << c.database_id() << ") maybe was left undeleted: internal error occurred");
                 TransientIssues.back().Severity = NYql::TSeverityIds::S_WARNING;
             }
@@ -667,7 +669,6 @@ private:
             LOG_D("Graph " << graphIndex);
             graphIndex++;
             const TString consumerNamePrefix = graphIndex == 1 ? Params.QueryId : TStringBuilder() << Params.QueryId << '-' << graphIndex; // Simple name in simple case
-            const auto& secureParams = graphParams.GetSecureParams();
             for (NYql::NDqProto::TDqTask& task : *graphParams.MutableTasks()) {
                 for (NYql::NDqProto::TTaskInput& taskInput : *task.MutableInputs()) {
                     if (taskInput.GetTypeCase() == NYql::NDqProto::TTaskInput::kSource && taskInput.GetSource().GetType() == "PqSource") {
@@ -683,21 +684,45 @@ private:
                             srcDesc.SetConsumerName(consumerName);
                             settingsAny.PackFrom(srcDesc);
                             if (isNewConsumer) {
-                                auto s = consumerName;
-                                LOG_D("Create consumer \"" << s << "\" for topic \"" << srcDesc.GetTopicPath() << "\"");
-                                if (const TString& tokenName = srcDesc.GetToken().GetName()) {
-                                    const auto token = secureParams.find(tokenName);
-                                    YQL_ENSURE(token != secureParams.end(), "Token " << tokenName << " was not found in secure params");
-                                    CredentialsForConsumersCreation.emplace_back(
-                                        CreateCredentialsProviderFactoryForStructuredToken(Params.CredentialsFactory, token->second, srcDesc.GetAddBearerToToken()));
-                                } else {
-                                    CredentialsForConsumersCreation.emplace_back(NYdb::CreateInsecureCredentialsProviderFactory());
-                                }
-
-                                TopicsForConsumersCreation.emplace_back(std::move(srcDesc));
+                                LOG_D("Create consumer \"" << srcDesc.GetConsumerName() << "\" for topic \"" << srcDesc.GetTopicPath() << "\"");
+                                auto& consumer = *QueryStateUpdateRequest.mutable_resources()->add_topic_consumers();
+                                consumer.set_database_id(srcDesc.GetDatabaseId());
+                                consumer.set_database(srcDesc.GetDatabase());
+                                consumer.set_topic_path(srcDesc.GetTopicPath());
+                                consumer.set_consumer_name(srcDesc.GetConsumerName());
+                                consumer.set_cluster_endpoint(srcDesc.GetEndpoint());
+                                consumer.set_use_ssl(srcDesc.GetUseSsl());
+                                consumer.set_token_name(srcDesc.GetToken().GetName());
+                                consumer.set_add_bearer_to_token(srcDesc.GetAddBearerToToken());
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    void FillMemoryInfo() {
+        auto mkqlDefaultLimit = Params.Config.GetResourceManager().GetMkqlInitialMemoryLimit();
+        if (mkqlDefaultLimit == 0) {
+            mkqlDefaultLimit = 8_GB;
+        }
+
+        auto s3ReadDefaultInflightLimit = Params.Config.GetReadActorsFactoryConfig().GetS3ReadActorFactoryConfig().GetDataInflight();
+        if (s3ReadDefaultInflightLimit == 0) {
+            s3ReadDefaultInflightLimit = 200_MB;
+        }
+
+        for (auto& graphParams : DqGraphParams) {
+            for (NYql::NDqProto::TDqTask& task : *graphParams.MutableTasks()) {
+                if (task.GetInitialTaskMemoryLimit() == 0) {
+                    ui64 limitTotal = mkqlDefaultLimit;
+                    for (auto& input : *task.MutableInputs()) {
+                        if (input.HasSource() && input.GetSource().GetType() == "S3Source") {
+                            limitTotal += s3ReadDefaultInflightLimit;
+                        }
+                    }
+                    task.SetInitialTaskMemoryLimit(limitTotal);
                 }
             }
         }
@@ -725,8 +750,8 @@ private:
 
         if (ev->Cookie == SaveQueryInfoCookie) {
             QueryStateUpdateRequest.mutable_resources()->set_compilation(Fq::Private::TaskResources::READY);
-            QueryStateUpdateRequest.mutable_resources()->set_read_rules(
-                TopicsForConsumersCreation.size() ? Fq::Private::TaskResources::PREPARE : Fq::Private::TaskResources::NOT_NEEDED);
+            QueryStateUpdateRequest.mutable_resources()->set_topic_consumers_state(
+                QueryStateUpdateRequest.resources().topic_consumers().size() ? Fq::Private::TaskResources::PREPARE : Fq::Private::TaskResources::NOT_NEEDED);
             ProcessQuery();
         } else if (ev->Cookie == SetLoadFromCheckpointModeCookie) {
             Send(ControlId, new TEvCheckpointCoordinator::TEvRunGraph());
@@ -897,23 +922,6 @@ private:
 
         CheckForConsumers();
 
-        Params.CreatedTopicConsumers.clear();
-        Params.CreatedTopicConsumers.reserve(TopicsForConsumersCreation.size());
-        for (const NYql::NPq::NProto::TDqPqTopicSource& src : TopicsForConsumersCreation) {
-            auto& consumer = *request.add_created_topic_consumers();
-            consumer.set_database_id(src.GetDatabaseId());
-            consumer.set_database(src.GetDatabase());
-            consumer.set_topic_path(src.GetTopicPath());
-            consumer.set_consumer_name(src.GetConsumerName());
-            consumer.set_cluster_endpoint(src.GetEndpoint());
-            consumer.set_use_ssl(src.GetUseSsl());
-            consumer.set_token_name(src.GetToken().GetName());
-            consumer.set_add_bearer_to_token(src.GetAddBearerToToken());
-
-            // Save for deletion
-            Params.CreatedTopicConsumers.push_back(consumer);
-        }
-
         for (const auto& graphParams : DqGraphParams) {
             const TString& serializedGraph = graphParams.SerializeAsString();
             if (Compressor.IsEnabled()) {
@@ -1034,13 +1042,27 @@ private:
         Issues.AddIssues(issues);
     }
 
+    TIssue WrapInternalIssues(const TIssues& issues) {
+        NYql::IssuesToMessage(issues, QueryStateUpdateRequest.mutable_internal_issues());
+        TString referenceId = GetEntityIdAsString(Params.Config.GetCommon().GetIdsPrefix(), EEntityType::UNDEFINED);
+        LOG_E(referenceId << ": " << issues.ToOneLineString());
+        return TIssue("Contact technical support and provide query information and this id: " + referenceId + "_" + Now().ToStringUpToSeconds());
+    }
+
     void SaveQueryResponse(NYql::NDqs::TEvQueryResponse::TPtr& ev) {
         auto& result = ev->Get()->Record;
-        LOG_D("Query response. Result set index: " << DqGraphIndex
+        LOG_D("Query response " << NYql::NDqProto::StatusIds_StatusCode_Name(ev->Get()->Record.GetStatusCode())
+            << ". Result set index: " << DqGraphIndex
             << ". Issues count: " << result.IssuesSize()
             << ". Rows count: " << result.GetRowsCount());
 
-        AddIssues(result.issues());
+        if (ev->Get()->Record.GetStatusCode() == NYql::NDqProto::StatusIds::INTERNAL_ERROR && !Params.Config.GetCommon().GetKeepInternalErrors()) {
+            TIssues issues;
+            IssuesFromMessage(result.issues(), issues);
+            Issues.AddIssue(WrapInternalIssues(issues));
+        } else {
+            AddIssues(result.issues());
+        }
 
         if (Finishing && !result.issues_size()) { // Race between abort and successful finishing. Override with success and provide results to user.
             FinalQueryStatus = YandexQuery::QueryMeta::COMPLETED;
@@ -1071,13 +1093,21 @@ private:
 
             auto& result = ev->Get()->Record;
 
-            LOG_D("Query evaluation " << it->second.Index << " response. Issues count: " << result.IssuesSize()
+            LOG_D("Query evaluation " << NYql::NDqProto::StatusIds_StatusCode_Name(result.GetStatusCode())
+                << "." << it->second.Index << " response. Issues count: " << result.IssuesSize()
                 << ". Rows count: " << result.GetRowsCount());
 
             queryResult.Data = result.yson();
 
             TIssues issues;
             IssuesFromMessage(result.GetIssues(), issues);
+
+            if (result.GetStatusCode() == NYql::NDqProto::StatusIds::INTERNAL_ERROR && !Params.Config.GetCommon().GetKeepInternalErrors()) {
+                auto issue = WrapInternalIssues(issues);
+                issues.Clear();
+                issues.AddIssue(issue);
+            }
+
             bool error = false;
             for (const auto& issue : issues) {
                 if (issue.GetSeverity() <= TSeverityIds::S_ERROR) {
@@ -1174,7 +1204,7 @@ private:
             LOG_D(Issues.ToOneLineString());
             Finish(YandexQuery::QueryMeta::FAILED);
         } else {
-            QueryStateUpdateRequest.mutable_resources()->set_read_rules(Fq::Private::TaskResources::READY);
+            QueryStateUpdateRequest.mutable_resources()->set_topic_consumers_state(Fq::Private::TaskResources::READY);
             ProcessQuery();
         }
     }
@@ -1203,17 +1233,18 @@ private:
     }
 
     bool NeedDeleteReadRules() const {
-        return !Params.CreatedTopicConsumers.empty();
+        return Params.Resources.topic_consumers_state() == Fq::Private::TaskResources::PREPARE
+            || Params.Resources.topic_consumers_state() == Fq::Private::TaskResources::READY;
     }
 
     bool CanRunReadRulesDeletionActor() const {
         return !ReadRulesCreatorId && FinalizingStatusIsWritten && QueryResponseArrived;
     }
 
-    void RunReadRulesDeletionActor() {
+    TVector<std::shared_ptr<NYdb::ICredentialsProviderFactory>> PrepareReadRuleCredentials() {
         TVector<std::shared_ptr<NYdb::ICredentialsProviderFactory>> credentials;
-        credentials.reserve(Params.CreatedTopicConsumers.size());
-        for (const Fq::Private::TopicConsumer& c : Params.CreatedTopicConsumers) {
+        credentials.reserve(Params.Resources.topic_consumers().size());
+        for (const Fq::Private::TopicConsumer& c : Params.Resources.topic_consumers()) {
             if (const TString& tokenName = c.token_name()) {
                 credentials.emplace_back(
                     CreateCredentialsProviderFactoryForStructuredToken(Params.CredentialsFactory, FindTokenByName(tokenName), c.add_bearer_to_token()));
@@ -1221,14 +1252,17 @@ private:
                 credentials.emplace_back(NYdb::CreateInsecureCredentialsProviderFactory());
             }
         }
+        return credentials;
+    }
 
+    void RunReadRulesDeletionActor() {
         Register(
             ::NYq::MakeReadRuleDeleterActor(
                 SelfId(),
                 Params.QueryId,
                 Params.YqSharedResources->UserSpaceYdbDriver,
-                Params.CreatedTopicConsumers,
-                std::move(credentials)
+                Params.Resources.topic_consumers(),
+                PrepareReadRuleCredentials()
             )
         );
     }
@@ -1264,7 +1298,7 @@ private:
     }
 
     bool StartRateLimiterResourceDeleterIfCan() {
-        if (!RateLimiterResourceDeleterId && !RateLimiterResourceCreatorId && FinalizingStatusIsWritten && QueryResponseArrived && Params.RateLimiterConfig.GetEnabled()) {
+        if (!RateLimiterResourceDeleterId && !RateLimiterResourceCreatorId && FinalizingStatusIsWritten && QueryResponseArrived && Params.Config.GetRateLimiter().GetEnabled()) {
             LOG_D("Start rate limiter resource deleter");
             RateLimiterResourceDeleterId = Register(CreateRateLimiterResourceDeleter(SelfId(), Params.Owner, Params.QueryId, Params.Scope, Params.TenantName));
             return true;
@@ -1355,7 +1389,7 @@ private:
                 ::NYq::TCoordinatorId(Params.QueryId + "-" + ToString(DqGraphIndex), Params.PreviousQueryRevision),
                 NYql::NDq::MakeCheckpointStorageID(),
                 SelfId(),
-                Params.CheckpointCoordinatorConfig,
+                Params.Config.GetCheckpointCoordinator(),
                 QueryCounters.Counters,
                 dqGraphParams,
                 Params.StateLoadMode,
@@ -1400,7 +1434,7 @@ private:
 
         // Copy settings from config
         // They are stronger than settings from this function.
-        dqSettings = Params.GatewaysConfig.GetDq().GetDefaultSettings();
+        dqSettings = Params.Config.GetGateways().GetDq().GetDefaultSettings();
 
         THashSet<TString> settingsInConfig;
         for (const auto& s : dqSettings) {
@@ -1415,7 +1449,7 @@ private:
             }
         };
 
-        apply("MaxTasksPerStage", "500");
+        apply("MaxTasksPerStage", ToString(MaxTasksPerStage));
         apply("MaxTasksPerOperation", ToString(MaxTasksPerOperation));
         apply("EnableComputeActor", "1");
         apply("ComputeActorType", "async");
@@ -1446,13 +1480,13 @@ private:
     }
 
     void AddClustersFromConfig(NYql::TGatewaysConfig& gatewaysConfig, THashMap<TString, TString>& clusters) const {
-        for (const auto& pq : Params.GatewaysConfig.GetPq().GetClusterMapping()) {
+        for (const auto& pq : Params.Config.GetGateways().GetPq().GetClusterMapping()) {
             auto& clusterCfg = *gatewaysConfig.MutablePq()->AddClusterMapping();
             clusterCfg = pq;
             clusters.emplace(clusterCfg.GetName(), PqProviderName);
         }
 
-        for (const auto& solomon : Params.GatewaysConfig.GetSolomon().GetClusterMapping()) {
+        for (const auto& solomon : Params.Config.GetGateways().GetSolomon().GetClusterMapping()) {
             auto& clusterCfg = *gatewaysConfig.MutableSolomon()->AddClusterMapping();
             clusterCfg = solomon;
             clusters.emplace(clusterCfg.GetName(), SolomonProviderName);
@@ -1562,7 +1596,7 @@ private:
             notFinished = true;
         }
 
-        if (!RateLimiterResourceWasDeleted && Params.RateLimiterConfig.GetEnabled()) {
+        if (!RateLimiterResourceWasDeleted && Params.Config.GetRateLimiter().GetEnabled()) {
             StartRateLimiterResourceDeleterIfCan();
             notFinished = true;
         }
@@ -1624,19 +1658,23 @@ private:
         SetupDqSettings(*gatewaysConfig.MutableDq());
         // the main idea of having Params.GatewaysConfig is to copy clusters only
         // but in this case we have to copy S3 provider limits
-        *gatewaysConfig.MutableS3() = Params.GatewaysConfig.GetS3();
+        *gatewaysConfig.MutableS3() = Params.Config.GetGateways().GetS3();
         gatewaysConfig.MutableS3()->ClearClusterMapping();
+
+        auto* attr = gatewaysConfig.MutableS3()->MutableDefaultSettings()->Add();
+        attr->SetName("ArrowThreadPool");
+        attr->SetValue("false");
 
         THashMap<TString, TString> clusters;
 
-        TString monitoringEndpoint = Params.CommonConfig.GetMonitoringEndpoint();
+        TString monitoringEndpoint = Params.Config.GetCommon().GetMonitoringEndpoint();
 
         //todo: consider cluster name clashes
         AddClustersFromConfig(gatewaysConfig, clusters);
         AddSystemClusters(gatewaysConfig, clusters, Params.AuthToken);
         AddClustersFromConnections(YqConnections,
-            Params.CommonConfig.GetUseBearerForYdb(),
-            Params.CommonConfig.GetObjectStorageEndpoint(),
+            Params.Config.GetCommon().GetUseBearerForYdb(),
+            Params.Config.GetCommon().GetObjectStorageEndpoint(),
             monitoringEndpoint,
             Params.AuthToken,
             Params.AccountIdSignatures,
@@ -1646,7 +1684,7 @@ private:
 
         TVector<TDataProviderInitializer> dataProvidersInit;
         const std::shared_ptr<IDatabaseAsyncResolver> dbResolver = std::make_shared<TDatabaseAsyncResolverImpl>(NActors::TActivationContext::ActorSystem(), Params.DatabaseResolver,
-            Params.CommonConfig.GetYdbMvpCloudEndpoint(), Params.CommonConfig.GetMdbGateway(), Params.CommonConfig.GetMdbTransformHost(), Params.QueryId);
+            Params.Config.GetCommon().GetYdbMvpCloudEndpoint(), Params.Config.GetCommon().GetMdbGateway(), Params.Config.GetCommon().GetMdbTransformHost(), Params.QueryId);
         {
             // TBD: move init to better place
             QueryStateUpdateRequest.set_scope(Params.Scope.ToString());
@@ -1664,7 +1702,8 @@ private:
         }
 
         {
-            dataProvidersInit.push_back(GetS3DataProviderInitializer(Params.S3Gateway, Params.CredentialsFactory));
+            dataProvidersInit.push_back(GetS3DataProviderInitializer(Params.S3Gateway, Params.CredentialsFactory, 
+                Params.Config.GetReadActorsFactoryConfig().GetS3ReadActorFactoryConfig().GetAllowLocalFiles()));
         }
 
         {
@@ -1932,7 +1971,7 @@ private:
             << " Status: " << YandexQuery::QueryMeta::ComputeStatus_Name(Params.Status)
             << " DqGraphs: " << Params.DqGraphs.size()
             << " DqGraphIndex: " << Params.DqGraphIndex
-            << " CreatedTopicConsumers: " << Params.CreatedTopicConsumers.size()
+            << " Resource.TopicConsumers: " << Params.Resources.topic_consumers().size()
             << " }");
     }
 
@@ -1963,12 +2002,11 @@ private:
     bool EnableCheckpointCoordinator = false;
     Fq::Private::PingTaskRequest QueryStateUpdateRequest;
 
+    const ui64 MaxTasksPerStage;
     const ui64 MaxTasksPerOperation;
     const TCompressor Compressor;
 
     // Consumers creation
-    TVector<NYql::NPq::NProto::TDqPqTopicSource> TopicsForConsumersCreation;
-    TVector<std::shared_ptr<NYdb::ICredentialsProviderFactory>> CredentialsForConsumersCreation;
     TMap<TString, TString> Statistics;
     NActors::TActorId ReadRulesCreatorId;
 

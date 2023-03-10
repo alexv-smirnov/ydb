@@ -6,8 +6,6 @@
 namespace NYdb {
 namespace NConsoleClient {
 
-std::shared_ptr<IProfileManager> CreateYdbProfileManager(const TString& ydbDir);
-
 class TCommandConfig : public TClientCommandTree {
 public:
     TCommandConfig();
@@ -33,7 +31,7 @@ protected:
                      TConfig& config, bool interactive, bool cmdLine);
 
     TString ProfileName, Endpoint, Database, TokenFile, YcTokenFile, SaKeyFile,
-            IamTokenFile, IamEndpoint, User, PasswordFile;
+            IamTokenFile, IamEndpoint, User, PasswordFile, CaCertsFile;
 
     bool UseMetadataCredentials = false;
     bool AnonymousAuth = false;
@@ -130,6 +128,7 @@ private:
     bool NoDatabase = false;
     bool NoAuth = false;
     bool NoIamEndpoint = false;
+    bool NoCaCertsFile = false;
 };
 
 class TCommandReplaceProfile : public TCommandProfileCommon {

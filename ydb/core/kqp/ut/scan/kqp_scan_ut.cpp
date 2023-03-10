@@ -1693,7 +1693,9 @@ Y_UNIT_TEST_SUITE(KqpScan) {
     }
 
     Y_UNIT_TEST(SecondaryIndex) {
-        auto kikimr = DefaultKikimrRunner();
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableKqpScanQueryStreamLookup(true);
+        TKikimrRunner kikimr(TKikimrSettings().SetAppConfig(appConfig));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -2125,7 +2127,9 @@ Y_UNIT_TEST_SUITE(KqpScan) {
     }
 
     Y_UNIT_TEST(StreamLookupByFullPk) {
-        TKikimrRunner kikimr;
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableKqpScanQueryStreamLookup(true);
+        TKikimrRunner kikimr(TKikimrSettings().SetAppConfig(appConfig));
         auto db = kikimr.GetTableClient();
         CreateSampleTables(kikimr);
 
@@ -2178,13 +2182,15 @@ Y_UNIT_TEST_SUITE(KqpScan) {
     }
 
     Y_UNIT_TEST(StreamLookupTryGetDataBeforeSchemeInitialization) {
-        TPortManager tp;
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableKqpDataQueryStreamLookup(true);
 
+        TPortManager tp;
         ui16 mbusport = tp.GetPort(2134);
         auto settings = Tests::TServerSettings(mbusport)
             .SetDomainName("Root")
             .SetUseRealThreads(false)
-            .SetEnableKqpScanQueryStreamLookup(true);
+            .SetAppConfig(appConfig);
 
         Tests::TServer::TPtr server = new Tests::TServer(settings);
 
@@ -2220,7 +2226,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                 auto resp = MakeHolder<NKqp::TEvKqpExecuter::TEvStreamDataAck>();
                 resp->Record.SetEnough(false);
                 resp->Record.SetSeqNo(record.GetSeqNo());
-                runtime->Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                runtime->Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                 return true;
             }
 
@@ -2228,7 +2234,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         };
 
         auto createSession = [&]() {
-            runtime->Send(new IEventHandle(kqpProxy, sender, new TEvKqp::TEvCreateSessionRequest()));
+            runtime->Send(new IEventHandleFat(kqpProxy, sender, new TEvKqp::TEvCreateSessionRequest()));
             auto reply = runtime->GrabEdgeEventRethrow<TEvKqp::TEvCreateSessionResponse>(sender);
             auto record = reply->Get()->Record;
             UNIT_ASSERT_VALUES_EQUAL(record.GetYdbStatus(), Ydb::StatusIds::SUCCESS);
@@ -2242,7 +2248,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
             ev->Record.MutableRequest()->SetType(NKikimrKqp::QUERY_TYPE_SQL_DDL);
             ev->Record.MutableRequest()->SetQuery(queryText);
 
-            runtime->Send(new IEventHandle(kqpProxy, sender, ev.release()));
+            runtime->Send(new IEventHandleFat(kqpProxy, sender, ev.release()));
             auto reply = runtime->GrabEdgeEventRethrow<TEvKqp::TEvQueryResponse>(sender);
             UNIT_ASSERT_VALUES_EQUAL(reply->Get()->Record.GetRef().GetYdbStatus(), Ydb::StatusIds::SUCCESS);
         };
@@ -2255,7 +2261,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
             ev->Record.MutableRequest()->SetKeepSession(false);
             ActorIdToProto(sender, ev->Record.MutableRequestActorId());
 
-            runtime->Send(new IEventHandle(kqpProxy, sender, ev.release()));
+            runtime->Send(new IEventHandleFat(kqpProxy, sender, ev.release()));
             auto reply = runtime->GrabEdgeEventRethrow<TEvKqp::TEvQueryResponse>(sender);
             UNIT_ASSERT_VALUES_EQUAL(reply->Get()->Record.GetRef().GetYdbStatus(), Ydb::StatusIds::SUCCESS);
         };
@@ -2274,7 +2280,9 @@ Y_UNIT_TEST_SUITE(KqpScan) {
     }
 
     Y_UNIT_TEST(LimitOverSecondaryIndexRead) {
-        auto kikimr = DefaultKikimrRunner();
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableKqpScanQueryStreamLookup(true);
+        TKikimrRunner kikimr(TKikimrSettings().SetAppConfig(appConfig));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 
@@ -2312,7 +2320,9 @@ Y_UNIT_TEST_SUITE(KqpScan) {
     }
 
     Y_UNIT_TEST(TopSortOverSecondaryIndexRead) {
-        auto kikimr = DefaultKikimrRunner();
+        NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableTableServiceConfig()->SetEnableKqpScanQueryStreamLookup(true);
+        TKikimrRunner kikimr(TKikimrSettings().SetAppConfig(appConfig));
         auto db = kikimr.GetTableClient();
         auto session = db.CreateSession().GetValueSync().GetSession();
 

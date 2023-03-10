@@ -778,7 +778,7 @@ private:
     template <class TEvPtr>
     void ForwardToCheckpoints(TEvPtr&& ev) {
         auto* x = reinterpret_cast<TAutoPtr<NActors::IEventHandle>*>(&ev);
-        Checkpoints->Receive(*x, TActivationContext::AsActorContext());
+        Checkpoints->Receive(*x);
         ev = nullptr;
     }
 
@@ -934,7 +934,6 @@ private:
     // Cpu quota
     TActorId QuoterServiceActorId;
     TInstant CpuTimeQuotaAsked;
-    TDuration CpuTimeSpent;
     std::unique_ptr<NTaskRunnerActor::TEvContinueRun> ContinueRunEvent;
     TInstant ContinueRunStartWaitTime;
     bool ContinueRunInflight = false;

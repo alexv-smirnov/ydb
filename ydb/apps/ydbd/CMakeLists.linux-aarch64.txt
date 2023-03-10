@@ -20,7 +20,6 @@ target_link_libraries(ydbd PUBLIC
   run
   ydb-core-protos
   ydb-core-security
-  libs-audit-mock
   library-folder_service-mock
   ydb-library-keys
   ydb-library-pdisk_io
@@ -61,7 +60,6 @@ target_link_options(ydbd PRIVATE
   -ldl
 )
 target_sources(ydbd PRIVATE
-  ${CMAKE_SOURCE_DIR}/ydb/apps/ydbd/log_backend.cpp
   ${CMAKE_SOURCE_DIR}/ydb/apps/ydbd/export.cpp
   ${CMAKE_SOURCE_DIR}/ydb/apps/ydbd/sqs.cpp
   ${CMAKE_SOURCE_DIR}/ydb/apps/ydbd/main.cpp

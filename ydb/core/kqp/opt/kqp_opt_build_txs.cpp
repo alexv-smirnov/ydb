@@ -9,6 +9,7 @@
 #include <ydb/library/yql/core/services/yql_out_transformers.h>
 #include <ydb/library/yql/core/services/yql_transform_pipeline.h>
 #include <ydb/library/yql/providers/common/provider/yql_provider.h>
+#include <ydb/core/kqp/gateway/kqp_gateway.h>
 
 namespace NKikimr::NKqp::NOpt {
 
@@ -68,7 +69,7 @@ private:
             return EPhysicalTxType::Scan;
         }
 
-        if (QueryType == EKikimrQueryType::Query) {
+        if (QueryType == EKikimrQueryType::Query || QueryType == EKikimrQueryType::FederatedQuery) {
             if (IsPrecompute && allStagesArePure) {
                 return EPhysicalTxType::Compute;
             }
@@ -462,7 +463,7 @@ public:
             .AddPostTypeAnnotation(/* forSubgraph */ true)
             .Add(CreateKqpBuildPhyStagesTransformer(/* allowDependantConsumers */ false), "BuildPhysicalStages")
             .Add(*BuildTxTransformer, "BuildPhysicalTx")
-            .Add(CreateKqpTxPeepholeTransformer(TypeAnnTransformer.Get(), typesCtx, config), "Peephole")
+            .Add(CreateKqpTxPeepholeTransformer(TypeAnnTransformer.Get(), typesCtx, config, /* withFinalStageRules */ false), "Peephole")
             .Build(false);
 
         ScanTxTransformer = TTransformationPipeline(&typesCtx)

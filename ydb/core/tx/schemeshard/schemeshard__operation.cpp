@@ -58,8 +58,11 @@ void AuditLogModifySchemeTransaction(const NKikimrScheme::TEvModifySchemeTransac
             databasePath.RiseUntilFirstResolvedParent();
         }
 
+        auto peerName = request.GetPeerName();
+
         AUDIT_LOG(
             AUDIT_PART("txId", std::to_string(request.GetTxId()))
+            AUDIT_PART("remote_address", (!peerName.empty() ? peerName : EmptyValue) )
             AUDIT_PART("subject", (!userSID.empty() ? userSID : EmptyValue))
             AUDIT_PART("database", (!databasePath.IsEmpty() ? databasePath.GetDomainPathString() : EmptyValue))
             AUDIT_PART("operation", logEntry.Operation)
@@ -94,7 +97,7 @@ struct TSchemeShard::TTxOperationProposeCancelTx: public NTabletFlatExecutor::TT
 
         txc.DB.NoMoreReadsForTx();
 
-        ISubOperationBase::TPtr part = CreateTxCancelTx(Ev);
+        ISubOperation::TPtr part = CreateTxCancelTx(Ev);
         TOperationContext context{Self, txc, ctx, OnComplete, MemChanges, DbChanges};
         auto fakeResponse = part->Propose(TString(), context);
         Y_UNUSED(fakeResponse);
@@ -357,7 +360,7 @@ struct TSchemeShard::TTxOperationProgress: public NTabletFlatExecutor::TTransact
             return true;
         }
 
-        ISubOperationBase::TPtr part = operation->Parts.at(ui64(OpId.GetSubTxId()));
+        ISubOperation::TPtr part = operation->Parts.at(ui64(OpId.GetSubTxId()));
 
         TOperationContext context{Self, txc, ctx, OnComplete, MemChanges, DbChanges};
 
@@ -402,7 +405,7 @@ struct TSchemeShard::TTxOperationReply {};
                         "TTxOperationReply<" #TEvType "> execute " \
                             << ", operationId: " << OperationId \
                             << ", at schemeshard: " << Self->TabletID() \
-                            << ", message: " << IOperationBase::DebugReply(EvReply)); \
+                            << ", message: " << ISubOperationState::DebugReply(EvReply)); \
             if (!Self->Operations.contains(OperationId.GetTxId())) { \
                 return true; \
             } \
@@ -415,7 +418,7 @@ struct TSchemeShard::TTxOperationReply {};
                                << ", at schemeshard: " << Self->TabletID()); \
                 return true; \
             } \
-            ISubOperationBase::TPtr part = operation->Parts.at(ui64(OperationId.GetSubTxId())); \
+            ISubOperation::TPtr part = operation->Parts.at(ui64(OperationId.GetSubTxId())); \
             TOperationContext context{Self, txc, ctx, OnComplete, MemChanges, DbChanges}; \
             Y_VERIFY(EvReply); \
             part->HandleReply(EvReply, context); \
@@ -490,7 +493,7 @@ struct TSchemeShard::TTxOperationPlanStep: public NTabletFlatExecutor::TTransact
 
                 TOperationContext context{Self, txc, ctx, OnComplete, MemChanges, DbChanges};
                 THolder<TEvPrivate::TEvOperationPlan> msg = MakeHolder<TEvPrivate::TEvOperationPlan>(ui64(step), ui64(txId));
-                TEvPrivate::TEvOperationPlan::TPtr personalEv = (TEventHandle<TEvPrivate::TEvOperationPlan>*) new IEventHandle(
+                TEvPrivate::TEvOperationPlan::TPtr personalEv = (TEventHandleFat<TEvPrivate::TEvOperationPlan>*) new IEventHandleFat(
                             context.SS->SelfId(), context.SS->SelfId(), msg.Release());
 
                 operation->Parts.at(partIdx)->HandleReply(personalEv, context);
@@ -666,6 +669,12 @@ TOperation::TSplitTransactionsResult TOperation::SplitIntoTransactions(const TTx
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateColumnTable:
         targetName = tx.GetCreateColumnTable().GetName();
         break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalTable:
+        targetName = tx.GetCreateExternalTable().GetName();
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalDataSource:
+        targetName = tx.GetCreateExternalDataSource().GetName();
+        break;
     default:
         result.Transactions.push_back(tx);
         return result;
@@ -760,6 +769,12 @@ TOperation::TSplitTransactionsResult TOperation::SplitIntoTransactions(const TTx
         case NKikimrSchemeOp::EOperationType::ESchemeOpCreateColumnTable:
             create.MutableCreateColumnTable()->SetName(name);
             break;
+        case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalTable:
+            create.MutableCreateExternalTable()->SetName(name);
+            break;
+        case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalDataSource:
+            create.MutableCreateExternalDataSource()->SetName(name);
+            break;
         default:
             Y_UNREACHABLE();
         }
@@ -833,7 +848,7 @@ TOperation::TSplitTransactionsResult TOperation::SplitIntoTransactions(const TTx
     return result;
 }
 
-ISubOperationBase::TPtr TOperation::RestorePart(TTxState::ETxType txType, TTxState::ETxState txState) const {
+ISubOperation::TPtr TOperation::RestorePart(TTxState::ETxType txType, TTxState::ETxState txState) const {
     switch (txType) {
     case TTxState::ETxType::TxMkDir:
         return CreateMkDir(NextPartId(), txState);
@@ -1004,7 +1019,18 @@ ISubOperationBase::TPtr TOperation::RestorePart(TTxState::ETxType txType, TTxSta
         return CreateAlterBlobDepot(NextPartId(), txState);
     case TTxState::ETxType::TxDropBlobDepot:
         return CreateDropBlobDepot(NextPartId(), txState);
-
+    case TTxState::ETxType::TxCreateExternalTable:
+        return CreateNewExternalTable(NextPartId(), txState);
+    case TTxState::ETxType::TxDropExternalTable:
+        return CreateDropExternalTable(NextPartId(), txState);
+    case TTxState::ETxType::TxAlterExternalTable:
+        Y_FAIL("TODO: implement");
+    case TTxState::ETxType::TxCreateExternalDataSource:
+        return CreateNewExternalDataSource(NextPartId(), txState);
+    case TTxState::ETxType::TxDropExternalDataSource:
+        return CreateDropExternalDataSource(NextPartId(), txState);
+    case TTxState::ETxType::TxAlterExternalDataSource:
+        Y_FAIL("TODO: implement");
     case TTxState::ETxType::TxInvalid:
         Y_UNREACHABLE();
     }
@@ -1012,7 +1038,7 @@ ISubOperationBase::TPtr TOperation::RestorePart(TTxState::ETxType txType, TTxSta
     Y_UNREACHABLE();
 }
 
-ISubOperationBase::TPtr TOperation::ConstructPart(NKikimrSchemeOp::EOperationType opType, const TTxTransaction& tx) const {
+ISubOperation::TPtr TOperation::ConstructPart(NKikimrSchemeOp::EOperationType opType, const TTxTransaction& tx) const {
     switch (opType) {
     case NKikimrSchemeOp::EOperationType::ESchemeOpMkDir:
         return CreateMkDir(NextPartId(), tx);
@@ -1205,12 +1231,28 @@ ISubOperationBase::TPtr TOperation::ConstructPart(NKikimrSchemeOp::EOperationTyp
         return CreateAlterBlobDepot(NextPartId(), tx);
     case NKikimrSchemeOp::EOperationType::ESchemeOpDropBlobDepot:
         return CreateDropBlobDepot(NextPartId(), tx);
+
+    // ExternalTable
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalTable:
+        return CreateNewExternalTable(NextPartId(), tx);
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalTable:
+        return CreateDropExternalTable(NextPartId(), tx);
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterExternalTable:
+        Y_FAIL("TODO: implement");
+
+    // ExternalDataSource
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalDataSource:
+        return CreateNewExternalDataSource(NextPartId(), tx);
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalDataSource:
+        return CreateDropExternalDataSource(NextPartId(), tx);
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterExternalDataSource:
+        Y_FAIL("TODO: implement");
     }
 
     Y_UNREACHABLE();
 }
 
-TVector<ISubOperationBase::TPtr> TOperation::ConstructParts(const TTxTransaction& tx, TOperationContext& context) const {
+TVector<ISubOperation::TPtr> TOperation::ConstructParts(const TTxTransaction& tx, TOperationContext& context) const {
     const auto& opType = tx.GetOperationType();
 
     switch (opType) {
@@ -1256,7 +1298,7 @@ TVector<ISubOperationBase::TPtr> TOperation::ConstructParts(const TTxTransaction
     }
 }
 
-void TOperation::AddPart(ISubOperationBase::TPtr part) {
+void TOperation::AddPart(ISubOperation::TPtr part) {
     Parts.push_back(part);
 }
 

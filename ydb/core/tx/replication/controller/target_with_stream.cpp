@@ -1,12 +1,11 @@
 #include "private_events.h"
 #include "stream_creator.h"
+#include "stream_remover.h"
 #include "target_with_stream.h"
 
 #include <library/cpp/actors/core/events.h>
 
-namespace NKikimr {
-namespace NReplication {
-namespace NController {
+namespace NKikimr::NReplication::NController {
 
 void TTargetWithStream::Progress(ui64 schemeShardId, const TActorId& proxy, const TActorContext& ctx) {
     switch (GetStreamState()) {
@@ -15,12 +14,18 @@ void TTargetWithStream::Progress(ui64 schemeShardId, const TActorId& proxy, cons
             ctx.Send(ctx.SelfID, new TEvPrivate::TEvAssignStreamName(GetReplicationId(), GetTargetId()));
             NameAssignmentInProcess = true;
         } else if (!StreamCreator) {
-            StreamCreator = ctx.Register(CreateStreamCreator(ctx.SelfID, GetReplicationId(), GetTargetId(), proxy));
+            StreamCreator = ctx.Register(CreateStreamCreator(ctx.SelfID, proxy,
+                GetReplicationId(), GetTargetId(), GetTargetKind(), GetSrcPath(), GetStreamName()));
         }
         return;
     case EStreamState::Removing:
-        return; // TODO
+        if (!StreamRemover) {
+            StreamRemover = ctx.Register(CreateStreamRemover(ctx.SelfID, proxy,
+                GetReplicationId(), GetTargetId(), GetTargetKind(), GetSrcPath(), GetStreamName()));
+        }
+        return;
     case EStreamState::Ready:
+    case EStreamState::Removed:
     case EStreamState::Error:
         break;
     }
@@ -38,6 +43,4 @@ void TTargetWithStream::Shutdown(const TActorContext& ctx) {
     TTargetBase::Shutdown(ctx);
 }
 
-} // NController
-} // NReplication
-} // NKikimr
+}

@@ -445,7 +445,7 @@ void TWriteSessionActor<UseMigrationProtocol>::Handle(typename TEvWriteInit::TPt
     UserAgent = "pqv1 server";
     LogSession(ctx);
 
-    if (Request->GetInternalToken().empty()) { // session without auth
+    if (Request->GetSerializedToken().empty()) { // session without auth
         if (AppData(ctx)->PQConfig.GetRequireCredentialsInNewProtocol()) {
             Request->ReplyUnauthenticated("Unauthenticated access is forbidden, please provide credentials");
             Die(ctx);
@@ -607,7 +607,7 @@ void TWriteSessionActor<UseMigrationProtocol>::Handle(TEvDescribeTopicsResponse:
 
     SetMeteringMode(meteringMode);
 
-    if (Request->GetInternalToken().empty()) { // session without auth
+    if (Request->GetSerializedToken().empty()) { // session without auth
         if (AppData(ctx)->PQConfig.GetRequireCredentialsInNewProtocol()) {
             Request->ReplyUnauthenticated("Unauthenticated access is forbidden, please provide credentials");
             Die(ctx);
@@ -619,7 +619,7 @@ void TWriteSessionActor<UseMigrationProtocol>::Handle(TEvDescribeTopicsResponse:
     } else {
         Y_VERIFY(Request->GetYdbToken());
         Auth = *Request->GetYdbToken();
-        Token = new NACLib::TUserToken(Request->GetInternalToken());
+        Token = new NACLib::TUserToken(Request->GetSerializedToken());
 
         if (FirstACLCheck && IsQuotaRequired()) {
             Y_VERIFY(MaybeRequestQuota(1, EWakeupTag::RlInit, ctx));
@@ -1050,7 +1050,7 @@ void TWriteSessionActor<UseMigrationProtocol>::Handle(NPQ::TEvPartitionWriter::T
 
     State = ES_INITED;
 
-    ctx.Schedule(CHECK_ACL_DELAY, new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
+    ctx.Schedule(TDuration::Seconds(AppData(ctx)->PQConfig.GetACLRetryTimeoutSec()), new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
 
     //init completed; wait for first data chunk
     NextRequestInited = true;
@@ -1395,8 +1395,8 @@ void TWriteSessionActor<UseMigrationProtocol>::Handle(NGRpcService::TGRpcRequest
     Y_UNUSED(ctx);
     LOG_INFO_S(ctx, NKikimrServices::PQ_WRITE_PROXY, "updating token");
 
-    if (ev->Get()->Authenticated && !ev->Get()->InternalToken.empty()) {
-        Token = new NACLib::TUserToken(ev->Get()->InternalToken);
+    if (ev->Get()->Authenticated && ev->Get()->InternalToken && !ev->Get()->InternalToken->GetSerializedToken().empty()) {
+        Token = ev->Get()->InternalToken;
         Request->SetInternalToken(ev->Get()->InternalToken);
         UpdateTokenAuthenticated = true;
         if (!ACLCheckInProgress) {
@@ -1579,7 +1579,6 @@ template<bool UseMigrationProtocol>
 void TWriteSessionActor<UseMigrationProtocol>::Handle(TEvents::TEvWakeup::TPtr& ev, const TActorContext& ctx) {
     const auto tag = static_cast<EWakeupTag>(ev->Get()->Tag);
     OnWakeup(tag);
-
     switch (tag) {
         case EWakeupTag::RlInit:
             return CheckACL(ctx);
@@ -1616,7 +1615,7 @@ void TWriteSessionActor<UseMigrationProtocol>::Handle(TEvents::TEvWakeup::TPtr& 
 template<bool UseMigrationProtocol>
 void TWriteSessionActor<UseMigrationProtocol>::RecheckACL(const TActorContext& ctx) {
     Y_VERIFY(State == ES_INITED);
-    ctx.Schedule(CHECK_ACL_DELAY, new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
+    ctx.Schedule(TDuration::Seconds(AppData(ctx)->PQConfig.GetACLRetryTimeoutSec()), new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
     if (Token && !ACLCheckInProgress && RequestNotChecked && (ctx.Now() - LastACLCheckTimestamp > TDuration::Seconds(AppData(ctx)->PQConfig.GetACLRetryTimeoutSec()))) {
         RequestNotChecked = false;
         InitCheckSchema(ctx);

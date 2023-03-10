@@ -219,11 +219,9 @@ message TGroupStatus {
 
 message TDriveLifeStage {
     enum E {
-        UNKNOWN = 0; // life stage is unknown (default)
-        NOT_SEEN = 1; // info about drive is located in BSC db, but drive is not seen in any node
-        ADDED = 2; // PDisk has been added to the DrivesSerials table
-        REMOVED = 3; // PDisk has been removed from the DrivesSerials table
-        ERROR = 4; // drive was moved between nodes with allocated VDisks
+        FREE = 0; // disk drive has been seen on a node, but is not added to BSC yet
+        ADDED_BY_DSTOOL = 1; // disk drive has been added to BSC
+        REMOVED_BY_DSTOOL = 2; // disk drive has been removed from BSC
     }
 }
 
@@ -254,6 +252,7 @@ message TProposeStoragePools {
 }
 
 message TQueryBaseConfig {
+    bool RetrieveDevices = 1;
 }
 
 message TReadSettings {
@@ -639,11 +638,22 @@ message TBaseConfig {
         uint64 LastSeenTimestamp = 7; // when seen working for the last time
         ENodeType Type = 8;
     }
+    message TDevice {
+        string SerialNumber = 1;
+        uint64 BoxId = 2;
+        uint32 NodeId = 3;
+        uint32 PDiskId = 4;
+        string Path = 5;
+        EPDiskType Type = 6;
+        uint64 Guid = 7;
+        TDriveLifeStage.E LifeStage = 8;
+    }
 
     repeated TPDisk PDisk = 1;
     repeated TVSlot VSlot = 2;
     repeated TGroup Group = 3;
     repeated TNode Node = 4;
+    repeated TDevice Device = 5;
 }
 
 message TMoveCommand {

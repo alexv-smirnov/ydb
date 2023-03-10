@@ -14,6 +14,7 @@ bool IsSqlQuery(const NKikimrKqp::EQueryType& queryType) {
         case NKikimrKqp::QUERY_TYPE_SQL_SCRIPT_STREAMING:
         case NKikimrKqp::QUERY_TYPE_SQL_SCAN:
         case NKikimrKqp::QUERY_TYPE_SQL_QUERY:
+        case NKikimrKqp::QUERY_TYPE_FEDERATED_QUERY:
             return true;
 
         default:
@@ -39,7 +40,7 @@ void TKqpShutdownController::Stop() {
     if (!EnableGraceful)
         return;
 
-    ActorSystem_->Send(new NActors::IEventHandle(KqpProxyActorId_, {}, new TEvKqp::TEvInitiateShutdownRequest(ShutdownState_)));
+    ActorSystem_->Send(new NActors::IEventHandleFat(KqpProxyActorId_, {}, new TEvKqp::TEvInitiateShutdownRequest(ShutdownState_)));
     auto timeout = TDuration::MilliSeconds(TableServiceConfig.GetShutdownSettings().GetShutdownTimeoutMs());
     auto startedAt = TInstant::Now();
     auto spent = (TInstant::Now() - startedAt).SecondsFloat();
@@ -64,4 +65,3 @@ void TKqpShutdownController::Stop() {
 }
 
 } // namespace NKikimr::NKqp
-

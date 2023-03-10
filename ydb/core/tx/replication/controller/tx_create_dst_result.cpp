@@ -1,8 +1,6 @@
 #include "controller_impl.h"
 
-namespace NKikimr {
-namespace NReplication {
-namespace NController {
+namespace NKikimr::NReplication::NController {
 
 class TController::TTxCreateDstResult: public TTxBase {
     TEvPrivate::TEvCreateDstResult::TPtr Ev;
@@ -37,6 +35,14 @@ public:
             CLOG_W(ctx, "Unknown target"
                 << ": rid# " << rid
                 << ", tid# " << tid);
+            return true;
+        }
+
+        if (target->GetDstState() != TReplication::EDstState::Creating) {
+            CLOG_W(ctx, "Dst state mismatch"
+                << ": rid# " << rid
+                << ", tid# " << tid
+                << ", state# " << target->GetDstState());
             return true;
         }
 
@@ -90,6 +96,4 @@ void TController::RunTxCreateDstResult(TEvPrivate::TEvCreateDstResult::TPtr& ev,
     Execute(new TTxCreateDstResult(this, ev), ctx);
 }
 
-} // NController
-} // NReplication
-} // NKikimr
+}

@@ -255,11 +255,6 @@ namespace NKikimr::NPersQueueTests {
                             }
                             messagesReceived = msg.GetOffset() + 1;
                         }
-                        if (messagesReceived >= maxMessagesCount) {
-                            Cerr << "Closing session. Got " << messagesReceived << " messages" << Endl;
-                            reader->Close(TDuration::Seconds(0));
-                            Cerr << "Session closed" << Endl;
-                        }
                     }, false);
                 reader = CreateReader(*ydbDriver, settings);
 
@@ -267,6 +262,9 @@ namespace NKikimr::NPersQueueTests {
 
                 Cout.Flush();
                 while (messagesReceived < maxMessagesCount) Sleep(TDuration::MilliSeconds(10));
+                Cerr << "Closing session. Got " << messagesReceived << " messages" << Endl;
+                reader->Close(TDuration::Seconds(0));
+                Cerr << "Session closed" << Endl;
 
                 if (tsIt == 0) {
                     for (ui32 i = 0; i < ts.size(); ++i) {
@@ -456,7 +454,7 @@ namespace NKikimr::NPersQueueTests {
 
     Y_UNIT_TEST_SUITE(TPersqueueDataPlaneTestSuite) {
         Y_UNIT_TEST(WriteSession) {
-            TPersQueueV1TestServer server(true);
+            TPersQueueV1TestServer server(true, true);
 
             TString topic = "/Root/account1/write_topic";
             TString consumer = "consumer_aba";
@@ -520,7 +518,7 @@ namespace NKikimr::NPersQueueTests {
 
     Y_UNIT_TEST_SUITE(TPersqueueControlPlaneTestSuite) {
         Y_UNIT_TEST(SetupReadLockSessionWithDatabase) {
-            TPersQueueV1TestServer server;
+            TPersQueueV1TestServer server(false, true);
 
             {
                 auto res = server.PersQueueClient->AddReadRule("/Root/acc/topic1", TAddReadRuleSettings().ReadRule(TReadRuleSettings().ConsumerName("user1")));
@@ -556,7 +554,7 @@ namespace NKikimr::NPersQueueTests {
         }
 
         Y_UNIT_TEST(SetupWriteLockSessionWithDatabase) {
-            TPersQueueV1TestServer server;
+            TPersQueueV1TestServer server(false, true);
 
             auto stub = Ydb::PersQueue::V1::PersQueueService::NewStub(server.InsecureChannel);
             grpc::ClientContext grpcContext;
@@ -581,7 +579,7 @@ namespace NKikimr::NPersQueueTests {
         }
 
         Y_UNIT_TEST(TestAddRemoveReadRule) {
-            TPersQueueV1TestServer server;
+            TPersQueueV1TestServer server(false, true);
             SET_LOCALS;
 
             pqClient->CreateConsumer("goodUser");

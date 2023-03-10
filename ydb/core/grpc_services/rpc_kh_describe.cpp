@@ -92,7 +92,7 @@ private:
         auto path = ::NKikimr::SplitPath(table);
         TMaybe<ui64> tabletId = TryParseLocalDbPath(path);
         if (tabletId) {
-            if (Request->GetInternalToken().empty() || !IsSuperUser(NACLib::TUserToken(Request->GetInternalToken()), *AppData(ctx))) {
+            if (Request->GetSerializedToken().empty() || !IsSuperUser(NACLib::TUserToken(Request->GetSerializedToken()), *AppData(ctx))) {
                 return ReplyWithError(Ydb::StatusIds::NOT_FOUND, "Invalid table path specified", ctx);
             }
 
@@ -113,7 +113,7 @@ private:
             ctx.Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvNavigateKeySet(request));
 
             TimeoutTimerActorId = CreateLongTimer(ctx, Timeout,
-                new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
+                new IEventHandleFat(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
 
             TBase::Become(&TThis::StateWaitResolveTable);
             WaitingResolveReply = true;
@@ -178,7 +178,10 @@ private:
             auto& typeInfo = col.second.PType;
             auto* item = colMeta->mutable_type();
             if (typeInfo.GetTypeId() == NScheme::NTypeIds::Pg) {
-                item->mutable_pg_type()->set_oid(NPg::PgTypeIdFromTypeDesc(typeInfo.GetTypeDesc()));
+                auto* typeDesc = typeInfo.GetTypeDesc();
+                auto* pg = item->mutable_pg_type();
+                pg->set_type_name(NPg::PgTypeNameFromTypeDesc(typeDesc));
+                pg->set_oid(NPg::PgTypeIdFromTypeDesc(typeDesc));
             } else {
                 item->mutable_optional_type()->mutable_item()
                     ->set_type_id((Ydb::Type::PrimitiveTypeId)typeInfo.GetTypeId());
@@ -205,10 +208,10 @@ private:
     }
 
     bool CheckAccess(TString& errorMessage) {
-        if (Request->GetInternalToken().empty())
+        if (Request->GetSerializedToken().empty())
             return true;
 
-        NACLib::TUserToken userToken(Request->GetInternalToken());
+        NACLib::TUserToken userToken(Request->GetSerializedToken());
 
         const ui32 access = NACLib::EAccessRights::DescribeSchema;
         for (const NSchemeCache::TSchemeCacheNavigate::TEntry& entry : ResolveNamesResult->ResultSet) {
@@ -348,8 +351,8 @@ private:
     }
 };
 
-void DoKikhouseDescribeTableRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TKikhouseDescribeTableRPC(std::move(p)));
+void DoKikhouseDescribeTableRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TKikhouseDescribeTableRPC(std::move(p)));
 }
 
 } // namespace NKikimr

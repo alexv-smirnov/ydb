@@ -220,7 +220,7 @@ public:
             auto colDescr = descr.AddColumns();
             colDescr->SetId(columnId);
             colDescr->SetName(column.Name);
-            auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(column.PType);
+            auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(column.PType, column.PTypeMod);
             colDescr->SetColType(columnType.TypeId);
             if (columnType.TypeInfo) {
                 *colDescr->MutableColTypeInfo() = *columnType.TypeInfo;
@@ -303,6 +303,8 @@ public:
         auto migrateShards = event->Record.MutableShards();
         switch (path.Base()->PathType) {
             case NKikimrSchemeOp::EPathType::EPathTypeDir:
+            case NKikimrSchemeOp::EPathType::EPathTypeExternalTable:
+            case NKikimrSchemeOp::EPathType::EPathTypeExternalDataSource:
                 Y_VERIFY(!path.Base()->IsRoot());
                 //no shards
                 break;
@@ -1277,7 +1279,7 @@ public:
             Y_VERIFY(operation->Parts.size());
 
             THolder<TEvPrivate::TEvUndoTenantUpdate> msg = MakeHolder<TEvPrivate::TEvUndoTenantUpdate>();
-            TEvPrivate::TEvUndoTenantUpdate::TPtr personalEv = (TEventHandle<TEvPrivate::TEvUndoTenantUpdate>*) new IEventHandle(
+            TEvPrivate::TEvUndoTenantUpdate::TPtr personalEv = (TEventHandleFat<TEvPrivate::TEvUndoTenantUpdate>*) new IEventHandleFat(
                 context.SS->SelfId(), context.SS->SelfId(), msg.Release());
             operation->Parts.front()->HandleReply(personalEv, context);
         }
@@ -1421,14 +1423,14 @@ public:
         switch (decision) {
         case NKikimrSchemeOp::TUpgradeSubDomain::Commit: {
             THolder<TEvPrivate::TEvCommitTenantUpdate> msg = MakeHolder<TEvPrivate::TEvCommitTenantUpdate>();
-            TEvPrivate::TEvCommitTenantUpdate::TPtr personalEv = (TEventHandle<TEvPrivate::TEvCommitTenantUpdate>*) new IEventHandle(
+            TEvPrivate::TEvCommitTenantUpdate::TPtr personalEv = (TEventHandleFat<TEvPrivate::TEvCommitTenantUpdate>*) new IEventHandleFat(
                 context.SS->SelfId(), context.SS->SelfId(), msg.Release());
             operation->Parts.front()->HandleReply(personalEv, context);
             break;
         }
         case NKikimrSchemeOp::TUpgradeSubDomain::Undo: {
             THolder<TEvPrivate::TEvUndoTenantUpdate> msg = MakeHolder<TEvPrivate::TEvUndoTenantUpdate>();
-            TEvPrivate::TEvUndoTenantUpdate::TPtr personalEv = (TEventHandle<TEvPrivate::TEvUndoTenantUpdate>*) new IEventHandle(
+            TEvPrivate::TEvUndoTenantUpdate::TPtr personalEv = (TEventHandleFat<TEvPrivate::TEvUndoTenantUpdate>*) new IEventHandleFat(
                 context.SS->SelfId(), context.SS->SelfId(), msg.Release());
             operation->Parts.front()->HandleReply(personalEv, context);
             break;
@@ -1480,25 +1482,25 @@ public:
 
 namespace NKikimr::NSchemeShard {
 
-ISubOperationBase::TPtr CreateUpgradeSubDomain(TOperationId id, const TTxTransaction& tx) {
+ISubOperation::TPtr CreateUpgradeSubDomain(TOperationId id, const TTxTransaction& tx) {
     return MakeSubOperation<TUpgradeSubDomain>(id, tx);
 }
 
-ISubOperationBase::TPtr CreateUpgradeSubDomain(TOperationId id, TTxState::ETxState state) {
+ISubOperation::TPtr CreateUpgradeSubDomain(TOperationId id, TTxState::ETxState state) {
     Y_VERIFY(state != TTxState::Invalid);
     return MakeSubOperation<TUpgradeSubDomain>(id, state);
 }
 
-ISubOperationBase::TPtr CreateUpgradeSubDomainDecision(TOperationId id, const TTxTransaction& tx) {
+ISubOperation::TPtr CreateUpgradeSubDomainDecision(TOperationId id, const TTxTransaction& tx) {
     return MakeSubOperation<TUpgradeSubDomainDecision>(id, tx);
 }
 
-ISubOperationBase::TPtr CreateUpgradeSubDomainDecision(TOperationId id, TTxState::ETxState state) {
+ISubOperation::TPtr CreateUpgradeSubDomainDecision(TOperationId id, TTxState::ETxState state) {
     Y_VERIFY(state != TTxState::Invalid);
     return MakeSubOperation<TUpgradeSubDomainDecision>(id, state);
 }
 
-ISubOperationBase::TPtr CreateCompatibleSubdomainDrop(TSchemeShard* ss, TOperationId id, const TTxTransaction& tx) {
+ISubOperation::TPtr CreateCompatibleSubdomainDrop(TSchemeShard* ss, TOperationId id, const TTxTransaction& tx) {
     const auto& info = tx.GetDrop();
 
     const TString& parentPathStr = tx.GetWorkingDir();
@@ -1525,7 +1527,7 @@ ISubOperationBase::TPtr CreateCompatibleSubdomainDrop(TSchemeShard* ss, TOperati
     return CreateForceDropSubDomain(id, tx);
 }
 
-ISubOperationBase::TPtr CreateCompatibleSubdomainAlter(TSchemeShard* ss, TOperationId id, const TTxTransaction& tx) {
+ISubOperation::TPtr CreateCompatibleSubdomainAlter(TSchemeShard* ss, TOperationId id, const TTxTransaction& tx) {
     const auto& info = tx.GetSubDomain();
 
     const TString& parentPathStr = tx.GetWorkingDir();

@@ -49,7 +49,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
      * kill tablet after that. So in order to complete scan ComputeActor need to handle scan restart after
      * each ScanData.
      */
-    Y_UNIT_TEST_WITH_MVCC(ScanRetryRead) {
+    Y_UNIT_TEST(ScanRetryRead) {
         NKikimrConfig::TAppConfig appCfg;
 
         auto* rm = appCfg.MutableTableServiceConfig()->MutableResourceManager();
@@ -59,7 +59,6 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         TPortManager pm;
         TServerSettings serverSettings(pm.GetPort(2134));
         serverSettings.SetDomainName("Root")
-            .SetEnableMvcc(WithMvcc)
             .SetNodeCount(2)
             .SetAppConfig(appCfg)
             .SetUseRealThreads(false);
@@ -119,7 +118,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime.Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime.Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
 
@@ -127,7 +126,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                 case NKqp::TKqpComputeEvents::EvScanData: {
                     if (scans.contains(ev->Sender)) {
                         if (killedTablets.empty()) { // do only 1 kill per test
-                            runtime.Send(new IEventHandle(ev->Sender, ev->Sender, new NKqp::TEvKqpCompute::TEvKillScanTablet));
+                            runtime.Send(new IEventHandleFat(ev->Sender, ev->Sender, new NKqp::TEvKqpCompute::TEvKillScanTablet));
                             Cerr << (TStringBuilder() << "-- EvScanData from " << ev->Sender << ": hijack event, kill tablet " << ev->Sender << Endl);
                             Cerr.Flush();
                         }
@@ -158,13 +157,12 @@ Y_UNIT_TEST_SUITE(KqpScan) {
     /*
      * Force remote scans by meddling with EvShardsResolveStatus. Check that remote scan actually took place.
      */
-    Y_UNIT_TEST_WITH_MVCC(RemoteShardScan) {
+    Y_UNIT_TEST(RemoteShardScan) {
         NKikimrConfig::TAppConfig appCfg;
 
         TPortManager pm;
         TServerSettings serverSettings(pm.GetPort(2134));
         serverSettings.SetDomainName("Root")
-            .SetEnableMvcc(WithMvcc)
             .SetNodeCount(2)
             .SetAppConfig(appCfg)
             .SetUseRealThreads(false);
@@ -217,7 +215,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime.Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime.Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
 
@@ -245,7 +243,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         UNIT_ASSERT_VALUES_EQUAL(result, 596400);
     }
 
-    Y_UNIT_TEST_WITH_MVCC(ScanDuringSplitThenMerge) {
+    Y_UNIT_TEST(ScanDuringSplitThenMerge) {
        NKikimrConfig::TAppConfig appCfg;
 
         auto* rm = appCfg.MutableTableServiceConfig()->MutableResourceManager();
@@ -255,7 +253,6 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         TPortManager pm;
         TServerSettings serverSettings(pm.GetPort(2134));
         serverSettings.SetDomainName("Root")
-            .SetEnableMvcc(WithMvcc)
             .SetNodeCount(2)
             .SetAppConfig(appCfg)
             .SetUseRealThreads(false);
@@ -324,7 +321,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
 
-                    runtime.Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime.Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
 
                     return TTestActorRuntime::EEventAction::DROP;
                 }
@@ -378,7 +375,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         UNIT_ASSERT_VALUES_EQUAL(result, 596400);
     }
 
-    Y_UNIT_TEST_WITH_MVCC(ScanDuringSplit) {
+    Y_UNIT_TEST(ScanDuringSplit) {
        NKikimrConfig::TAppConfig appCfg;
 
         auto* rm = appCfg.MutableTableServiceConfig()->MutableResourceManager();
@@ -388,7 +385,6 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         TPortManager pm;
         TServerSettings serverSettings(pm.GetPort(2134));
         serverSettings.SetDomainName("Root")
-            .SetEnableMvcc(WithMvcc)
             .SetNodeCount(2)
             .SetAppConfig(appCfg)
             .SetUseRealThreads(false);
@@ -455,7 +451,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
 
-                    runtime.Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime.Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
 
                     return TTestActorRuntime::EEventAction::DROP;
                 }
@@ -495,7 +491,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         UNIT_ASSERT_VALUES_EQUAL(result, 596400);
     }
 
-    Y_UNIT_TEST_WITH_MVCC(ScanRetryReadRanges) {
+    Y_UNIT_TEST(ScanRetryReadRanges) {
         Y_UNUSED(EnableLogging);
 
         NKikimrConfig::TAppConfig appCfg;
@@ -507,7 +503,6 @@ Y_UNIT_TEST_SUITE(KqpScan) {
         TPortManager pm;
         TServerSettings serverSettings(pm.GetPort(2134));
         serverSettings.SetDomainName("Root")
-            .SetEnableMvcc(WithMvcc)
             .SetNodeCount(2)
             .SetAppConfig(appCfg)
             .SetUseRealThreads(false);
@@ -583,7 +578,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                     resp->Record.SetEnough(false);
                     resp->Record.SetSeqNo(ev->Get<NKqp::TEvKqpExecuter::TEvStreamData>()->Record.GetSeqNo());
                     resp->Record.SetFreeSpace(100);
-                    runtime.Send(new IEventHandle(ev->Sender, sender, resp.Release()));
+                    runtime.Send(new IEventHandleFat(ev->Sender, sender, resp.Release()));
                     return TTestActorRuntime::EEventAction::DROP;
                 }
 
@@ -591,7 +586,7 @@ Y_UNIT_TEST_SUITE(KqpScan) {
                 case NKqp::TKqpComputeEvents::EvScanData: {
                     if (scans.contains(ev->Sender)) {
                         if (killedTablets.empty()) { // do only 1 kill per test
-                            runtime.Send(new IEventHandle(ev->Sender, ev->Sender, new NKqp::TEvKqpCompute::TEvKillScanTablet));
+                            runtime.Send(new IEventHandleFat(ev->Sender, ev->Sender, new NKqp::TEvKqpCompute::TEvKillScanTablet));
                             Cerr << (TStringBuilder() << "-- EvScanData from " << ev->Sender << ": hijack event, kill tablet " << ev->Sender << Endl);
                             Cerr.Flush();
                         }

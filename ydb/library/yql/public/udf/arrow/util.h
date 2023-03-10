@@ -15,6 +15,7 @@ namespace NUdf {
 
 std::shared_ptr<arrow::Buffer> AllocateBitmapWithReserve(size_t bitCount, arrow::MemoryPool* pool);
 std::shared_ptr<arrow::Buffer> MakeDenseBitmap(const ui8* srcSparse, size_t len, arrow::MemoryPool* pool);
+std::shared_ptr<arrow::Buffer> MakeDenseBitmapNegate(const ui8* srcSparse, size_t len, arrow::MemoryPool* pool);
 
 /// \brief Recursive version of ArrayData::Slice() method
 std::shared_ptr<arrow::ArrayData> DeepSlice(const std::shared_ptr<arrow::ArrayData>& data, size_t offset, size_t len);
@@ -31,6 +32,8 @@ inline bool IsNull(const arrow::ArrayData& data, size_t index) {
 
 /// \brief same as arrow::AllocateResizableBuffer, but allows to control zero padding
 std::unique_ptr<arrow::ResizableBuffer> AllocateResizableBuffer(size_t size, arrow::MemoryPool* pool, bool zeroPad = false);
+
+ui64 GetSizeOfArrowBatchInBytes(const arrow::RecordBatch& batch);
 
 // similar to arrow::TypedBufferBuilder, but:
 // 1) with UnsafeAdvance() method

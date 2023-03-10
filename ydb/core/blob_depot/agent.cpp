@@ -106,7 +106,7 @@ namespace NKikimr::NBlobDepot {
                 blockActorsPending.push_back(actorId);
             }
 
-            auto r = std::make_unique<IEventHandle>(ev->Sender, ev->Recipient, reply.release(), 0, id);
+            auto r = std::make_unique<IEventHandleFat>(ev->Sender, ev->Recipient, reply.release(), 0, id);
             if (ev->InterconnectSession) {
                 r->Rewrite(TEvInterconnect::EvForward, ev->InterconnectSession);
             }
@@ -117,7 +117,7 @@ namespace NKikimr::NBlobDepot {
                 for (const TActorId& actorId : m) {
                     auto clone = std::make_unique<TEvBlobDepot::TEvPushNotifyResult>();
                     clone->Record.CopyFrom(ev->Get()->Record);
-                    TActivationContext::Send(new IEventHandle(actorId, sender, clone.release()));
+                    TActivationContext::Send(new IEventHandleFat(actorId, sender, clone.release()));
                 }
                 Data->OnPushNotifyResult(ev);
             });
@@ -134,35 +134,35 @@ namespace NKikimr::NBlobDepot {
         const ui32 generation = Executor()->Generation();
         auto [response, record] = TEvBlobDepot::MakeResponseFor(*ev, ev->Get()->Record.GetChannelKind(), generation);
 
-        auto *givenIdRange = record->MutableGivenIdRange();
-
         std::vector<ui8> channels(ev->Get()->Record.GetCount());
-        PickChannels(record->GetChannelKind(), channels);
+        if (PickChannels(record->GetChannelKind(), channels)) {
+            auto *givenIdRange = record->MutableGivenIdRange();
 
-        THashMap<ui8, NKikimrBlobDepot::TGivenIdRange::TChannelRange*> issuedRanges;
-        for (ui8 channelIndex : channels) {
-            TChannelInfo& channel = Channels[channelIndex];
-            const ui64 value = channel.NextBlobSeqId++;
+            THashMap<ui8, NKikimrBlobDepot::TGivenIdRange::TChannelRange*> issuedRanges;
+            for (ui8 channelIndex : channels) {
+                TChannelInfo& channel = Channels[channelIndex];
+                const ui64 value = channel.NextBlobSeqId++;
 
-            // fill in range item
-            auto& range = issuedRanges[channelIndex];
-            if (!range || range->GetEnd() != value) {
-                range = givenIdRange->AddChannelRanges();
-                range->SetChannel(channelIndex);
-                range->SetBegin(value);
+                // fill in range item
+                auto& range = issuedRanges[channelIndex];
+                if (!range || range->GetEnd() != value) {
+                    range = givenIdRange->AddChannelRanges();
+                    range->SetChannel(channelIndex);
+                    range->SetBegin(value);
+                }
+                range->SetEnd(value + 1);
             }
-            range->SetEnd(value + 1);
-        }
 
-        // register issued ranges in agent and global records
-        TAgent& agent = GetAgent(ev->Recipient);
-        for (const auto& range : givenIdRange->GetChannelRanges()) {
-            agent.GivenIdRanges[range.GetChannel()].IssueNewRange(range.GetBegin(), range.GetEnd());
-            Channels[range.GetChannel()].GivenIdRanges.IssueNewRange(range.GetBegin(), range.GetEnd());
+            // register issued ranges in agent and global records
+            TAgent& agent = GetAgent(ev->Recipient);
+            for (const auto& range : givenIdRange->GetChannelRanges()) {
+                agent.GivenIdRanges[range.GetChannel()].IssueNewRange(range.GetBegin(), range.GetEnd());
+                Channels[range.GetChannel()].GivenIdRanges.IssueNewRange(range.GetBegin(), range.GetEnd());
 
-            STLOG(PRI_DEBUG, BLOB_DEPOT, BDT05, "IssueNewRange", (Id, GetLogId()),
-                (AgentId, agent.Connection->NodeId), (Channel, range.GetChannel()),
-                (Begin, range.GetBegin()), (End, range.GetEnd()));
+                STLOG(PRI_DEBUG, BLOB_DEPOT, BDT05, "IssueNewRange", (Id, GetLogId()),
+                    (AgentId, agent.Connection->NodeId), (Channel, range.GetChannel()),
+                    (Begin, range.GetBegin()), (End, range.GetEnd()));
+            }
         }
 
         TActivationContext::Send(response.release());
@@ -229,7 +229,7 @@ namespace NKikimr::NBlobDepot {
                     for (auto& ev : std::exchange(info.PostponeQ, {})) {
                         TActivationContext::Send(ev.release());
                     }
-                    TActivationContext::Send(new IEventHandle(TEvPrivate::EvProcessRegisterAgentQ, 0, SelfId(), {}, nullptr, 0));
+                    TActivationContext::Send(new IEventHandleFat(TEvPrivate::EvProcessRegisterAgentQ, 0, SelfId(), {}, nullptr, 0));
                 }
             }
         }

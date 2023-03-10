@@ -339,7 +339,7 @@ void TSchemeShard::Clear() {
 
     ShardsWithBorrowed.clear();
     ShardsWithLoaned.clear();
-    PersQueueGroups.clear();
+    Topics.clear();
     RtmrVolumes.clear();
     SubDomains.clear();
     BlockStoreVolumes.clear();
@@ -505,8 +505,8 @@ void TSchemeShard::ClearDescribePathCaches(const TPathElement::TPtr node, bool f
     node->PreSerializedChildrenListing.clear();
 
     if (node->PathType == NKikimrSchemeOp::EPathType::EPathTypePersQueueGroup) {
-        Y_VERIFY(PersQueueGroups.contains(node->PathId));
-        TPersQueueGroupInfo::TPtr pqGroup = PersQueueGroups.at(node->PathId);
+        Y_VERIFY(Topics.contains(node->PathId));
+        TTopicInfo::TPtr pqGroup = Topics.at(node->PathId);
         pqGroup->PreSerializedPathDescription.clear();
         pqGroup->PreSerializedPartitionsDescription.clear();
     } else if (node->PathType == NKikimrSchemeOp::EPathType::EPathTypeTable) {
@@ -1279,36 +1279,6 @@ TShardIdx TSchemeShard::NextShardIdx(const TShardIdx& shardIdx, ui64 inc) const 
     return MakeLocalId(TLocalShardIdx(nextLocalId));
 }
 
-TShardIdx TSchemeShard::RegisterShardInfo(TShardInfo&& shardInfo) {
-    TShardIdx shardIdx = ReserveShardIdxs(1);
-    return RegisterShardInfo(shardIdx, std::move(shardInfo));
-}
-
-TShardIdx TSchemeShard::RegisterShardInfo(const TShardInfo& shardInfo) {
-    TShardIdx shardIdx = ReserveShardIdxs(1);
-    return RegisterShardInfo(shardIdx, shardInfo);
-}
-
-TShardIdx TSchemeShard::RegisterShardInfo(const TShardIdx& shardIdx, TShardInfo&& shardInfo) {
-    Y_VERIFY(shardIdx.GetOwnerId() == TabletID());
-    ui64 localId = ui64(shardIdx.GetLocalId());
-    Y_VERIFY_S(localId < NextLocalShardIdx, "shardIdx: " << shardIdx << " NextLocalShardIdx: " << NextLocalShardIdx);
-    Y_VERIFY_S(!ShardInfos.contains(shardIdx), "shardIdx: " << shardIdx << " already registered");
-    IncrementPathDbRefCount(shardInfo.PathId, "new shard created");
-    ShardInfos.emplace(shardIdx, std::move(shardInfo));
-    return shardIdx;
-}
-
-TShardIdx TSchemeShard::RegisterShardInfo(const TShardIdx& shardIdx, const TShardInfo& shardInfo) {
-    Y_VERIFY(shardIdx.GetOwnerId() == TabletID());
-    ui64 localId = ui64(shardIdx.GetLocalId());
-    Y_VERIFY_S(localId < NextLocalShardIdx, "shardIdx: " << shardIdx << " NextLocalShardIdx: " << NextLocalShardIdx);
-    Y_VERIFY_S(!ShardInfos.contains(shardIdx), "shardIdx: " << shardIdx << " already registered");
-    IncrementPathDbRefCount(shardInfo.PathId, "new shard created");
-    ShardInfos.emplace(shardIdx, shardInfo);
-    return shardIdx;
-}
-
 const TTableInfo* TSchemeShard::GetMainTableForIndex(TPathId indexTableId) const {
     if (!Tables.contains(indexTableId))
         return nullptr;
@@ -1373,6 +1343,8 @@ TPathElement::EPathState TSchemeShard::CalcPathState(TTxState::ETxType txType, T
     case TTxState::TxCreateSequence:
     case TTxState::TxCreateReplication:
     case TTxState::TxCreateBlobDepot:
+    case TTxState::TxCreateExternalTable:
+    case TTxState::TxCreateExternalDataSource:
         return TPathElement::EPathState::EPathStateCreate;
     case TTxState::TxAlterPQGroup:
     case TTxState::TxAlterTable:
@@ -1403,6 +1375,8 @@ TPathElement::EPathState TSchemeShard::CalcPathState(TTxState::ETxType txType, T
     case TTxState::TxAlterReplication:
     case TTxState::TxAlterBlobDepot:
     case TTxState::TxUpdateMainTableOnIndexMove:
+    case TTxState::TxAlterExternalTable:
+    case TTxState::TxAlterExternalDataSource:
         return TPathElement::EPathState::EPathStateAlter;
     case TTxState::TxDropTable:
     case TTxState::TxDropPQGroup:
@@ -1421,6 +1395,8 @@ TPathElement::EPathState TSchemeShard::CalcPathState(TTxState::ETxType txType, T
     case TTxState::TxDropSequence:
     case TTxState::TxDropReplication:
     case TTxState::TxDropBlobDepot:
+    case TTxState::TxDropExternalTable:
+    case TTxState::TxDropExternalDataSource:
         return TPathElement::EPathState::EPathStateDrop;
     case TTxState::TxBackup:
         return TPathElement::EPathState::EPathStateBackup;
@@ -2360,6 +2336,16 @@ void TSchemeShard::PersistTablePartitionStats(NIceDb::TNiceDb& db, const TPathId
     }
 }
 
+void TSchemeShard::PersistPersQueueGroupStats(NIceDb::TNiceDb &db, const TPathId pathId, const TTopicStats& stats) {
+    db.Table<Schema::PersQueueGroupStats>().Key(pathId.LocalPathId).Update(
+        NIceDb::TUpdate<Schema::PersQueueGroupStats::SeqNoGeneration>(stats.SeqNo.Generation),
+        NIceDb::TUpdate<Schema::PersQueueGroupStats::SeqNoRound>(stats.SeqNo.Round),
+
+        NIceDb::TUpdate<Schema::PersQueueGroupStats::DataSize>(stats.DataSize),
+        NIceDb::TUpdate<Schema::PersQueueGroupStats::UsedReserveSize>(stats.UsedReserveSize)
+    );
+}
+
 void TSchemeShard::PersistTableAlterVersion(NIceDb::TNiceDb& db, const TPathId pathId, const TTableInfo::TPtr tableInfo) {
     if (pathId.OwnerId == TabletID()) {
         db.Table<Schema::Tables>().Key(pathId.LocalPathId).Update(
@@ -2403,7 +2389,7 @@ void TSchemeShard::PersistTableAltered(NIceDb::TNiceDb& db, const TPathId pathId
         ui32 colId = col.first;
         const TTableInfo::TColumn& cinfo = col.second;
         TString typeData;
-        auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(cinfo.PType);
+        auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(cinfo.PType, cinfo.PTypeMod);
         if (columnType.TypeInfo) {
             Y_VERIFY(columnType.TypeInfo->SerializeToString(&typeData));
         }
@@ -2461,7 +2447,7 @@ void TSchemeShard::PersistAddAlterTable(NIceDb::TNiceDb& db, TPathId pathId, con
         ui32 colId = col.first;
         const TTableInfo::TColumn& cinfo = col.second;
         TString typeData;
-        auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(cinfo.PType);
+        auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(cinfo.PType, cinfo.PTypeMod);
         if (columnType.TypeInfo) {
             Y_VERIFY(columnType.TypeInfo->SerializeToString(&typeData));
         }
@@ -2493,7 +2479,7 @@ void TSchemeShard::PersistAddAlterTable(NIceDb::TNiceDb& db, TPathId pathId, con
     }
 }
 
-void TSchemeShard::PersistPersQueueGroup(NIceDb::TNiceDb& db, TPathId pathId, const TPersQueueGroupInfo::TPtr pqGroup) {
+void TSchemeShard::PersistPersQueueGroup(NIceDb::TNiceDb& db, TPathId pathId, const TTopicInfo::TPtr pqGroup) {
     Y_VERIFY(IsLocalId(pathId));
 
     db.Table<Schema::PersQueueGroups>().Key(pathId.LocalPathId).Update(
@@ -2507,28 +2493,28 @@ void TSchemeShard::PersistPersQueueGroup(NIceDb::TNiceDb& db, TPathId pathId, co
 void TSchemeShard::PersistRemovePersQueueGroup(NIceDb::TNiceDb& db, TPathId pathId) {
     Y_VERIFY(IsLocalId(pathId));
 
-    auto it = PersQueueGroups.find(pathId);
-    if (it != PersQueueGroups.end()) {
-        TPersQueueGroupInfo::TPtr pqGroup = it->second;
+    auto it = Topics.find(pathId);
+    if (it != Topics.end()) {
+        TTopicInfo::TPtr pqGroup = it->second;
 
         if (pqGroup->AlterData) {
             PersistRemovePersQueueGroupAlter(db, pathId);
         }
 
         for (const auto& shard : pqGroup->Shards) {
-            for (const auto& pqInfo : shard.second->PQInfos) {
+            for (const auto& pqInfo : shard.second->Partitions) {
                 PersistRemovePersQueue(db, pathId, pqInfo.PqId);
             }
         }
 
-        PersQueueGroups.erase(it);
+        Topics.erase(it);
         DecrementPathDbRefCount(pathId);
     }
 
     db.Table<Schema::PersQueueGroups>().Key(pathId.LocalPathId).Delete();
 }
 
-void TSchemeShard::PersistAddPersQueueGroupAlter(NIceDb::TNiceDb& db, TPathId pathId, const TPersQueueGroupInfo::TPtr alterData) {
+void TSchemeShard::PersistAddPersQueueGroupAlter(NIceDb::TNiceDb& db, TPathId pathId, const TTopicInfo::TPtr alterData) {
     Y_VERIFY(IsLocalId(pathId));
 
     db.Table<Schema::PersQueueGroupAlters>().Key(pathId.LocalPathId).Update(
@@ -2546,7 +2532,7 @@ void TSchemeShard::PersistRemovePersQueueGroupAlter(NIceDb::TNiceDb& db, TPathId
     db.Table<Schema::PersQueueGroupAlters>().Key(pathId.LocalPathId).Delete();
 }
 
-void TSchemeShard::PersistPersQueue(NIceDb::TNiceDb &db, TPathId pathId, TShardIdx shardIdx, const TPQShardInfo::TPersQueueInfo& pqInfo) {
+void TSchemeShard::PersistPersQueue(NIceDb::TNiceDb &db, TPathId pathId, TShardIdx shardIdx, const TTopicTabletInfo::TTopicPartitionInfo& pqInfo) {
     Y_VERIFY(IsLocalId(pathId));
 
     db.Table<Schema::PersQueues>().Key(pathId.LocalPathId, pqInfo.PqId).Update(
@@ -2586,6 +2572,80 @@ void TSchemeShard::PersistRtmrVolume(NIceDb::TNiceDb &db, TPathId pathId, const 
             NIceDb::TUpdate<Schema::RTMRPartitions::PartitionId>(partitionId),
             NIceDb::TUpdate<Schema::RTMRPartitions::BusKey>(partition.second->BusKey));
     }
+}
+
+void TSchemeShard::PersistExternalTable(NIceDb::TNiceDb &db, TPathId pathId, const TExternalTableInfo::TPtr externalTableInfo) {
+    Y_VERIFY(IsLocalId(pathId));
+
+    db.Table<Schema::ExternalTable>().Key(pathId.OwnerId, pathId.LocalPathId).Update(
+        NIceDb::TUpdate<Schema::ExternalTable::SourceType>{externalTableInfo->SourceType},
+        NIceDb::TUpdate<Schema::ExternalTable::DataSourcePath>{externalTableInfo->DataSourcePath},
+        NIceDb::TUpdate<Schema::ExternalTable::Location>{externalTableInfo->Location},
+        NIceDb::TUpdate<Schema::ExternalTable::AlterVersion>{externalTableInfo->AlterVersion},
+        NIceDb::TUpdate<Schema::ExternalTable::Content>{externalTableInfo->Content});
+
+    for (auto col : externalTableInfo->Columns) {
+        ui32 colId = col.first;
+        const TTableInfo::TColumn& cinfo = col.second;
+        TString typeData;
+        auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(cinfo.PType, cinfo.PTypeMod);
+        if (columnType.TypeInfo) {
+            Y_VERIFY(columnType.TypeInfo->SerializeToString(&typeData));
+        }
+        db.Table<Schema::MigratedColumns>().Key(pathId.OwnerId, pathId.LocalPathId, colId).Update(
+            NIceDb::TUpdate<Schema::MigratedColumns::ColName>(cinfo.Name),
+            NIceDb::TUpdate<Schema::MigratedColumns::ColType>((ui32)columnType.TypeId),
+            NIceDb::TUpdate<Schema::MigratedColumns::ColTypeData>(typeData),
+            NIceDb::TUpdate<Schema::MigratedColumns::ColKeyOrder>(cinfo.KeyOrder),
+            NIceDb::TUpdate<Schema::MigratedColumns::CreateVersion>(cinfo.CreateVersion),
+            NIceDb::TUpdate<Schema::MigratedColumns::DeleteVersion>(cinfo.DeleteVersion),
+            NIceDb::TUpdate<Schema::MigratedColumns::Family>(cinfo.Family),
+            NIceDb::TUpdate<Schema::MigratedColumns::DefaultKind>(cinfo.DefaultKind),
+            NIceDb::TUpdate<Schema::MigratedColumns::DefaultValue>(cinfo.DefaultValue),
+            NIceDb::TUpdate<Schema::MigratedColumns::NotNull>(cinfo.NotNull));
+    }
+}
+
+void TSchemeShard::PersistRemoveExternalTable(NIceDb::TNiceDb& db, TPathId pathId)
+{
+    Y_VERIFY(IsLocalId(pathId));
+    if (ExternalTables.contains(pathId)) {
+        auto externalTableInfo = ExternalTables.at(pathId);
+
+        for (auto col : externalTableInfo->Columns) {
+            const ui32 colId = col.first;
+            db.Table<Schema::MigratedColumns>().Key(pathId.OwnerId, pathId.LocalPathId, colId).Delete();
+        }
+
+        ExternalTables.erase(pathId);
+        DecrementPathDbRefCount(pathId);
+    }
+
+    db.Table<Schema::ExternalTable>().Key(pathId.OwnerId, pathId.LocalPathId).Delete();
+}
+
+void TSchemeShard::PersistExternalDataSource(NIceDb::TNiceDb &db, TPathId pathId, const TExternalDataSourceInfo::TPtr externalDataSourceInfo) {
+    Y_VERIFY(IsLocalId(pathId));
+
+    db.Table<Schema::ExternalDataSource>().Key(pathId.OwnerId, pathId.LocalPathId).Update(
+        NIceDb::TUpdate<Schema::ExternalDataSource::AlterVersion>{externalDataSourceInfo->AlterVersion},
+        NIceDb::TUpdate<Schema::ExternalDataSource::SourceType>{externalDataSourceInfo->SourceType},
+        NIceDb::TUpdate<Schema::ExternalDataSource::Location>{externalDataSourceInfo->Location},
+        NIceDb::TUpdate<Schema::ExternalDataSource::Installation>{externalDataSourceInfo->Installation},
+        NIceDb::TUpdate<Schema::ExternalDataSource::Auth>{externalDataSourceInfo->Auth.SerializeAsString()},
+        NIceDb::TUpdate<Schema::ExternalDataSource::ExternalTableReferences>{externalDataSourceInfo->ExternalTableReferences.SerializeAsString()}
+    );
+}
+
+void TSchemeShard::PersistRemoveExternalDataSource(NIceDb::TNiceDb& db, TPathId pathId)
+{
+    Y_VERIFY(IsLocalId(pathId));
+    if (ExternalDataSources.contains(pathId)) {
+        ExternalDataSources.erase(pathId);
+        DecrementPathDbRefCount(pathId);
+    }
+
+    db.Table<Schema::ExternalDataSource>().Key(pathId.OwnerId, pathId.LocalPathId).Delete();
 }
 
 void TSchemeShard::PersistRemoveRtmrVolume(NIceDb::TNiceDb &db, TPathId pathId) {
@@ -3721,8 +3781,8 @@ NKikimrSchemeOp::TPathVersion TSchemeShard::GetPathVersion(const TPath& path) co
                 generalVersion += result.GetTablePartitionVersion();
                 break;
             case NKikimrSchemeOp::EPathType::EPathTypePersQueueGroup:
-                Y_VERIFY(PersQueueGroups.contains(pathId));
-                result.SetPQVersion(PersQueueGroups.at(pathId)->AlterVersion);
+                Y_VERIFY(Topics.contains(pathId));
+                result.SetPQVersion(Topics.at(pathId)->AlterVersion);
                 generalVersion += result.GetPQVersion();
                 break;
             case NKikimrSchemeOp::EPathType::EPathTypeBlockStoreVolume:
@@ -3819,6 +3879,20 @@ NKikimrSchemeOp::TPathVersion TSchemeShard::GetPathVersion(const TPath& path) co
                     Y_FAIL_S("BlobDepot for path " << pathId << " not found");
                 }
                 break;
+            case NKikimrSchemeOp::EPathType::EPathTypeExternalTable: {
+                auto it = ExternalTables.find(pathId);
+                Y_VERIFY(it != ExternalTables.end());
+                result.SetExternalTableVersion(it->second->AlterVersion);
+                generalVersion += result.GetExternalTableVersion();
+                break;
+            }
+            case NKikimrSchemeOp::EPathType::EPathTypeExternalDataSource: {
+                auto it = ExternalDataSources.find(pathId);
+                Y_VERIFY(it != ExternalDataSources.end());
+                result.SetExternalDataSourceVersion(it->second->AlterVersion);
+                generalVersion += result.GetExternalDataSourceVersion();
+                break;
+            }
 
             case NKikimrSchemeOp::EPathType::EPathTypeInvalid: {
                 Y_UNREACHABLE();
@@ -3899,6 +3973,14 @@ TSchemeShard::TSchemeShard(const TActorId &tablet, TTabletStorageInfo *info)
     , CompactionStarter(this)
     , BorrowedCompactionStarter(this)
     , ShardDeleter(info->TabletID)
+    , TableStatsQueue(this, 
+            COUNTER_STATS_QUEUE_SIZE,
+            COUNTER_STATS_WRITTEN,
+            COUNTER_STATS_BATCH_LATENCY)
+    , TopicStatsQueue(this,
+            COUNTER_PQ_STATS_QUEUE_SIZE,
+            COUNTER_PQ_STATS_WRITTEN,
+            COUNTER_PQ_STATS_BATCH_LATENCY)
     , AllowDataColumnForIndexTable(0, 0, 1)
 {
     TabletCountersPtr.Reset(new TProtobufTabletCounters<
@@ -4071,7 +4153,7 @@ void TSchemeShard::Enqueue(STFUNC_SIG) {
     Y_UNUSED(ctx);
     Y_FAIL_S("No enqueue method implemented."
               << " unhandled event type: " << ev->GetTypeRewrite()
-             << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+             << " event: " << ev->ToString());
 
 }
 
@@ -4129,7 +4211,7 @@ void TSchemeShard::StateConfigure(STFUNC_SIG) {
             LOG_WARN_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                        "StateConfigure:"
                            << " unhandled event type: " << ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
         }
     }
 }
@@ -4172,6 +4254,7 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
         HFuncTraced(TEvDataShard::TEvSplitAck, Handle);
         HFuncTraced(TEvDataShard::TEvSplitPartitioningChangedAck, Handle);
         HFuncTraced(TEvDataShard::TEvPeriodicTableStats, Handle);
+        HFuncTraced(TEvPersQueue::TEvPeriodicTopicStats, Handle);
         HFuncTraced(TEvDataShard::TEvGetTableStatsResult, Handle);
 
         //
@@ -4286,7 +4369,8 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
         HFuncTraced(TEvPrivate::TEvCleanDroppedSubDomains, Handle);
         HFuncTraced(TEvPrivate::TEvSubscribeToShardDeletion, Handle);
 
-        HFuncTraced(TEvPrivate::TEvPersistStats, Handle);
+        HFuncTraced(TEvPrivate::TEvPersistTableStats, Handle);
+        HFuncTraced(TEvPrivate::TEvPersistTopicStats, Handle);
 
         HFuncTraced(TEvSchemeShard::TEvLogin, Handle);
 
@@ -4295,7 +4379,7 @@ void TSchemeShard::StateWork(STFUNC_SIG) {
             LOG_WARN_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                        "StateWork:"
                            << " unhandled event type: " << ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
         }
         break;
     }
@@ -4310,7 +4394,7 @@ void TSchemeShard::BrokenState(STFUNC_SIG) {
             LOG_WARN_S(ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                        "BrokenState:"
                            << " unhandled event type: " << ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
         }
         break;
     }
@@ -4566,6 +4650,12 @@ void TSchemeShard::UncountNode(TPathElement::TPtr node) {
         break;
     case TPathElement::EPathType::EPathTypeBlobDepot:
         TabletCounters->Simple()[COUNTER_BLOB_DEPOT_COUNT].Sub(1);
+        break;
+    case TPathElement::EPathType::EPathTypeExternalTable:
+        TabletCounters->Simple()[COUNTER_EXTERNAL_TABLE_COUNT].Sub(1);
+        break;
+    case TPathElement::EPathType::EPathTypeExternalDataSource:
+        TabletCounters->Simple()[COUNTER_EXTERNAL_DATA_SOURCE_COUNT].Sub(1);
         break;
     case TPathElement::EPathType::EPathTypeInvalid:
         Y_FAIL("impossible path type");
@@ -5911,7 +6001,7 @@ TString TSchemeShard::FillAlterTableTxBody(TPathId pathId, TShardIdx shardIdx, T
             auto descr = proto->AddDropColumns();
             descr->SetName(colInfo.Name);
             descr->SetId(colInfo.Id);
-            auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(colInfo.PType);
+            auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(colInfo.PType, colInfo.PTypeMod);
             descr->SetTypeId(columnType.TypeId);
             if (columnType.TypeInfo) {
                 *descr->MutableTypeInfo() = *columnType.TypeInfo;
@@ -5920,7 +6010,7 @@ TString TSchemeShard::FillAlterTableTxBody(TPathId pathId, TShardIdx shardIdx, T
             auto descr = proto->AddColumns();
             descr->SetName(colInfo.Name);
             descr->SetId(colInfo.Id);
-            auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(colInfo.PType);
+            auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(colInfo.PType, colInfo.PTypeMod);
             descr->SetTypeId(columnType.TypeId);
             if (columnType.TypeInfo) {
                 *descr->MutableTypeInfo() = *columnType.TypeInfo;
@@ -6104,6 +6194,7 @@ void TSchemeShard::FillTableDescription(TPathId tableId, ui32 partitionIdx, ui64
 }
 
 bool TSchemeShard::FillUniformPartitioning(TVector<TString>& rangeEnds, ui32 keySize, NScheme::TTypeInfo firstKeyColType, ui32 partitionCount, const NScheme::TTypeRegistry* typeRegistry, TString& errStr) {
+    Y_UNUSED(typeRegistry);
     if (partitionCount > 1) {
         // RangeEnd key will have first cell with non-NULL value and rest of the cells with NULLs
         TVector<TCell> rangeEnd(keySize);
@@ -6122,7 +6213,7 @@ bool TSchemeShard::FillUniformPartitioning(TVector<TString>& rangeEnds, ui32 key
             valSz = 8;
             break;
         default:
-            errStr = TStringBuilder() << "Unsupported first key column type " << typeRegistry->GetTypeName(typeId) << ", only Uint32 and Uint64 are supported";
+            errStr = TStringBuilder() << "Unsupported first key column type " << NScheme::TypeName(firstKeyColType) << ", only Uint32 and Uint64 are supported";
             return false;
         }
 

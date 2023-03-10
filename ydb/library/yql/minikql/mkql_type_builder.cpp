@@ -6,6 +6,7 @@
 
 #include <library/cpp/containers/stack_vector/stack_vec.h>
 #include <ydb/library/yql/minikql/computation/mkql_computation_node_impl.h>
+#include <ydb/library/yql/minikql/mkql_node_printer.h>
 #include <ydb/library/yql/parser/pg_catalog/catalog.h>
 #include <array>
 
@@ -1299,7 +1300,7 @@ public:
 
     NUdf::TType* Build() const override {
         return NMiniKQL::TBlockType::Create(
-                    const_cast<NMiniKQL::TType*>(ItemType_), 
+                    const_cast<NMiniKQL::TType*>(ItemType_),
                     (IsScalar_ ? NMiniKQL::TBlockType::EShape::Scalar : NMiniKQL::TBlockType::EShape::Many),
                     Parent_.Env());
     }
@@ -2013,6 +2014,10 @@ NUdf::IHash::TPtr MakeHashImpl(const NMiniKQL::TType* type) {
             return new TEmptyHash();
         case NMiniKQL::TType::EKind::Pg:
             return MakePgHash((const TPgType*)type);
+        case NMiniKQL::TType::EKind::Tagged: {
+            auto taggedType = static_cast<const TTaggedType*>(type);
+            return MakeHashImpl(taggedType->GetBaseType());
+        }
         default:
             throw TTypeNotSupported() << "Data, Pg, Optional, Tuple, Struct, List, Variant or Dict is expected for hashing";
     }
@@ -2055,8 +2060,13 @@ NUdf::ICompare::TPtr MakeCompareImpl(const NMiniKQL::TType* type) {
             return new TCompare<NMiniKQL::TType::EKind::List>(type);
         case NMiniKQL::TType::EKind::Pg:
             return MakePgCompare((const TPgType*)type);
+        case NMiniKQL::TType::EKind::Tagged: {
+            auto taggedType = static_cast<const TTaggedType*>(type);
+            return MakeCompareImpl(taggedType->GetBaseType());
+        }
         default:
-            throw TTypeNotSupported() << "Data, Pg, Optional, Variant over Tuple, Tuple or List is expected for comparing";
+            throw TTypeNotSupported() << "Data, Pg, Optional, Variant over Tuple, Tuple or List is expected for comparing,"
+            << "but got: " << PrintNode(type);
     }
 }
 
@@ -2100,6 +2110,10 @@ NUdf::IEquate::TPtr MakeEquateImpl(const NMiniKQL::TType* type) {
             return new TEquate<NMiniKQL::TType::EKind::Dict>(type);
         case NMiniKQL::TType::EKind::Pg:
             return MakePgEquate((const TPgType*)type);
+        case NMiniKQL::TType::EKind::Tagged: {
+            auto taggedType = static_cast<const TTaggedType*>(type);
+            return MakeEquateImpl(taggedType->GetBaseType());
+        }
         default:
             throw TTypeNotSupported() << "Data, Pg, Optional, Tuple, Struct, List, Variant or Dict is expected for equating";
     }

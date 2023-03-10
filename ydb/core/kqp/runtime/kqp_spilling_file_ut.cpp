@@ -19,6 +19,11 @@ using namespace NYql;
 
 namespace {
 
+TString GetSpillingPrefix() {
+    static TString str = Sprintf("%s_%d/", "kqp_spilling", (int)getpid());
+    return str;
+}
+
 TBuffer CreateBlob(ui32 size, char symbol) {
     TBuffer blob(size);
     blob.Fill(symbol, size);
@@ -37,7 +42,7 @@ TIntrusivePtr<::NMonitoring::TDynamicCounters> Counters() {
 }
 
 TActorId StartSpillingService(TTestBasicRuntime& runtime, ui64 maxTotalSize = 1000, ui64 maxFileSize = 500,
-    ui64 maxFilePartSize = 100, const TString& root = "./kqp_spilling/")
+    ui64 maxFilePartSize = 100, const TString& root = "./" + GetSpillingPrefix())
 {
     Cerr << "cwd: " << NFs::CurrentWorkingDirectory() << Endl;
 
@@ -96,7 +101,7 @@ Y_UNIT_TEST(Simple) {
     // put blob 1
     {
         auto ev = new TEvKqpSpilling::TEvWrite(1, CreateBlob(10, 'a'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvWriteResult>(tester, TDuration::Seconds(1));
         UNIT_ASSERT_VALUES_EQUAL(1, resp->Get()->BlobId);
@@ -105,7 +110,7 @@ Y_UNIT_TEST(Simple) {
     // put blob 2
     {
         auto ev = new TEvKqpSpilling::TEvWrite(2, CreateBlob(11, 'z'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvWriteResult>(tester, TDuration::Seconds(1));
         UNIT_ASSERT_VALUES_EQUAL(2, resp->Get()->BlobId);
@@ -114,7 +119,7 @@ Y_UNIT_TEST(Simple) {
     // get blob 1
     {
         auto ev = new TEvKqpSpilling::TEvRead(1);
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvReadResult>(tester, TDuration::Seconds(1));
         UNIT_ASSERT_VALUES_EQUAL(1, resp->Get()->BlobId);
@@ -126,7 +131,7 @@ Y_UNIT_TEST(Simple) {
     // get blob 2
     {
         auto ev = new TEvKqpSpilling::TEvRead(2);
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvReadResult>(tester, TDuration::Seconds(1));
         UNIT_ASSERT_VALUES_EQUAL(2, resp->Get()->BlobId);
@@ -137,7 +142,7 @@ Y_UNIT_TEST(Simple) {
 
     // terminate
     {
-        runtime.Send(new IEventHandle(spillingActor, tester, new TEvents::TEvPoison));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, new TEvents::TEvPoison));
 
         std::atomic<bool> done = false;
         runtime.SetObserverFunc([&](TTestActorRuntimeBase&, TAutoPtr<IEventHandle>& event) {
@@ -171,7 +176,7 @@ Y_UNIT_TEST(Write_TotalSizeLimitExceeded) {
 
     {
         auto ev = new TEvKqpSpilling::TEvWrite(1, CreateBlob(51, 'a'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvWriteResult>(tester);
         UNIT_ASSERT_VALUES_EQUAL(1, resp->Get()->BlobId);
@@ -179,7 +184,7 @@ Y_UNIT_TEST(Write_TotalSizeLimitExceeded) {
 
     {
         auto ev = new TEvKqpSpilling::TEvWrite(2, CreateBlob(50, 'b'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvError>(tester);
         UNIT_ASSERT_STRINGS_EQUAL("Total size limit exceeded", resp->Get()->Message);
@@ -199,7 +204,7 @@ Y_UNIT_TEST(Write_FileSizeLimitExceeded) {
 
     {
         auto ev = new TEvKqpSpilling::TEvWrite(1, CreateBlob(51, 'a'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvWriteResult>(tester);
         UNIT_ASSERT_VALUES_EQUAL(1, resp->Get()->BlobId);
@@ -207,7 +212,7 @@ Y_UNIT_TEST(Write_FileSizeLimitExceeded) {
 
     {
         auto ev = new TEvKqpSpilling::TEvWrite(2, CreateBlob(50, 'b'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvError>(tester);
         UNIT_ASSERT_STRINGS_EQUAL("File size limit exceeded", resp->Get()->Message);
@@ -225,12 +230,12 @@ Y_UNIT_TEST(MultipleFileParts) {
 
     WaitBootstrap(runtime);
 
-    const TString filePrefix = TStringBuilder() << NFs::CurrentWorkingDirectory() << "/kqp_spilling/node_" << runtime.GetNodeId() << "/1_test_";
+    const TString filePrefix = TStringBuilder() << NFs::CurrentWorkingDirectory() << "/" << GetSpillingPrefix() << "node_" << runtime.GetNodeId() << "/1_test_";
 
     for (ui32 i = 0; i < 5; ++i) {
         // Cerr << "---- store blob #" << i << Endl;
         auto ev = new TEvKqpSpilling::TEvWrite(i, CreateBlob(20, 'a' + i));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvWriteResult>(tester);
         UNIT_ASSERT_VALUES_EQUAL(i, resp->Get()->BlobId);
@@ -241,7 +246,7 @@ Y_UNIT_TEST(MultipleFileParts) {
     for (i32 i = 4; i >= 0; --i) {
         // Cerr << "---- load blob #" << i << Endl;
         auto ev = new TEvKqpSpilling::TEvRead(i, true);
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvReadResult>(tester);
         UNIT_ASSERT_VALUES_EQUAL(i, resp->Get()->BlobId);
@@ -268,12 +273,12 @@ Y_UNIT_TEST(SingleFilePart) {
 
     WaitBootstrap(runtime);
 
-    const TString filePrefix = TStringBuilder() << NFs::CurrentWorkingDirectory() << "/kqp_spilling/node_" << runtime.GetNodeId() << "/1_test_";
+    const TString filePrefix = TStringBuilder() << NFs::CurrentWorkingDirectory() << "/" << GetSpillingPrefix() << "node_" << runtime.GetNodeId() << "/1_test_";
 
     for (ui32 i = 0; i < 5; ++i) {
         // Cerr << "---- store blob #" << i << Endl;
         auto ev = new TEvKqpSpilling::TEvWrite(i, CreateBlob(20, 'a' + i));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvWriteResult>(tester);
         UNIT_ASSERT_VALUES_EQUAL(i, resp->Get()->BlobId);
@@ -287,7 +292,7 @@ Y_UNIT_TEST(SingleFilePart) {
     for (i32 i = 4; i >= 0; --i) {
         // Cerr << "---- load blob #" << i << Endl;
         auto ev = new TEvKqpSpilling::TEvRead(i, true);
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvReadResult>(tester);
         UNIT_ASSERT_VALUES_EQUAL(i, resp->Get()->BlobId);
@@ -313,22 +318,23 @@ Y_UNIT_TEST(ReadError) {
 
     {
         auto ev = new TEvKqpSpilling::TEvWrite(0, CreateBlob(20, 'a'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvWriteResult>(tester);
         UNIT_ASSERT_VALUES_EQUAL(0, resp->Get()->BlobId);
     }
 
-    ::unlink((NFs::CurrentWorkingDirectory() + "/kqp_spilling/node_1/1_test_0").c_str());
+    ::unlink((NFs::CurrentWorkingDirectory() + GetSpillingPrefix() + "node_1/1_test_0").c_str());
 
     {
         auto ev = new TEvKqpSpilling::TEvRead(0, true);
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvError>(tester);
         auto& err = resp->Get()->Message;
+        auto expected = "can't open \"" + GetSpillingPrefix() + "node_1/1_test_0\" with mode RdOnly";
         UNIT_ASSERT_C(err.Contains("No such file or directory"), err);
-        UNIT_ASSERT_C(err.Contains("can't open \"kqp_spilling/node_1/1_test_0\" with mode RdOnly"), err);
+        UNIT_ASSERT_C(err.Contains(expected), err);
     }
 }
 
@@ -382,7 +388,7 @@ Y_UNIT_TEST(StartError) {
     runtime.Initialize(TAppPrepare().Unwrap());
     SetupLogs(runtime);
 
-    auto spillingService = StartSpillingService(runtime, 100, 500, 100, "/root/kqp_spilling/");
+    auto spillingService = StartSpillingService(runtime, 100, 500, 100, "/root/" + GetSpillingPrefix());
     auto tester = runtime.AllocateEdgeActor();
     auto spillingActor = StartSpillingActor(runtime, tester);
 
@@ -391,7 +397,7 @@ Y_UNIT_TEST(StartError) {
     // put blob 1
     {
         auto ev = new TEvKqpSpilling::TEvWrite(1, CreateBlob(10, 'a'));
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvError>(tester, TDuration::Seconds(1));
         UNIT_ASSERT_EQUAL("Service not started", resp->Get()->Message);
@@ -400,7 +406,7 @@ Y_UNIT_TEST(StartError) {
     // get blob 1
     {
         auto ev = new TEvKqpSpilling::TEvRead(1);
-        runtime.Send(new IEventHandle(spillingActor, tester, ev));
+        runtime.Send(new IEventHandleFat(spillingActor, tester, ev));
 
         auto resp = runtime.GrabEdgeEvent<TEvKqpSpilling::TEvError>(tester, TDuration::Seconds(1));
         UNIT_ASSERT_EQUAL("Service not started", resp->Get()->Message);
@@ -411,7 +417,7 @@ Y_UNIT_TEST(StartError) {
         THttpRequest httpReq(HTTP_METHOD_GET);
         NMonitoring::TMonService2HttpRequest monReq(nullptr, &httpReq, nullptr, nullptr, "", nullptr);
 
-        runtime.Send(new IEventHandle(spillingService, tester, new NMon::TEvHttpInfo(monReq)));
+        runtime.Send(new IEventHandleFat(spillingService, tester, new NMon::TEvHttpInfo(monReq)));
 
         auto resp = runtime.GrabEdgeEvent<NMon::TEvHttpInfoRes>(tester, TDuration::Seconds(1));
         UNIT_ASSERT_EQUAL("<html><h2>Service is not started due to IO error</h2></html>",

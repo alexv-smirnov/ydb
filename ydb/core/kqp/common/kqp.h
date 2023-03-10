@@ -1,18 +1,19 @@
 #pragma once
 
 #include "kqp_event_ids.h"
-#include "kqp_prepared_query.h"
 
 #include <library/cpp/lwtrace/shuttle.h>
-#include <ydb/core/kqp/counters/kqp_counters.h>
-#include <ydb/public/api/protos/ydb_status_codes.pb.h>
 
 #include <ydb/core/grpc_services/base/base.h>
 #include <ydb/core/grpc_services/cancelation/cancelation.h>
 #include <ydb/core/grpc_services/cancelation/cancelation_event.h>
-
+#include <ydb/core/kqp/counters/kqp_counters.h>
+#include <ydb/core/kqp/query_data/kqp_prepared_query.h>
+#include <ydb/library/aclib/aclib.h>
 #include <ydb/library/yql/dq/actors/dq.h>
 #include <ydb/library/yql/public/issue/yql_issue.h>
+#include <ydb/public/api/protos/ydb_status_codes.pb.h>
+#include <ydb/public/api/protos/draft/ydb_query.pb.h>
 
 #include <util/generic/guid.h>
 #include <util/generic/ptr.h>
@@ -170,6 +171,7 @@ public:
             case NKikimrKqp::QUERY_TYPE_AST_DML:
             case NKikimrKqp::QUERY_TYPE_AST_SCAN:
             case NKikimrKqp::QUERY_TYPE_SQL_QUERY:
+            case NKikimrKqp::QUERY_TYPE_FEDERATED_QUERY:
                 break;
 
             default:
@@ -254,14 +256,20 @@ struct TEvKqp {
 
     struct TEvQueryRequest : public NActors::TEventLocal<TEvQueryRequest, TKqpEvents::EvQueryRequest> {
     public:
-        using TSerializerCb = void (*)(std::shared_ptr<NGRpcService::IRequestCtxMtSafe>&, NKikimrKqp::TEvQueryRequest*) noexcept;
-        TEvQueryRequest(std::shared_ptr<NGRpcService::IRequestCtxMtSafe> ctx, TSerializerCb cb, TActorId actorId)
-            : RequestCtx(ctx)
-            , SerializerCb(cb)
-        {
-            ActorIdToProto(actorId, Record.MutableCancelationActor());
-        }
-
+        TEvQueryRequest(
+            const std::shared_ptr<NGRpcService::IRequestCtxMtSafe>& ctx,
+            const TString& sessionId,
+            TActorId actorId,
+            TString&& yqlText,
+            TString&& queryId,
+            NKikimrKqp::EQueryAction queryAction,
+            NKikimrKqp::EQueryType queryType,
+            const ::Ydb::Table::TransactionControl* txControl,
+            const ::google::protobuf::Map<TProtoStringType, ::Ydb::TypedValue>* ydbParameters,
+            const ::Ydb::Table::QueryStatsCollection::Mode collectStats,
+            const ::Ydb::Table::QueryCachePolicy* queryCachePolicy,
+            const ::Ydb::Operations::OperationParams* operationParams,
+            bool keepSession = false);
 
         TEvQueryRequest() = default;
 
@@ -269,15 +277,171 @@ struct TEvKqp {
             return true;
         }
 
-        // Same as TEventPBBase but without Rope (but can contain Payload and will lose some data after all)
         TEventSerializationInfo CreateSerializationInfo() const override { return {}; }
+
+        const TString& GetDatabase() const {
+            return RequestCtx ? Database : Record.GetRequest().GetDatabase();
+        }
+
+        bool HasYdbStatus() const {
+            return RequestCtx ? false : Record.HasYdbStatus();
+        }
+
+        const ::NKikimrKqp::TTopicOperations& GetTopicOperations() const {
+            return Record.GetRequest().GetTopicOperations();
+        }
+
+        bool HasTopicOperations() const {
+            return Record.GetRequest().HasTopicOperations();
+        }
+
+        bool GetKeepSession() const {
+            return RequestCtx ? KeepSession : Record.GetRequest().GetKeepSession();
+        }
+
+        TDuration GetCancelAfter() const {
+            return RequestCtx ? CancelAfter : TDuration::MilliSeconds(Record.GetRequest().GetCancelAfterMs());
+        }
+
+        TDuration GetOperationTimeout() const {
+            return RequestCtx ? OperationTimeout : TDuration::MilliSeconds(Record.GetRequest().GetTimeoutMs());
+        }
+
+        bool HasAction() const {
+            return RequestCtx ? true : Record.GetRequest().HasAction();
+        }
+
+        void SetSessionId(const TString& sessionId) {
+            if (RequestCtx) {
+                SessionId = sessionId;
+            } else {
+                Record.MutableRequest()->SetSessionId(sessionId);
+            }
+        }
+
+        const TString& GetSessionId() const {
+            return RequestCtx ? SessionId : Record.GetRequest().GetSessionId();
+        }
+
+        NKikimrKqp::EQueryAction GetAction() const {
+            return RequestCtx ? QueryAction : Record.GetRequest().GetAction();
+        }
+
+        NKikimrKqp::EQueryType GetType() const {
+            return RequestCtx ? QueryType : Record.GetRequest().GetType();
+        }
+
+        bool HasPreparedQuery() const {
+            return RequestCtx ? QueryId.size() > 0 : Record.GetRequest().HasPreparedQuery();
+        }
+
+        const TString& GetPreparedQuery() const {
+            return RequestCtx ? QueryId : Record.GetRequest().GetPreparedQuery();
+        }
+
+        const TString& GetQuery() const {
+            return RequestCtx ? YqlText : Record.GetRequest().GetQuery();
+        }
+
+        const ::NKikimrMiniKQL::TParams& GetParameters() const {
+            return Record.GetRequest().GetParameters();
+        }
+
+        const ::Ydb::Table::TransactionControl& GetTxControl() const {
+            return RequestCtx ? *TxControl : Record.GetRequest().GetTxControl();
+        }
+
+        bool GetUsePublicResponseDataFormat() const {
+            return RequestCtx ? true : Record.GetRequest().GetUsePublicResponseDataFormat();
+        }
+
+        bool GetQueryKeepInCache() const {
+            if (RequestCtx) {
+                if (QueryCachePolicy != nullptr) {
+                    return QueryCachePolicy->keep_in_cache();
+                }
+                return false;
+            }
+            return Record.GetRequest().GetQueryCachePolicy().keep_in_cache();
+        }
+
+        bool HasTxControl() const {
+            return RequestCtx ? TxControl != nullptr : Record.GetRequest().HasTxControl();
+        }
+
+        bool HasCollectStats() const {
+            return RequestCtx ? true : Record.GetRequest().HasCollectStats();
+        }
+
+        TActorId GetRequestActorId() const {
+            return ActorIdFromProto(Record.GetRequestActorId());
+        }
+
+        const TString& GetTraceId() const {
+            if (RequestCtx) {
+                if (!TraceId) {
+                    TraceId = RequestCtx->GetTraceId().GetOrElse("");
+                }
+                return TraceId;
+            }
+
+            return Record.GetTraceId();
+        }
+
+        const TString& GetRequestType() const {
+            if (RequestCtx) {
+                if (!RequestType) {
+                    RequestType = RequestCtx->GetRequestType().GetOrElse("");
+                }
+                return RequestType;
+            }
+
+            return Record.GetRequestType();
+        }
+
+        const TIntrusiveConstPtr<NACLib::TUserToken>& GetUserToken() const {
+            if (RequestCtx && RequestCtx->GetInternalToken()) {
+                return RequestCtx->GetInternalToken();
+            }
+
+            if (Token_) {
+                return Token_;
+            }
+
+            Token_ = new NACLib::TUserToken(Record.GetUserToken());
+            return Token_;
+        }
+
+        const ::google::protobuf::Map<TProtoStringType, ::Ydb::TypedValue>& GetYdbParameters() const {
+            if (YdbParameters) {
+                return *YdbParameters;
+            }
+
+            return Record.GetRequest().GetYdbParameters();
+        }
+
+        Ydb::StatusIds::StatusCode GetYdbStatus() const {
+            return Record.GetYdbStatus();
+        }
+
+        ::Ydb::Table::QueryStatsCollection::Mode GetCollectStats() const {
+            if (RequestCtx) {
+                return CollectStats;
+            }
+
+            return Record.GetRequest().GetCollectStats();
+        }
+
+        const ::google::protobuf::RepeatedPtrField<::Ydb::Issue::IssueMessage>& GetQueryIssues() const {
+            return Record.GetQueryIssues();
+        }
 
         ui64 GetRequestSize() const {
             return Record.GetRequest().ByteSizeLong();
         }
 
         ui64 GetQuerySize() const {
-            return Record.GetRequest().GetQuery().size();
+            return RequestCtx ? YqlText.size() : Record.GetRequest().GetQuery().size();
         }
 
         ui64 GetParametersSize() const {
@@ -286,7 +450,7 @@ struct TEvKqp {
             }
 
             ParametersSize += Record.GetRequest().GetParameters().ByteSizeLong();
-            for(const auto& [name, param]: Record.GetRequest().GetYdbParameters()) {
+            for(const auto& [name, param]: GetYdbParameters()) {
                 ParametersSize += name.size();
                 ParametersSize += param.ByteSizeLong();
             }
@@ -322,18 +486,30 @@ struct TEvKqp {
             }
         }
 
-        void PrepareRemote() const {
-            if (RequestCtx) {
-                Y_VERIFY(SerializerCb);
-                SerializerCb(RequestCtx, &Record);
-                RequestCtx.reset();
-            }
-        }
-        mutable ui64 ParametersSize = 0;
+        void PrepareRemote() const;
+
         mutable NKikimrKqp::TEvQueryRequest Record;
+
     private:
+        mutable ui64 ParametersSize = 0;
         mutable std::shared_ptr<NGRpcService::IRequestCtxMtSafe> RequestCtx;
-        TSerializerCb SerializerCb;
+        mutable TString TraceId;
+        mutable TString RequestType;
+        mutable TIntrusiveConstPtr<NACLib::TUserToken> Token_;
+        TString Database;
+        TString SessionId;
+        TString YqlText;
+        TString QueryId;
+        NKikimrKqp::EQueryAction QueryAction;
+        NKikimrKqp::EQueryType QueryType;
+        const ::Ydb::Table::TransactionControl* TxControl = nullptr;
+        const ::google::protobuf::Map<TProtoStringType, ::Ydb::TypedValue>* YdbParameters = nullptr;
+        const ::Ydb::Table::QueryStatsCollection::Mode CollectStats = Ydb::Table::QueryStatsCollection::STATS_COLLECTION_NONE;
+        const ::Ydb::Table::QueryCachePolicy* QueryCachePolicy = nullptr;
+        const ::Ydb::Operations::OperationParams* OperationParams = nullptr;
+        bool KeepSession = false;
+        TDuration OperationTimeout;
+        TDuration CancelAfter;
     };
 
     struct TEvCloseSessionRequest : public TEventPB<TEvCloseSessionRequest,
@@ -491,7 +667,7 @@ struct TEvKqp {
         NKikimrKqp::TEvPingSessionResponse, TKqpEvents::EvPingSessionResponse> {};
 
     struct TEvCompileRequest : public TEventLocal<TEvCompileRequest, TKqpEvents::EvCompileRequest> {
-        TEvCompileRequest(const TString& userToken, const TMaybe<TString>& uid, TMaybe<TKqpQueryId>&& query,
+        TEvCompileRequest(const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TMaybe<TString>& uid, TMaybe<TKqpQueryId>&& query,
             bool keepInCache, TInstant deadline, TKqpDbCountersPtr dbCounters, NLWTrace::TOrbit orbit = {})
             : UserToken(userToken)
             , Uid(uid)
@@ -504,7 +680,7 @@ struct TEvKqp {
             Y_ENSURE(Uid.Defined() != Query.Defined());
         }
 
-        TString UserToken;
+        TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
         TMaybe<TString> Uid;
         TMaybe<TKqpQueryId> Query;
         bool KeepInCache = false;
@@ -517,7 +693,7 @@ struct TEvKqp {
     };
 
     struct TEvRecompileRequest : public TEventLocal<TEvRecompileRequest, TKqpEvents::EvRecompileRequest> {
-        TEvRecompileRequest(const TString& userToken, const TString& uid, const TMaybe<TKqpQueryId>& query,
+        TEvRecompileRequest(const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TString& uid, const TMaybe<TKqpQueryId>& query,
             TInstant deadline, TKqpDbCountersPtr dbCounters, NLWTrace::TOrbit orbit = {})
             : UserToken(userToken)
             , Uid(uid)
@@ -526,7 +702,7 @@ struct TEvKqp {
             , DbCounters(dbCounters)
             , Orbit(std::move(orbit)) {}
 
-        TString UserToken;
+        TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
         TString Uid;
         TMaybe<TKqpQueryId> Query;
 
@@ -536,7 +712,7 @@ struct TEvKqp {
         NLWTrace::TOrbit Orbit;
     };
 
-    struct TEvCompileResponse : public TEventLocal<TEvCompileResponse, TKqpEvents::EvCompileResponse> {
+    struct TEvCompileResponse : public TEventLight<TEvCompileResponse, TKqpEvents::EvCompileResponse> {
         TEvCompileResponse(const TKqpCompileResult::TConstPtr& compileResult, NLWTrace::TOrbit orbit = {})
             : CompileResult(compileResult)
             , Orbit(std::move(orbit)) {}
@@ -547,6 +723,9 @@ struct TEvKqp {
 
         NLWTrace::TOrbit Orbit;
     };
+
+    struct TEvKqpProxyPublishRequest : 
+        public TEventLocal<TEvKqpProxyPublishRequest, TKqpEvents::EvKqpProxyPublishRequest> {};
 
     struct TEvCompileInvalidateRequest : public TEventLocal<TEvCompileInvalidateRequest,
         TKqpEvents::EvCompileInvalidateRequest>
@@ -567,7 +746,43 @@ struct TEvKqp {
         {}
     };
 
+    struct TEvScriptRequest : public TEventLocal<TEvScriptRequest, TKqpEvents::EvScriptRequest> {
+        TEvScriptRequest() = default;
+
+        mutable NKikimrKqp::TEvQueryRequest Record;
+    };
+
+    struct TEvScriptResponse : public TEventLocal<TEvScriptResponse, TKqpEvents::EvScriptResponse> {
+        TEvScriptResponse(TString operationId, TString executionId, Ydb::Query::ExecStatus execStatus, Ydb::Query::ExecMode execMode)
+            : Status(Ydb::StatusIds::SUCCESS)
+            , OperationId(std::move(operationId))
+            , ExecutionId(std::move(executionId))
+            , ExecStatus(execStatus)
+            , ExecMode(execMode)
+        {}
+
+        TEvScriptResponse(Ydb::StatusIds::StatusCode status, NYql::TIssues issues)
+            : Status(status)
+            , Issues(std::move(issues))
+            , ExecStatus(Ydb::Query::EXEC_STATUS_FAILED)
+            , ExecMode(Ydb::Query::EXEC_MODE_UNSPECIFIED)
+        {}
+
+        const Ydb::StatusIds::StatusCode Status;
+        const NYql::TIssues Issues;
+        const TString OperationId;
+        const TString ExecutionId;
+        const Ydb::Query::ExecStatus ExecStatus;
+        const Ydb::Query::ExecMode ExecMode;
+    };
+
     using TEvAbortExecution = NYql::NDq::TEvDq::TEvAbortExecution;
+
+    struct TEvFetchScriptResultsRequest : public TEventPB<TEvFetchScriptResultsRequest, NKikimrKqp::TEvFetchScriptResultsRequest, TKqpEvents::EvFetchScriptResultsRequest> {
+    };
+
+    struct TEvFetchScriptResultsResponse : public TEventPB<TEvFetchScriptResultsResponse, NKikimrKqp::TEvFetchScriptResultsResponse, TKqpEvents::EvFetchScriptResultsResponse> {
+    };
 };
 
 class TKqpRequestInfo {

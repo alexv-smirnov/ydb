@@ -27,6 +27,12 @@ public:
     TAsyncExecuteQueryIterator StreamExecuteQuery(const TString& query,
         const TExecuteQuerySettings& settings = TExecuteQuerySettings());
 
+    TAsyncExecuteScriptResult ExecuteScript(const TString& script,
+        const TExecuteScriptSettings& settings = TExecuteScriptSettings());
+
+    TAsyncFetchScriptResultsResult FetchScriptResults(const TString& executionId,
+        const TFetchScriptResultsSettings& settings = TFetchScriptResultsSettings());
+
 private:
     class TImpl;
     std::shared_ptr<TImpl> Impl_;

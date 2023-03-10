@@ -2132,6 +2132,10 @@ public:
         : Database(database)
     {}
 
+    TToughDb& GetDatabase() const {
+        return Database;
+    }
+
     template <typename TableType> typename TableType::TKey::template Selector<TableType> Table() { return Database; }
 
     template <typename TableType>
@@ -2193,7 +2197,7 @@ struct TStaticSchemaFiller {
             schema.Columns[Column::ColumnId] = NTable::TColumn(
                 TTable::template TableColumns<Column>::GetColumnName(),
                 Column::ColumnId,
-                NScheme::TTypeInfo(Column::ColumnType));
+                NScheme::TTypeInfo(Column::ColumnType), "");
         }
     };
 

@@ -1320,8 +1320,8 @@ Y_UNIT_TEST_SUITE(DataShardVolatile) {
                 }
                 default: {
                     Cerr << "... ignored event " << ev->GetTypeRewrite();
-                    if (ev->GetBase()) {
-                        Cerr << " " << ev->GetBase()->ToString();
+                    if (ev->HasEvent()) {
+                        Cerr << " " << ev->GetTypeName();
                     }
                     Cerr << Endl;
                 }
@@ -1350,6 +1350,66 @@ Y_UNIT_TEST_SUITE(DataShardVolatile) {
             "{ items { uint32_value: 1 } items { uint32_value: 1 } }, "
             "{ items { uint32_value: 2 } items { uint32_value: 2 } }");
         UNIT_ASSERT_VALUES_EQUAL(observedStatus, Ydb::StatusIds::SUCCESS);
+    }
+
+    Y_UNIT_TEST(DistributedWriteWithAsyncIndex) {
+        TPortManager pm;
+        TServerSettings serverSettings(pm.GetPort(2134));
+        serverSettings.SetDomainName("Root")
+            .SetUseRealThreads(false)
+            .SetDomainPlanResolution(1000);
+
+        Tests::TServer::TPtr server = new TServer(serverSettings);
+        auto &runtime = *server->GetRuntime();
+        auto sender = runtime.AllocateEdgeActor();
+
+        runtime.SetLogPriority(NKikimrServices::TX_DATASHARD, NLog::PRI_TRACE);
+        runtime.SetLogPriority(NKikimrServices::TX_PROXY, NLog::PRI_DEBUG);
+
+        InitRoot(server, sender);
+
+        auto opts = TShardedTableOptions()
+                        .Shards(1)
+                        .Columns({
+                            {"key", "Uint32", true, false},
+                            {"value", "Uint32", false, false},
+                        })
+                        .Indexes({
+                            {"by_value", {"value"}, {}, NKikimrSchemeOp::EIndexTypeGlobalAsync},
+                        });
+        CreateShardedTable(server, sender, "/Root", "table-1", opts);
+        CreateShardedTable(server, sender, "/Root", "table-2", opts);
+
+        ExecSQL(server, sender, "UPSERT INTO `/Root/table-1` (key, value) VALUES (1, 1);");
+        ExecSQL(server, sender, "UPSERT INTO `/Root/table-2` (key, value) VALUES (10, 10);");
+
+        runtime.GetAppData(0).FeatureFlags.SetEnableDataShardVolatileTransactions(true);
+        ExecSQL(server, sender, R"(
+            UPSERT INTO `/Root/table-1` (key, value) VALUES (2, 3);
+            UPSERT INTO `/Root/table-2` (key, value) VALUES (20, 30);
+        )");
+        runtime.GetAppData(0).FeatureFlags.SetEnableDataShardVolatileTransactions(false);
+
+        // Make sure changes are actually delivered
+        SimulateSleep(runtime, TDuration::Seconds(1));
+
+        UNIT_ASSERT_VALUES_EQUAL(
+            KqpSimpleStaleRoExec(runtime, R"(
+                SELECT key, value
+                FROM `/Root/table-1` VIEW by_value
+                ORDER BY key
+            )"),
+            "{ items { uint32_value: 1 } items { uint32_value: 1 } }, "
+            "{ items { uint32_value: 2 } items { uint32_value: 3 } }");
+
+        UNIT_ASSERT_VALUES_EQUAL(
+            KqpSimpleStaleRoExec(runtime, R"(
+                SELECT key, value
+                FROM `/Root/table-2` VIEW by_value
+                ORDER BY key
+            )"),
+            "{ items { uint32_value: 10 } items { uint32_value: 10 } }, "
+            "{ items { uint32_value: 20 } items { uint32_value: 30 } }");
     }
 
 } // Y_UNIT_TEST_SUITE(DataShardVolatile)

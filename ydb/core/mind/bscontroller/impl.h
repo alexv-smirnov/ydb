@@ -848,7 +848,6 @@ public:
 
     };
 
-    std::unordered_map<TString, TNodeId> NodeIdByDiskSerialNumber;
     TMap<ui32, TSet<ui32>> NodesAwaitingKeysForGroup;
 
     struct THostConfigInfo {
@@ -1280,17 +1279,17 @@ public:
         TMaybe<Table::NodeId::Type> NodeId;
         TMaybe<Table::PDiskId::Type> PDiskId;
         TMaybe<Table::Guid::Type> Guid;
-        Table::LifeStage::Type LifeStage = NKikimrBlobStorage::TDriveLifeStage::UNKNOWN;
+        Table::LifeStage::Type LifeStage = NKikimrBlobStorage::TDriveLifeStage::FREE;
         Table::Kind::Type Kind = 0;
         Table::PDiskType::Type PDiskType = PDiskTypeToPDiskType(NPDisk::DEVICE_TYPE_UNKNOWN);
         TMaybe<Table::PDiskConfig::Type> PDiskConfig;
+        TMaybe<Table::Path::Type> Path;
 
         TDriveSerialInfo() = default;
         TDriveSerialInfo(const TDriveSerialInfo&) = default;
 
         TDriveSerialInfo(Table::BoxId::Type boxId)
           : BoxId(boxId)
-          , LifeStage(NKikimrBlobStorage::TDriveLifeStage::NOT_SEEN)
         {}
 
         template<typename T>
@@ -1303,7 +1302,8 @@ public:
                     Table::LifeStage,
                     Table::Kind,
                     Table::PDiskType,
-                    Table::PDiskConfig
+                    Table::PDiskConfig,
+                    Table::Path
                 > adapter(
                     &TDriveSerialInfo::BoxId,
                     &TDriveSerialInfo::NodeId,
@@ -1312,7 +1312,8 @@ public:
                     &TDriveSerialInfo::LifeStage,
                     &TDriveSerialInfo::Kind,
                     &TDriveSerialInfo::PDiskType,
-                    &TDriveSerialInfo::PDiskConfig
+                    &TDriveSerialInfo::PDiskConfig,
+                    &TDriveSerialInfo::Path
                 );
             callback(&adapter);
         }
@@ -1610,12 +1611,12 @@ private:
         }
         for (TActorId *ptr : {&SelfHealId, &StatProcessorActorId, &SystemViewsCollectorId}) {
             if (const TActorId actorId = std::exchange(*ptr, {})) {
-                TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
+                TActivationContext::Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
             }
         }
         for (const auto& [id, info] : GroupMap) {
             if (const auto& actorId = info->VirtualGroupSetupMachineId) {
-                TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
+                TActivationContext::Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, actorId, SelfId(), nullptr, 0));
             }
         }
         return TActor::PassAway();
@@ -1656,7 +1657,7 @@ private:
     void Enqueue(STFUNC_SIG) override {
         Y_UNUSED(ctx);
         STLOG(PRI_DEBUG, BS_CONTROLLER, BSC04, "Enqueue", (TabletID, TabletID()), (Type, ev->GetTypeRewrite()),
-            (Event, ev->HasEvent() ? ev->GetBase()->ToString() : "serialized"));
+            (Event, ev->ToString()));
         InitQueue.push_back(ev);
     }
 
@@ -1672,6 +1673,10 @@ public:
     // It interacts with BS_CONTROLLER and group observer (which provides information about group state on a per-vdisk
     // basis). BS_CONTROLLER reports faulty PDisks and all involved groups in a push notification manner.
     IActor *CreateSelfHealActor();
+
+    bool IsGroupLayoutSanitizerEnabled() const {
+        return GroupLayoutSanitizer;
+    }
 
 private:
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -1773,13 +1778,10 @@ private:
 
     void Handle(TEvPrivate::TEvDropDonor::TPtr ev);
 
-    Schema::PDisk::Guid::Type CheckStaticPDisk(TConfigState &state, TPDiskId pdiskId, const TPDiskCategory& category,
-            const TMaybe<Schema::PDisk::PDiskConfig::Type>& pdiskConfig, ui32 *staticSlotUsage);
     void AllocatePDiskWithSerial(TConfigState& state, ui32 nodeId, const TSerial& serial, TDriveSerialInfo *driveInfo);
     void ValidatePDiskWithSerial(TConfigState& state, ui32 nodeId, const TSerial& serial, const TDriveSerialInfo& driveInfo,
             std::function<TDriveSerialInfo*()> getMutableItem);
     void FitPDisksForUserConfig(TConfigState &state);
-    void FitPDisksForNode(TConfigState& state, ui32 nodeId, const std::vector<TSerial>& serials);
     void FitGroupsForUserConfig(TConfigState &state, ui32 availabilityDomainId,
         const NKikimrBlobStorage::TConfigRequest& cmd, std::deque<ui64> expectedSlotSize,
         NKikimrBlobStorage::TConfigResponse::TStatus& status);
@@ -1807,7 +1809,7 @@ public:
 
     STFUNC(StateInit) {
         STLOG(PRI_DEBUG, BS_CONTROLLER, BSC05, "StateInit event", (Type, ev->GetTypeRewrite()),
-            (Event, ev->HasEvent() ? ev->GetBase()->ToString() : "serialized"));
+            (Event, ev->ToString()));
         switch (ev->GetTypeRewrite()) {
             hFunc(TEvInterconnect::TEvNodesInfo, Handle);
             default:
@@ -1828,7 +1830,7 @@ public:
     }
 
     void PushProcessIncomingEvent() {
-        TActivationContext::Send(new IEventHandle(TEvPrivate::EvProcessIncomingEvent, 0, SelfId(), {}, nullptr, 0));
+        TActivationContext::Send(new IEventHandleFat(TEvPrivate::EvProcessIncomingEvent, 0, SelfId(), {}, nullptr, 0));
     }
 
     void ProcessIncomingEvent() {
@@ -1918,7 +1920,7 @@ public:
             default:
                 if (!HandleDefaultEvents(ev, ctx)) {
                     STLOG(PRI_ERROR, BS_CONTROLLER, BSC06, "StateWork unexpected event", (Type, type),
-                        (Event, ev->HasEvent() ? ev->GetBase()->ToString() : "serialized"));
+                        (Event, ev->ToString()));
                 }
             break;
         }
@@ -1940,7 +1942,7 @@ public:
         while (!InitQueue.empty()) {
             TAutoPtr<IEventHandle> &ev = InitQueue.front();
             STLOG(PRI_DEBUG, BS_CONTROLLER, BSC08, "Dequeue", (TabletID, TabletID()), (Type, ev->GetTypeRewrite()),
-                (Event, ev->HasEvent() ? ev->GetBase()->ToString() : "serialized"));
+                (Event, ev->ToString()));
             TActivationContext::Send(ev.Release());
             InitQueue.pop_front();
         }
@@ -1971,28 +1973,28 @@ public:
         counters[NBlobStorageController::COUNTER_PDISKS_WITHOUT_EXPECTED_SLOT_COUNT].Set(numWithoutSlotCount);
         counters[NBlobStorageController::COUNTER_PDISKS_WITHOUT_EXPECTED_SERIAL].Set(numWithoutSerial);
 
-        ui32 numNotSeen = 0;
+        ui32 numFree = 0;
+        ui32 numAdded = 0;
         ui32 numRemoved = 0;
-        ui32 numError = 0;
         for (const auto& [serial, driveInfo] : DrivesSerials) {
             switch (driveInfo->LifeStage) {
-                case NKikimrBlobStorage::TDriveLifeStage::NOT_SEEN:
-                    ++numNotSeen;
+                case NKikimrBlobStorage::TDriveLifeStage::FREE:
+                    ++numFree;
                     break;
-                case NKikimrBlobStorage::TDriveLifeStage::REMOVED:
+                case NKikimrBlobStorage::TDriveLifeStage::ADDED_BY_DSTOOL:
+                    ++numAdded;
+                    break;
+                case NKikimrBlobStorage::TDriveLifeStage::REMOVED_BY_DSTOOL:
                     ++numRemoved;
-                    break;
-                case NKikimrBlobStorage::TDriveLifeStage::ERROR:
-                    ++numError;
                     break;
                 default:
                     break;
             }
         }
 
-        counters[NBlobStorageController::COUNTER_DRIVE_SERIAL_NOT_SEEN].Set(numNotSeen);
-        counters[NBlobStorageController::COUNTER_DRIVE_SERIAL_REMOVED].Set(numRemoved);
-        counters[NBlobStorageController::COUNTER_DRIVE_SERIAL_ERROR].Set(numError);
+        counters[NBlobStorageController::COUNTER_DRIVE_SERIAL_FREE].Set(numFree);
+        counters[NBlobStorageController::COUNTER_DRIVE_SERIAL_ADDED_BY_DSTOOL].Set(numAdded);
+        counters[NBlobStorageController::COUNTER_DRIVE_SERIAL_REMOVED_BY_DSTOOL].Set(numRemoved);
     }
 
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////

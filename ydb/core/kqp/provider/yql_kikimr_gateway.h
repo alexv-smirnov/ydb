@@ -182,16 +182,19 @@ struct TKikimrColumnMetadata {
     TString Type;
     bool NotNull = false;
     NKikimr::NScheme::TTypeInfo TypeInfo;
+    TString TypeMod;
     TVector<TString> Families;
 
     TKikimrColumnMetadata() = default;
 
-    TKikimrColumnMetadata(const TString& name, ui32 id, const TString& type, bool notNull, NKikimr::NScheme::TTypeInfo typeInfo = {})
+    TKikimrColumnMetadata(const TString& name, ui32 id, const TString& type, bool notNull,
+        NKikimr::NScheme::TTypeInfo typeInfo = {}, const TString& typeMod = {})
         : Name(name)
         , Id(id)
         , Type(type)
         , NotNull(notNull)
         , TypeInfo(typeInfo)
+        , TypeMod(typeMod)
     {}
 
     explicit TKikimrColumnMetadata(const NKikimrKqp::TKqpColumnMetadataProto* message)
@@ -201,8 +204,10 @@ struct TKikimrColumnMetadata {
         , NotNull(message->GetNotNull())
         , Families(message->GetFamily().begin(), message->GetFamily().end())
     {
-        TypeInfo = NKikimr::NScheme::TypeInfoFromProtoColumnType(message->GetTypeId(),
+        auto typeInfoMod = NKikimr::NScheme::TypeInfoModFromProtoColumnType(message->GetTypeId(),
             message->HasTypeInfo() ? &message->GetTypeInfo() : nullptr);
+        TypeInfo = typeInfoMod.TypeInfo;
+        TypeMod = typeInfoMod.TypeMod;
     }
 
     void ToMessage(NKikimrKqp::TKqpColumnMetadataProto* message) const {
@@ -210,7 +215,7 @@ struct TKikimrColumnMetadata {
         message->SetId(Id);
         message->SetType(Type);
         message->SetNotNull(NotNull);
-        auto columnType = NKikimr::NScheme::ProtoColumnTypeFromTypeInfo(TypeInfo);
+        auto columnType = NKikimr::NScheme::ProtoColumnTypeFromTypeInfoMod(TypeInfo, TypeMod);
         message->SetTypeId(columnType.TypeId);
         if (columnType.TypeInfo) {
             *message->MutableTypeInfo() = *columnType.TypeInfo;
@@ -499,6 +504,39 @@ struct TDropTableStoreSettings {
     TString TableStore;
 };
 
+struct TCreateExternalTableSettings {
+    TString ExternalTable;
+    TString DataSourcePath;
+    TString Location;
+    TVector<TString> ColumnOrder;
+    TMap<TString, TKikimrColumnMetadata> Columns;
+    TVector<std::pair<TString, TString>> SourceTypeParameters;
+};
+
+struct TAlterExternalTableSettings {
+    TString ExternalTable;
+};
+
+struct TDropExternalTableSettings {
+    TString ExternalTable;
+};
+
+struct TCreateExternalDataSourceSettings {
+    TString ExternalDataSource;
+    TString SourceType;
+    TString Location;
+    TString Installation;
+    TString AuthMethod;
+};
+
+struct TAlterExternalDataSourceSettings {
+    TString ExternalDataSource;
+};
+
+struct TDropExternalDataSourceSettings {
+    TString ExternalDataSource;
+};
+
 struct TKikimrListPathItem {
     TKikimrListPathItem(TString name, bool isDirectory) {
         Name = name;
@@ -598,7 +636,7 @@ public:
     public:
         virtual NThreading::TFuture<TTableMetadataResult> LoadTableMetadata(
             const TString& cluster, const TString& table, const TLoadTableMetadataSettings& settings, const TString& database,
-            const TMaybe<NACLib::TUserToken>& userToken) = 0;
+            const TIntrusiveConstPtr<NACLib::TUserToken>& userToken) = 0;
 
         virtual TVector<TString> GetCollectedSchemeData() = 0;
 
@@ -611,7 +649,7 @@ public:
     virtual TString GetDefaultCluster() = 0;
     virtual TMaybe<TString> GetSetting(const TString& cluster, const TString& name) = 0;
 
-    virtual void SetToken(const TString& cluster, const TString& token) = 0;
+    virtual void SetToken(const TString& cluster, const TIntrusiveConstPtr<NACLib::TUserToken>& token) = 0;
 
     virtual NThreading::TFuture<TListPathResult> ListPath(const TString& cluster, const TString& path) = 0;
 
@@ -653,6 +691,18 @@ public:
     virtual NThreading::TFuture<TGenericResult> AlterTableStore(const TString& cluster, const TAlterTableStoreSettings& settings) = 0;
 
     virtual NThreading::TFuture<TGenericResult> DropTableStore(const TString& cluster, const TDropTableStoreSettings& settings) = 0;
+
+    virtual NThreading::TFuture<TGenericResult> CreateExternalTable(const TString& cluster, const TCreateExternalTableSettings& settings, bool createDir) = 0;
+
+    virtual NThreading::TFuture<TGenericResult> AlterExternalTable(const TString& cluster, const TAlterExternalTableSettings& settings) = 0;
+
+    virtual NThreading::TFuture<TGenericResult> DropExternalTable(const TString& cluster, const TDropExternalTableSettings& settings) = 0;
+
+    virtual NThreading::TFuture<TGenericResult> CreateExternalDataSource(const TString& cluster, const TCreateExternalDataSourceSettings& settings, bool createDir) = 0;
+
+    virtual NThreading::TFuture<TGenericResult> AlterExternalDataSource(const TString& cluster, const TAlterExternalDataSourceSettings& settings) = 0;
+
+    virtual NThreading::TFuture<TGenericResult> DropExternalDataSource(const TString& cluster, const TDropExternalDataSourceSettings& settings) = 0;
 
     virtual TVector<TString> GetCollectedSchemeData() = 0;
 

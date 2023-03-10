@@ -34,6 +34,9 @@ namespace NLs {
 
     TCheckFunc PathsInsideDomain(ui64 count);
     TCheckFunc PQPartitionsInsideDomain(ui64 count);
+    TCheckFunc TopicReservedStorage(ui64 expected);
+    TCheckFunc TopicAccountSize(ui64 expected);
+    TCheckFunc TopicUsedReserveSize(ui64 expected);
     TCheckFunc PathsInsideDomainOneOf(TSet<ui64> variants);
     TCheckFunc ShardsInsideDomain(ui64 count);
     TCheckFunc ShardsInsideDomainOneOf(TSet<ui64> variants);
@@ -81,6 +84,8 @@ namespace NLs {
 
 
     void IsTable(const NKikimrScheme::TEvDescribeSchemeResult& record);
+    void IsExternalTable(const NKikimrScheme::TEvDescribeSchemeResult& record);
+    void IsExternalDataSource(const NKikimrScheme::TEvDescribeSchemeResult& record);
     TCheckFunc CheckColumns(const TString& name, const TSet<TString>& columns, const TSet<TString>& droppedColumns, const TSet<TString> keyColumns,
                             NKikimrSchemeOp::EPathState pathState = NKikimrSchemeOp::EPathState::EPathStateNoChanges);
     void CheckBoundaries(const NKikimrScheme::TEvDescribeSchemeResult& record);

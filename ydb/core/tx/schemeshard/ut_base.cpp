@@ -10549,4 +10549,339 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
             }
         );
     }
+
+    Y_UNIT_TEST(TopicReserveSize) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        const auto AssertReserve = [&] (TString path, ui64 expectedReservedStorage) {
+            TestDescribeResult(DescribePath(runtime, path),
+                               {NLs::Finished,
+                                NLs::TopicReservedStorage(expectedReservedStorage)});
+        };
+
+        // create with WriteSpeedInBytesPerSecond
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 1
+            PartitionPerTablet: 1
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 1 * 13 * 19);
+
+        // Change MeteringMode
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_REQUEST_UNITS
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 0);
+
+        // Change MeteringMode
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 1 * 13 * 19);
+
+        // increase partitions count
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 13 * 19);
+
+        // increase WriteSpeedInBytesPerSecond
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 23
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 13 * 23);
+
+        // decrease WriteSpeedInBytesPerSecond
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 13 * 19);
+
+        // increase LifetimeSeconds
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 17
+                    WriteSpeedInBytesPerSecond : 23
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 17 * 23);
+
+        // decrease LifetimeSeconds
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 13 * 19);
+
+        // use StorageLimitBytes
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    StorageLimitBytes : 17
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 17);
+
+        // increase StorageLimitBytes
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    StorageLimitBytes : 23
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 23);
+
+        // decrease StorageLimitBytes
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 7
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    StorageLimitBytes : 17
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 7 * 17);
+
+        // increase partitions count
+        TestAlterPQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic1"
+            TotalGroupCount: 11
+            PartitionPerTablet: 11
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    StorageLimitBytes : 17
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic1", 11 * 17);
+
+        // drop partiotion
+        TestDropPQGroup(runtime, ++txId, "/MyRoot", "Topic1");
+        env.TestWaitNotification(runtime, txId);
+
+
+        // create with StorageLimitBytes
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot", R"(
+            Name: "Topic2"
+            TotalGroupCount: 3
+            PartitionPerTablet: 3
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    StorageLimitBytes : 17
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+        AssertReserve("/MyRoot/Topic2", 3 * 17);
+    }
+
+    Y_UNIT_TEST(FindSubDomainPathId) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateSubDomain(runtime, ++txId, "/MyRoot", R"(
+            Name: "SubDomenA"
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // create with WriteSpeedInBytesPerSecond
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot/SubDomenA", R"(
+            Name: "Topic1"
+            TotalGroupCount: 1
+            PartitionPerTablet: 1
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        auto subDomainPathId = DescribePath(runtime, "/MyRoot/SubDomenA").GetPathId();
+        auto topicTabletId = DescribePath(runtime, "/MyRoot/SubDomenA/Topic1", true, true, true)
+                .GetPathDescription().GetPersQueueGroup().GetPartitions()[0].GetTabletId();
+
+        ForwardToTablet(runtime, TTestTxConfig::SchemeShard, runtime.AllocateEdgeActor(), new TEvSchemeShard::TEvFindTabletSubDomainPathId(topicTabletId));
+
+        TAutoPtr<IEventHandle> handle;
+        auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvFindTabletSubDomainPathIdResult>(handle, TDuration::Seconds(1));
+        UNIT_ASSERT(event);
+
+        UNIT_ASSERT_VALUES_EQUAL(subDomainPathId, event->Record.GetSubDomainPathId());
+    }
+
+    Y_UNIT_TEST(FindSubDomainPathIdActor) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateSubDomain(runtime, ++txId, "/MyRoot", R"(
+            Name: "SubDomenA"
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // create with WriteSpeedInBytesPerSecond
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot/SubDomenA", R"(
+            Name: "Topic1"
+            TotalGroupCount: 1
+            PartitionPerTablet: 1
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        auto subDomainPathId = DescribePath(runtime, "/MyRoot/SubDomenA").GetPathId();
+        auto topicTabletId = DescribePath(runtime, "/MyRoot/SubDomenA/Topic1", true, true, true)
+                .GetPathDescription().GetPersQueueGroup().GetPartitions()[0].GetTabletId();
+
+        runtime.Register(CreateFindSubDomainPathIdActor(runtime.AllocateEdgeActor(), topicTabletId, TTestTxConfig::SchemeShard, false));
+
+        TAutoPtr<IEventHandle> handle;
+        auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvSubDomainPathIdFound>(handle, TDuration::Seconds(1));
+        UNIT_ASSERT(event);
+
+        UNIT_ASSERT_VALUES_EQUAL(subDomainPathId, event->LocalPathId);
+    }
+
+    Y_UNIT_TEST(FindSubDomainPathIdActorAsync) {
+        TTestBasicRuntime runtime;
+        TTestEnv env(runtime);
+        ui64 txId = 100;
+
+        TestCreateSubDomain(runtime, ++txId, "/MyRoot", R"(
+            Name: "SubDomenA"
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        // create with WriteSpeedInBytesPerSecond
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot/SubDomenA", R"(
+            Name: "Topic1"
+            TotalGroupCount: 1
+            PartitionPerTablet: 1
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 13
+                    WriteSpeedInBytesPerSecond : 19
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )");
+        env.TestWaitNotification(runtime, txId);
+
+        auto subDomainPathId = DescribePath(runtime, "/MyRoot/SubDomenA").GetPathId();
+        auto topicTabletId = DescribePath(runtime, "/MyRoot/SubDomenA/Topic1", true, true, true)
+                .GetPathDescription().GetPersQueueGroup().GetPartitions()[0].GetTabletId();
+
+        runtime.Register(CreateFindSubDomainPathIdActor(runtime.AllocateEdgeActor(), topicTabletId, TTestTxConfig::SchemeShard, true, TDuration::Seconds(2)));
+
+        TAutoPtr<IEventHandle> handle;
+        auto event = runtime.GrabEdgeEvent<TEvSchemeShard::TEvSubDomainPathIdFound>(handle, TDuration::Seconds(2));
+        UNIT_ASSERT(event);
+
+        UNIT_ASSERT_VALUES_EQUAL(subDomainPathId, event->LocalPathId);
+    }
 }

@@ -1,4 +1,3 @@
-
 # Изменение конфигурации актор-системы
 
 Актор-система основа YDB, каждый компонент системы представляется одним или несколькими акторами.
@@ -115,10 +114,9 @@ ServiceExecutor {
 }
 ```
 
-
 ## На статических узлах
 
-Статические узлы берут конфигурацию актор-системы из файла kikimr/cfg/sys.txt.
+Статические узлы берут конфигурацию актор-системы из файла `/opt/ydb/cfg/config.yaml`.
 
 После замены конфигурации требуется перезапустить узел.
 
@@ -144,5 +142,5 @@ ConfigureRequest {
 }
 
 ```bash
-kikimr -s <endpoint> admin console execute --domain=<domain> --retry=10 actorsystem.txt
+ydbd -s <endpoint> admin console execute --domain=<domain> --retry=10 actorsystem.txt
 ```

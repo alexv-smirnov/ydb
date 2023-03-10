@@ -3,11 +3,10 @@
 #include "yql_kikimr_gateway.h"
 #include "yql_kikimr_settings.h"
 
+#include <ydb/core/kqp/query_data/kqp_query_data.h>
 #include <ydb/library/yql/ast/yql_gc_nodes.h>
 #include <ydb/library/yql/core/yql_type_annotation.h>
 #include <ydb/library/yql/minikql/mkql_function_registry.h>
-
-#include <ydb/core/kqp/gateway/kqp_query_data.h>
 
 #include <library/cpp/actors/core/actor.h>
 #include <library/cpp/cache/cache.h>
@@ -68,6 +67,7 @@ enum class EKikimrQueryType {
     Scan,
     YqlScriptStreaming,
     Query,
+    FederatedQuery,
 };
 
 struct TKikimrQueryContext : TThrRefBase {
@@ -309,7 +309,7 @@ public:
                 return false;
             }
 
-            if (queryType == EKikimrQueryType::Query && (newOp & KikimrSchemeOps())) {
+            if ((queryType == EKikimrQueryType::Query || queryType == EKikimrQueryType::FederatedQuery) && (newOp & KikimrSchemeOps())) {
                 TString message = TStringBuilder() << "Operation '" << newOp
                     << "' can't be performed in query";
                 ctx.AddError(YqlIssue(pos, TIssuesIds::KIKIMR_BAD_OPERATION, message));

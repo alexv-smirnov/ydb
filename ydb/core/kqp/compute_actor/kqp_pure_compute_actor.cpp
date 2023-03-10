@@ -77,6 +77,7 @@ public:
         settings.CollectBasicStats = RuntimeSettings.StatsMode >= NYql::NDqProto::DQ_STATS_MODE_BASIC;
         settings.CollectProfileStats = RuntimeSettings.StatsMode >= NYql::NDqProto::DQ_STATS_MODE_PROFILE;
         settings.OptLLVM = GetUseLLVM() ? "--compile-options=disable-opt" : "OFF";
+        settings.UseCacheForLLVM = AppData()->FeatureFlags.GetEnableLLVMCache();
         settings.AllowGeneratorsInUnboxedValues = false;
 
         auto taskRunner = MakeDqTaskRunner(execCtx, settings, logger);
@@ -192,11 +193,6 @@ public:
                 tableStats->MutableExtra()->PackFrom(tableExtraStats);
             }
         }
-
-        if (last && dst->TasksSize() > 0) {
-            YQL_ENSURE(dst->TasksSize() == 1);
-            NComputeActor::FillTaskInputStats(GetTask(), *dst->MutableTasks(0));
-        }
     }
 
 private:
@@ -244,14 +240,14 @@ private:
                 case NKikimrTxDataShard::EScanDataFormat::UNSPECIFIED:
                 case NKikimrTxDataShard::EScanDataFormat::CELLVEC: {
                     if (!msg.Rows.empty()) {
-                        bytes = ScanData->AddRows(msg.Rows, {}, TaskRunner->GetHolderFactory());
+                        bytes = ScanData->AddData(msg.Rows, {}, TaskRunner->GetHolderFactory());
                         rowsCount = msg.Rows.size();
                     }
                     break;
                 }
                 case NKikimrTxDataShard::EScanDataFormat::ARROW: {
                     if(msg.ArrowBatch != nullptr) {
-                        bytes = ScanData->AddRows(*msg.ArrowBatch, {}, TaskRunner->GetHolderFactory());
+                        bytes = ScanData->AddData(*msg.ArrowBatch, {}, TaskRunner->GetHolderFactory());
                         rowsCount = msg.ArrowBatch->num_rows();
                     }
                     break;

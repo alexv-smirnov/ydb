@@ -12,6 +12,8 @@
 #include <ydb/library/yql/minikql/computation/mkql_computation_node.h>
 #include <ydb/library/yql/minikql/computation/mkql_computation_pattern_cache.h>
 
+#include <ydb/library/yql/parser/pg_wrapper/interface/codec.h>
+
 #include <ydb/library/yql/providers/common/schema/mkql/yql_mkql_schema.h>
 
 #include <ydb/library/yql/public/udf/udf_value.h>
@@ -114,6 +116,14 @@ void ValidateParamValue(std::string_view paramName, const TType* type, const NUd
                 innerType = static_cast<TTupleType*>(innerType)->GetElementType(variantIndex);
             }
             ValidateParamValue(paramName, innerType, value.GetVariantItem());
+            break;
+        }
+
+        case TType::EKind::Pg: {
+            auto pgType = static_cast<const TPgType*>(type);
+            if (value) {
+                Y_UNUSED(NYql::NCommon::PgValueToNativeBinary(value, pgType->GetTypeId()));
+            }
             break;
         }
 
@@ -262,7 +272,7 @@ public:
     }
 
     bool UseSeparatePatternAlloc() const {
-        return Context.PatternCache && Settings.OptLLVM == "OFF";
+        return Context.PatternCache && (Settings.OptLLVM == "OFF" || Settings.UseCacheForLLVM);
     }
 
     TComputationPatternOpts CreatePatternOpts(TScopedAlloc& alloc, TTypeEnvironment& typeEnv) {
@@ -294,10 +304,12 @@ public:
         return opts;
     }
 
-    std::shared_ptr<TPatternCacheEntry> CreateComputationPattern(const NDqProto::TDqTask& task, const TString& rawProgram) {
+    std::shared_ptr<TPatternCacheEntry> CreateComputationPattern(const NDqProto::TDqTask& task, const TString& rawProgram, bool forCache, bool& canBeCached) {
+        canBeCached = true;
         auto entry = TComputationPatternLRUCache::CreateCacheEntry(UseSeparatePatternAlloc());
         auto& patternAlloc = UseSeparatePatternAlloc() ? entry->Alloc : Alloc();
         auto& patternEnv = UseSeparatePatternAlloc() ? entry->Env : TypeEnv();
+        patternAlloc.Ref().UseRefLocking = forCache;
 
         {
             auto guard = patternEnv.BindAllocator();
@@ -313,10 +325,14 @@ public:
         TRuntimeNode programRoot = programStruct.GetValue(*programRootIdx);
 
         if (Context.FuncProvider) {
+            auto guard = patternEnv.BindAllocator();
             TExploringNodeVisitor explorer;
             explorer.Walk(programRoot.GetNode(), patternEnv);
             bool wereChanges = false;
             programRoot = SinglePassVisitCallables(programRoot, explorer, Context.FuncProvider, patternEnv, true, wereChanges);
+            if (wereChanges) {
+                canBeCached = false;
+            }
         }
 
         entry->OutputItemTypes.resize(task.OutputsSize());
@@ -405,19 +421,25 @@ public:
         YQL_ENSURE(program.GetRuntimeVersion() <= NYql::NDqProto::ERuntimeVersion::RUNTIME_VERSION_YQL_1_0);
 
         std::shared_ptr<TPatternCacheEntry> entry;
+        bool canBeCached;
         if (UseSeparatePatternAlloc() && Context.PatternCache) {
             auto& cache = Context.PatternCache;
-            entry = cache->Find(program.GetRaw());
-            if (!entry) {
-                entry = CreateComputationPattern(task, program.GetRaw());
-                if (entry->Pattern->GetSuitableForCache()) {
+            auto ticket = cache->FindOrSubscribe(program.GetRaw());
+            if (!ticket.HasFuture()) {
+                entry = CreateComputationPattern(task, program.GetRaw(), true, canBeCached);
+                if (canBeCached && entry->Pattern->GetSuitableForCache()) {
                     cache->EmplacePattern(task.GetProgram().GetRaw(), entry);
+                    ticket.Close();
                 } else {
                     cache->IncNotSuitablePattern();
                 }
+            } else {
+                entry = ticket.GetValueSync();
             }
-        } else {
-            entry = CreateComputationPattern(task, program.GetRaw());
+        } 
+
+        if (!entry) {
+            entry = CreateComputationPattern(task, program.GetRaw(), false, canBeCached);
         }
 
         AllocatedHolder->ProgramParsed.PatternCacheEntry = entry;

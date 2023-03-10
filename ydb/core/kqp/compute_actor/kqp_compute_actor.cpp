@@ -34,6 +34,10 @@ TComputationNodeFactory GetKqpActorComputeFactory(TKqpScanComputeContext* comput
                 return WrapKqpScanWideReadTableRanges(callable, ctx, *computeCtx);
             }
 
+            if (name == "KqpBlockReadTableRanges"sv) {
+                return WrapKqpScanBlockReadTableRanges(callable, ctx, *computeCtx);
+            }
+
             // only for _pure_ compute actors!
             if (name == "KqpEnsure"sv) {
                 return WrapKqpEnsure(callable, ctx);
@@ -46,10 +50,10 @@ TComputationNodeFactory GetKqpActorComputeFactory(TKqpScanComputeContext* comput
 
 namespace NKqp {
 
-NYql::NDq::IDqAsyncIoFactory::TPtr CreateKqpAsyncIoFactory() {
+NYql::NDq::IDqAsyncIoFactory::TPtr CreateKqpAsyncIoFactory(TIntrusivePtr<TKqpCounters> counters) {
     auto factory = MakeIntrusive<NYql::NDq::TDqAsyncIoFactory>();
-    RegisterStreamLookupActorFactory(*factory);
-    RegisterKqpReadActor(*factory);
+    RegisterStreamLookupActorFactory(*factory, counters);
+    RegisterKqpReadActor(*factory, counters);
     return factory;
 }
 

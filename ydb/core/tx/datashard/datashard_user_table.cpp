@@ -219,9 +219,9 @@ void TUserTable::ParseProto(const NKikimrSchemeOp::TTableDescription& descr)
     for (const auto& col : descr.GetColumns()) {
         TUserColumn& column = Columns[col.GetId()];
         if (column.Name.empty()) {
-            auto typeInfo = NScheme::TypeInfoFromProtoColumnType(col.GetTypeId(),
+            auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(col.GetTypeId(),
                 col.HasTypeInfo() ? &col.GetTypeInfo() : nullptr);
-            column = TUserColumn(typeInfo, col.GetName());
+            column = TUserColumn(typeInfoMod.TypeInfo, typeInfoMod.TypeMod, col.GetName());
         }
         column.Family = col.GetFamily();
         column.NotNull = col.GetNotNull();
@@ -334,7 +334,7 @@ void TUserTable::AlterSchema() {
         auto descr = schema.AddColumns();
         descr->SetName(column.Name);
         descr->SetId(col.first);
-        auto protoType = NScheme::ProtoColumnTypeFromTypeInfo(column.Type);
+        auto protoType = NScheme::ProtoColumnTypeFromTypeInfoMod(column.Type, column.TypeMod);
         descr->SetTypeId(protoType.TypeId);
         if (protoType.TypeInfo) {
             *descr->MutableTypeInfo() = *protoType.TypeInfo;
@@ -397,9 +397,9 @@ void TUserTable::DoApplyCreate(
         ui32 columnId = col.first;
         const TUserColumn& column = col.second;
 
-        auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(column.Type);
+        auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(column.Type, column.TypeMod);
         ui32 pgTypeId = columnType.TypeInfo ? columnType.TypeInfo->GetPgTypeId() : 0;
-        alter.AddPgColumn(tid, column.Name, columnId, columnType.TypeId, pgTypeId, column.NotNull);
+        alter.AddPgColumn(tid, column.Name, columnId, columnType.TypeId, pgTypeId, column.TypeMod, column.NotNull);
         alter.AddColumnToFamily(tid, columnId, column.Family);
     }
 
@@ -501,9 +501,9 @@ void TUserTable::ApplyAlter(
 
         if (!oldTable.Columns.contains(colId)) {
             for (ui32 tid : tids) {
-                auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(column.Type);
+                auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(column.Type, column.TypeMod);
                 ui32 pgTypeId = columnType.TypeInfo ? columnType.TypeInfo->GetPgTypeId() : 0;
-                alter.AddPgColumn(tid, column.Name, colId, columnType.TypeId, pgTypeId, column.NotNull);
+                alter.AddPgColumn(tid, column.Name, colId, columnType.TypeId, pgTypeId, column.TypeMod, column.NotNull);
             }
         }
 
@@ -606,6 +606,37 @@ void TUserTable::ApplyDefaults(TTransactionContext& txc) const
     {
         // Protobuf defaults for erase cache changed, apply to local database
         txc.DB.Alter().SetEraseCache(LocalTid, config.GetEnableEraseCache(), config.GetEraseCacheMinRows(), config.GetEraseCacheMaxBytes());
+    }
+}
+
+void TUserTable::Fix_KIKIMR_17222(NTable::TDatabase& db) const
+{
+    Fix_KIKIMR_17222(db, LocalTid);
+    if (ShadowTid) {
+        Fix_KIKIMR_17222(db, ShadowTid);
+    }
+}
+
+void TUserTable::Fix_KIKIMR_17222(NTable::TDatabase& db, ui32 tid) const
+{
+    const auto* tableInfo = db.GetScheme().GetTableInfo(tid);
+    if (!tableInfo) {
+        // Local table does not exist, nothing to fix
+        return;
+    }
+
+    for (const auto& fam : Families) {
+        ui32 familyId = fam.first;
+        if (tableInfo->Families.contains(familyId)) {
+            // Family exists, nothing to fix
+            continue;
+        }
+
+        const TUserFamily& family = fam.second;
+
+        db.Alter().AddFamily(tid, familyId, family.GetRoomId());
+        db.Alter().SetFamily(tid, familyId, family.Cache, family.Codec);
+        db.Alter().SetFamilyBlobs(tid, familyId, family.GetOuterThreshold(), family.GetExternalThreshold());
     }
 }
 

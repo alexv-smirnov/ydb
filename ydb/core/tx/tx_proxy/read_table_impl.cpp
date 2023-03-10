@@ -1325,7 +1325,7 @@ private:
                 state.RefreshTimer = CreateLongTimer(
                     ctx,
                     SNAPSHOT_TIMEOUT / 2,
-                    new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRefreshShard(shardId, ++state.RefreshSeqNo)));
+                    new IEventHandleFat(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRefreshShard(shardId, ++state.RefreshSeqNo)));
 
                 if (state.ShardPosition == ShardList.end()) {
                     // We don't want to read from this shard at this time
@@ -1433,7 +1433,7 @@ private:
             auto &c = *tx.AddColumns();
             c.SetId(col.Id);
             c.SetName(col.Name);
-            auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(col.PType);
+            auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(col.PType, col.PTypeMod);
             c.SetTypeId(columnType.TypeId);
             if (columnType.TypeInfo) {
                 *c.MutableTypeInfo() = *columnType.TypeInfo;
@@ -1600,7 +1600,7 @@ private:
                 TXLOG_T("Ignore propose result from ShardId# " << shardId << " TxId# " << msg->GetTxId()
                         << " in State# " << state.State << " ReadTxId# " << state.ReadTxId);
                 // Pretend we don't exist if sender tracks delivery
-                ctx.Send(ev->ForwardOnNondelivery(TEvents::TEvUndelivered::ReasonActorUnknown));
+                ctx.Send(IEventHandle::ForwardOnNondelivery(ev, TEvents::TEvUndelivered::ReasonActorUnknown));
                 return;
         }
 
@@ -1731,8 +1731,10 @@ private:
                     meta->set_name(col.Name);
 
                     if (col.PType.GetTypeId() == NScheme::NTypeIds::Pg) {
-                        auto pgType = meta->mutable_type()->mutable_pg_type();
-                        pgType->set_oid(NPg::PgTypeIdFromTypeDesc(col.PType.GetTypeDesc()));
+                        auto* typeDesc = col.PType.GetTypeDesc();
+                        auto* pg = meta->mutable_type()->mutable_pg_type();
+                        pg->set_type_name(NPg::PgTypeNameFromTypeDesc(typeDesc));
+                        pg->set_oid(NPg::PgTypeIdFromTypeDesc(typeDesc));
                     } else {
                         auto id = static_cast<NYql::NProto::TypeIds>(col.PType.GetTypeId());
                         if (id == NYql::NProto::Decimal) {
@@ -1990,7 +1992,7 @@ private:
         if (state.State != EShardState::ReadTableStreaming || state.ReadTxId != record.GetTxId()) {
             // Ignore outdated messages and pretend we don't exist
             TXLOG_T("Ignoring outdated TEvStreamQuotaRequest from ShardId# " << shardId);
-            ctx.Send(ev->ForwardOnNondelivery(TEvents::TEvUndelivered::ReasonActorUnknown));
+            ctx.Send(IEventHandle::ForwardOnNondelivery(ev, TEvents::TEvUndelivered::ReasonActorUnknown));
             return;
         }
 
@@ -2039,7 +2041,7 @@ private:
         if (state.State != EShardState::ReadTableStreaming || state.ReadTxId != record.GetTxId()) {
             // Ignore outdated messages and pretend we don't exist
             TXLOG_T("Ignoring outdated TEvStreamQuotaRelease from ShardId# " << shardId);
-            ctx.Send(ev->ForwardOnNondelivery(TEvents::TEvUndelivered::ReasonActorUnknown));
+            ctx.Send(IEventHandle::ForwardOnNondelivery(ev, TEvents::TEvUndelivered::ReasonActorUnknown));
             return;
         }
 
@@ -2258,7 +2260,7 @@ private:
         state.RetryTimer = CreateLongTimer(
                 ctx,
                 delay,
-                new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRetryShard(shardId, state.RetrySeqNo)));
+                new IEventHandleFat(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRetryShard(shardId, state.RetrySeqNo)));
         return true;
     }
 
@@ -2307,7 +2309,7 @@ private:
         state.RefreshTimer = CreateLongTimer(
             ctx,
             SNAPSHOT_TIMEOUT / 2,
-            new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRefreshShard(state.ShardId, ++state.RefreshSeqNo)));
+            new IEventHandleFat(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRefreshShard(state.ShardId, ++state.RefreshSeqNo)));
     }
 
     void ScheduleRefreshShardRetry(TShardState& state, const TActorContext& ctx) {
@@ -2315,7 +2317,7 @@ private:
         state.RefreshTimer = CreateLongTimer(
             ctx,
             state.SelectNextRefreshDelay(),
-            new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRefreshShard(state.ShardId, ++state.RefreshSeqNo)));
+            new IEventHandleFat(ctx.SelfID, ctx.SelfID, new TEvPrivate::TEvRefreshShard(state.ShardId, ++state.RefreshSeqNo)));
     }
 
     void HandleRefreshShard(TEvPrivate::TEvRefreshShard::TPtr& ev, const TActorContext&) {
@@ -2703,7 +2705,7 @@ private:
             HFunc(TEvTxProxySchemeCache::TEvResolveKeySetResult, HandleZombieDie);
             default:
                 // For all other events we play dead as if we didn't exist
-                ctx.Send(ev->ForwardOnNondelivery(TEvents::TEvUndelivered::ReasonActorUnknown));
+                ctx.Send(IEventHandle::ForwardOnNondelivery(ev, TEvents::TEvUndelivered::ReasonActorUnknown));
                 break;
         }
     }

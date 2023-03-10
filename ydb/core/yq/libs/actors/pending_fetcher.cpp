@@ -22,7 +22,7 @@
 #include <ydb/library/yql/providers/common/schema/mkql/yql_mkql_schema.h>
 #include <ydb/library/yql/providers/dq/provider/yql_dq_gateway.h>
 #include <ydb/library/yql/providers/dq/provider/yql_dq_provider.h>
-#include <ydb/library/yql/providers/dq/interface/yql_dq_task_transform.h>
+#include <ydb/library/yql/dq/integration/transform/yql_dq_task_transform.h>
 #include <ydb/library/yql/providers/ydb/provider/yql_ydb_provider.h>
 #include <ydb/library/yql/providers/clickhouse/provider/yql_clickhouse_provider.h>
 #include <ydb/library/yql/sql/settings/translation_settings.h>
@@ -45,6 +45,7 @@
 
 #include <ydb/core/yq/libs/common/compression.h>
 #include <ydb/core/yq/libs/common/entity_id.h>
+#include <ydb/core/yq/libs/common/util.h>
 #include <ydb/core/yq/libs/events/events.h>
 #include <ydb/core/yq/libs/config/protos/fq_config.pb.h>
 #include <ydb/core/yq/libs/config/protos/pinger.pb.h>
@@ -99,11 +100,6 @@ struct TEvPrivate {
     };
 };
 
-template <class TElement>
-TVector<TElement> VectorFromProto(const ::google::protobuf::RepeatedPtrField<TElement>& field) {
-    return { field.begin(), field.end() };
-}
-
 constexpr auto CLEANUP_PERIOD = TDuration::Seconds(60);
 
 } // namespace
@@ -113,12 +109,7 @@ public:
     TPendingFetcher(
         const NYq::TYqSharedResources::TPtr& yqSharedResources,
         const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-        const ::NYq::NConfig::TCommonConfig& commonConfig,
-        const ::NYq::NConfig::TCheckpointCoordinatorConfig& checkpointCoordinatorConfig,
-        const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
-        const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
-        const ::NYq::NConfig::TPingerConfig& pingerConfig,
-        const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
+        const ::NYq::NConfig::TConfig& config,
         const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
         TIntrusivePtr<ITimeProvider> timeProvider,
         TIntrusivePtr<IRandomProvider> randomProvider,
@@ -133,12 +124,7 @@ public:
         )
         : YqSharedResources(yqSharedResources)
         , CredentialsProviderFactory(credentialsProviderFactory)
-        , CommonConfig(commonConfig)
-        , CheckpointCoordinatorConfig(checkpointCoordinatorConfig)
-        , PrivateApiConfig(privateApiConfig)
-        , GatewaysConfig(gatewaysConfig)
-        , PingerConfig(pingerConfig)
-        , RateLimiterConfig(rateLimiterConfig)
+        , Config(config)
         , FunctionRegistry(functionRegistry)
         , TimeProvider(timeProvider)
         , RandomProvider(randomProvider)
@@ -352,14 +338,19 @@ private:
             // todo: remove after migration
             dqGraphs = VectorFromProto(task.dq_graph());
         }
+
+        Fq::Private::TaskResources resources(task.resources());
+        if (task.created_topic_consumers_size()) {
+            // todo: remove after migration
+            *resources.mutable_topic_consumers() = task.created_topic_consumers();
+        }
+
         TRunActorParams params(
             YqSharedResources, CredentialsProviderFactory, S3Gateway,
             FunctionRegistry, RandomProvider,
             ModuleResolver, ModuleResolver->GetNextUniqueId(),
             DqCompFactory, PqCmConnections,
-            CommonConfig, CheckpointCoordinatorConfig,
-            PrivateApiConfig, GatewaysConfig, PingerConfig,
-            RateLimiterConfig,
+            Config,
             task.text(), task.scope(), task.user_token(),
             DatabaseResolver, queryId,
             task.user_id(), GetOwnerId(), task.generation(),
@@ -370,7 +361,7 @@ private:
             task.query_type(),
             task.query_syntax(),
             task.execute_mode(),
-            GetEntityIdAsString(CommonConfig.GetIdsPrefix(), EEntityType::RESULT),
+            GetEntityIdAsString(Config.GetCommon().GetIdsPrefix(), EEntityType::RESULT),
             task.state_load_mode(),
             task.disposition(),
             task.status(),
@@ -378,7 +369,6 @@ private:
             VectorFromProto(task.result_set_meta()),
             std::move(dqGraphs),
             task.dq_graph_index(),
-            VectorFromProto(task.created_topic_consumers()),
             task.automatic(),
             task.query_name(),
             NProtoInterop::CastFromProto(task.deadline()),
@@ -390,7 +380,7 @@ private:
             NProtoInterop::CastFromProto(task.request_started_at()),
             task.restart_count(),
             task.job_id().value(),
-            task.resources()
+            resources
             );
 
         auto runActorId = Register(CreateRunActor(SelfId(), queryCounters, std::move(params)));
@@ -412,12 +402,7 @@ private:
 
     NYq::TYqSharedResources::TPtr YqSharedResources;
     NKikimr::TYdbCredentialsProviderFactory CredentialsProviderFactory;
-    NYq::NConfig::TCommonConfig CommonConfig;
-    NYq::NConfig::TCheckpointCoordinatorConfig CheckpointCoordinatorConfig;
-    NYq::NConfig::TPrivateApiConfig PrivateApiConfig;
-    NYq::NConfig::TGatewaysConfig GatewaysConfig;
-    NYq::NConfig::TPingerConfig PingerConfig;
-    NYq::NConfig::TRateLimiterConfig RateLimiterConfig;
+    NYq::NConfig::TConfig Config;
 
     const NKikimr::NMiniKQL::IFunctionRegistry* FunctionRegistry;
     TIntrusivePtr<ITimeProvider> TimeProvider;
@@ -465,12 +450,7 @@ private:
 NActors::IActor* CreatePendingFetcher(
     const NYq::TYqSharedResources::TPtr& yqSharedResources,
     const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
-    const ::NYq::NConfig::TCommonConfig& commonConfig,
-    const ::NYq::NConfig::TCheckpointCoordinatorConfig& checkpointCoordinatorConfig,
-    const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
-    const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
-    const ::NYq::NConfig::TPingerConfig& pingerConfig,
-    const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
+    const ::NYq::NConfig::TConfig& config,
     const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
     TIntrusivePtr<ITimeProvider> timeProvider,
     TIntrusivePtr<IRandomProvider> randomProvider,
@@ -486,12 +466,7 @@ NActors::IActor* CreatePendingFetcher(
     return new TPendingFetcher(
         yqSharedResources,
         credentialsProviderFactory,
-        commonConfig,
-        checkpointCoordinatorConfig,
-        privateApiConfig,
-        gatewaysConfig,
-        pingerConfig,
-        rateLimiterConfig,
+        config,
         functionRegistry,
         timeProvider,
         randomProvider,

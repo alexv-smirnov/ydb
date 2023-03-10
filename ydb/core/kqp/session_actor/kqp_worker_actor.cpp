@@ -55,7 +55,7 @@ struct TKqpQueryState {
     TString TraceId;
     TString RequestType;
     ui64 ParametersSize = 0;
-    TString UserToken;
+    TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
     TActorId RequestActorId;
     TInstant StartTime;
     TDuration CpuTime;
@@ -105,11 +105,12 @@ public:
     }
 
     TKqpWorkerActor(const TActorId& owner, const TString& sessionId, const TKqpSettings::TConstPtr& kqpSettings,
-        const TKqpWorkerSettings& workerSettings, TIntrusivePtr<TModuleResolverState> moduleResolverState,
-        TIntrusivePtr<TKqpCounters> counters)
+        const TKqpWorkerSettings& workerSettings, NYql::IHTTPGateway::TPtr httpGateway,
+        TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters)
         : Owner(owner)
         , SessionId(sessionId)
         , Settings(workerSettings)
+        , HttpGateway(std::move(httpGateway))
         , ModuleResolverState(moduleResolverState)
         , Counters(counters)
         , Config(MakeIntrusive<TKikimrConfiguration>())
@@ -147,7 +148,7 @@ public:
         Config->FeatureFlags = AppData(ctx)->FeatureFlags;
 
         KqpHost = CreateKqpHost(Gateway, Settings.Cluster, Settings.Database, Config, ModuleResolverState->ModuleResolver,
-            AppData(ctx)->FunctionRegistry, !Settings.LongSession);
+            HttpGateway, AppData(ctx)->FunctionRegistry, !Settings.LongSession);
 
         Become(&TKqpWorkerActor::ReadyState);
     }
@@ -203,7 +204,7 @@ public:
         QueryState->RequestType = event.GetRequestType();
         QueryState->StartTime = now;
         QueryState->ReplyFlags = queryRequest.GetReplyFlags();
-        QueryState->UserToken = event.GetUserToken();
+        QueryState->UserToken = new NACLib::TUserToken(event.GetUserToken());
         QueryState->RequestActorId = ActorIdFromProto(event.GetRequestActorId());
 
         if (GetStatsMode(queryRequest, EKikimrStatsMode::None) > EKikimrStatsMode::Basic) {
@@ -902,7 +903,7 @@ private:
             case NKikimrKqp::QUERY_TYPE_SQL_SCRIPT_STREAMING: {
                 TString text = ExtractQueryText();
                 if (IsQueryAllowedToLog(text)) {
-                    auto userSID = NACLib::TUserToken(QueryState->UserToken).GetUserSID();
+                    auto userSID = QueryState->UserToken->GetUserSID();
                     NSysView::CollectQueryStats(ctx, stats, queryDuration, text,
                         userSID, QueryState->ParametersSize, database, type, requestUnits);
                 }
@@ -1037,7 +1038,7 @@ private:
     void UnexpectedEvent(const TString& state, TAutoPtr<NActors::IEventHandle>& ev, const TActorContext& ctx) {
         TString message = TStringBuilder() << "TKqpWorkerActor in state "
             << state << " received unexpected event "
-            << TypeName(*ev.Get()->GetBase()) << Sprintf("(0x%08" PRIx32 ")", ev->GetTypeRewrite());
+            << ev->GetTypeName() << Sprintf("(0x%08" PRIx32 ")", ev->GetTypeRewrite());
 
         InternalError(message, ctx);
     }
@@ -1064,6 +1065,7 @@ private:
     TActorId Owner;
     TString SessionId;
     TKqpWorkerSettings Settings;
+    NYql::IHTTPGateway::TPtr HttpGateway;
     TIntrusivePtr<TModuleResolverState> ModuleResolverState;
     TIntrusivePtr<TKqpCounters> Counters;
     TIntrusivePtr<TKqpRequestCounters> RequestCounters;
@@ -1081,9 +1083,10 @@ private:
 
 IActor* CreateKqpWorkerActor(const TActorId& owner, const TString& sessionId,
     const TKqpSettings::TConstPtr& kqpSettings, const TKqpWorkerSettings& workerSettings,
+    NYql::IHTTPGateway::TPtr httpGateway,
     TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters)
 {
-    return new TKqpWorkerActor(owner, sessionId, kqpSettings, workerSettings, moduleResolverState, counters);
+    return new TKqpWorkerActor(owner, sessionId, kqpSettings, workerSettings, std::move(httpGateway), moduleResolverState, counters);
 }
 
 } // namespace NKqp

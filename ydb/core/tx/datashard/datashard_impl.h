@@ -287,7 +287,6 @@ class TDataShard
     friend class TTxStartMvccStateChange;
     friend class TTxExecuteMvccStateChange;
 
-    class TFindSubDomainPathIdActor;
     class TTxPersistSubDomainPathId;
     class TTxPersistSubDomainOutOfSpace;
 
@@ -323,7 +322,7 @@ class TDataShard
             EvPersistScanStateAck,
             EvConditionalEraseRowsRegistered,
             EvAsyncJobComplete,
-            EvSubDomainPathIdFound,
+            EvSubDomainPathIdFound, // unused
             EvRequestChangeRecords,
             EvRemoveChangeRecords,
             EvReplicationSourceOffsets,
@@ -438,16 +437,6 @@ class TDataShard
             }
 
             TAutoPtr<IDestructable> Prod;
-        };
-
-        struct TEvSubDomainPathIdFound : public TEventLocal<TEvSubDomainPathIdFound, EvSubDomainPathIdFound> {
-            TEvSubDomainPathIdFound(ui64 schemeShardId, ui64 localPathId)
-                : SchemeShardId(schemeShardId)
-                , LocalPathId(localPathId)
-            { }
-
-            const ui64 SchemeShardId;
-            const ui64 LocalPathId;
         };
 
         struct TEvRequestChangeRecords : public TEventLocal<TEvRequestChangeRecords, EvRequestChangeRecords> {};
@@ -978,6 +967,14 @@ class TDataShard
             >;
         };
 
+        struct LockVolatileDependencies : Table<35> {
+            struct LockId : Column<1, NScheme::NTypeIds::Uint64> {};
+            struct TxId : Column<2, NScheme::NTypeIds::Uint64> {};
+
+            using TKey = TableKey<LockId, TxId>;
+            using TColumns = TableColumns<LockId, TxId>;
+        };
+
         using TTables = SchemaTables<Sys, UserTables, TxMain, TxDetails, InReadSets, OutReadSets, PlanQueue,
             DeadlineQueue, SchemaOperations, SplitSrcSnapshots, SplitDstReceivedSnapshots, TxArtifacts, ScanProgress,
             Snapshots, S3Uploads, S3Downloads, ChangeRecords, ChangeRecordDetails, ChangeSenders, S3UploadedParts,
@@ -985,7 +982,8 @@ class TDataShard
             ReplicationSourceOffsets, ReplicationSources, DstReplicationSourceOffsetsReceived,
             UserTablesStats, SchemaSnapshots, Locks, LockRanges, LockConflicts,
             LockChangeRecords, LockChangeRecordDetails, ChangeRecordCommits,
-            TxVolatileDetails, TxVolatileParticipants, CdcStreamScans>;
+            TxVolatileDetails, TxVolatileParticipants, CdcStreamScans,
+            LockVolatileDependencies>;
 
         // These settings are persisted on each Init. So we use empty settings in order not to overwrite what
         // was changed by the user
@@ -1211,7 +1209,7 @@ class TDataShard
     void Handle(TEvents::TEvUndelivered::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvInterconnect::TEvNodeDisconnected::TPtr& ev, const TActorContext& ctx);
 
-    void Handle(TEvPrivate::TEvSubDomainPathIdFound::TPtr& ev, const TActorContext& ctx);
+    void Handle(NSchemeShard::TEvSchemeShard::TEvSubDomainPathIdFound::TPtr& ev, const TActorContext& ctx);
     void Handle(TEvTxProxySchemeCache::TEvWatchNotifyUpdated::TPtr& ev, const TActorContext& ctx);
 
     // change sending
@@ -1358,6 +1356,14 @@ public:
 
     void SetCounter(NDataShard::ESimpleCounters counter, ui64 num) const {
         TabletCounters->Simple()[counter].Set(num);
+    }
+
+    void DecCounter(NDataShard::ESimpleCounters counter, ui64 num = 1) const {
+        TabletCounters->Simple()[counter].Sub(num);
+    }
+
+    void IncCounter(NDataShard::ESimpleCounters counter, ui64 num = 1) const {
+        TabletCounters->Simple()[counter].Add(num);
     }
 
     void IncCounter(NDataShard::ECumulativeCounters counter, ui64 num = 1) const {
@@ -1708,21 +1714,20 @@ public:
     ui64 AllocateChangeRecordGroup(NIceDb::TNiceDb& db);
     ui64 GetNextChangeRecordLockOffset(ui64 lockId);
     void PersistChangeRecord(NIceDb::TNiceDb& db, const TChangeRecord& record);
-    void PersistCommitLockChangeRecords(TTransactionContext& txc, ui64 order, ui64 lockId, ui64 group, const TRowVersion& rowVersion);
+    bool HasLockChangeRecords(ui64 lockId) const;
+    void CommitLockChangeRecords(NIceDb::TNiceDb& db, ui64 lockId, ui64 group, const TRowVersion& rowVersion, TVector<IDataShardChangeCollector::TChange>& collected);
     void MoveChangeRecord(NIceDb::TNiceDb& db, ui64 order, const TPathId& pathId);
     void MoveChangeRecord(NIceDb::TNiceDb& db, ui64 lockId, ui64 lockOffset, const TPathId& pathId);
     void RemoveChangeRecord(NIceDb::TNiceDb& db, ui64 order);
-    void EnqueueChangeRecords(TVector<NMiniKQL::IChangeCollector::TChange>&& records);
-    void AddLockChangeRecords(ui64 lockId, TVector<NMiniKQL::IChangeCollector::TChange>&& records);
-    const TVector<NMiniKQL::IChangeCollector::TChange>& GetLockChangeRecords(ui64 lockId) const;
+    void EnqueueChangeRecords(TVector<IDataShardChangeCollector::TChange>&& records);
     void CreateChangeSender(const TActorContext& ctx);
     void KillChangeSender(const TActorContext& ctx);
     void MaybeActivateChangeSender(const TActorContext& ctx);
     void SuspendChangeSender(const TActorContext& ctx);
     const TActorId& GetChangeSender() const { return OutChangeSender; }
-    bool LoadChangeRecords(NIceDb::TNiceDb& db, TVector<NMiniKQL::IChangeCollector::TChange>& records);
+    bool LoadChangeRecords(NIceDb::TNiceDb& db, TVector<IDataShardChangeCollector::TChange>& records);
     bool LoadLockChangeRecords(NIceDb::TNiceDb& db);
-    bool LoadChangeRecordCommits(NIceDb::TNiceDb& db, TVector<NMiniKQL::IChangeCollector::TChange>& records);
+    bool LoadChangeRecordCommits(NIceDb::TNiceDb& db, TVector<IDataShardChangeCollector::TChange>& records);
     void ScheduleRemoveLockChanges(ui64 lockId);
     void ScheduleRemoveAbandonedLockChanges();
 
@@ -2517,7 +2522,7 @@ private:
         {
         }
 
-        explicit TEnqueuedRecord(const NMiniKQL::IChangeCollector::TChange& record)
+        explicit TEnqueuedRecord(const IDataShardChangeCollector::TChange& record)
             : TEnqueuedRecord(record.BodySize, record.TableId,
                     record.SchemaVersion, record.LockId, record.LockOffset)
         {
@@ -2541,6 +2546,11 @@ private:
     TActorId OutChangeSender;
     bool OutChangeSenderSuspended = false;
 
+    struct TUncommittedLockChangeRecords {
+        TVector<IDataShardChangeCollector::TChange> Changes;
+        size_t PersistentCount = 0;
+    };
+
     struct TCommittedLockChangeRecords {
         ui64 Order = Max<ui64>();
         ui64 Group;
@@ -2551,7 +2561,7 @@ private:
         size_t Count = 0;
     };
 
-    THashMap<ui64, TVector<NMiniKQL::IChangeCollector::TChange>> LockChangeRecords; // ui64 is lock id
+    THashMap<ui64, TUncommittedLockChangeRecords> LockChangeRecords; // ui64 is lock id
     THashMap<ui64, TCommittedLockChangeRecords> CommittedLockChangeRecords; // ui64 is lock id
     TVector<ui64> PendingLockChangeRecordsToRemove;
 
@@ -2608,7 +2618,7 @@ public:
         return result;
     }
 
-    void SetLockChangeRecords(THashMap<ui64, TVector<NMiniKQL::IChangeCollector::TChange>>&& lockChangeRecords) {
+    void SetLockChangeRecords(THashMap<ui64, TUncommittedLockChangeRecords>&& lockChangeRecords) {
         LockChangeRecords = std::move(lockChangeRecords);
     }
 
@@ -2639,7 +2649,7 @@ protected:
 
     void Enqueue(STFUNC_SIG) override {
         LOG_WARN_S(ctx, NKikimrServices::TX_DATASHARD, "TDataShard::StateInit unhandled event type: " << ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
     }
 
     // In this state we are not handling external pipes to datashard tablet (it's just another init phase)
@@ -2655,7 +2665,7 @@ protected:
         default:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_WARN_S(ctx, NKikimrServices::TX_DATASHARD, "TDataShard::StateInactive unhandled event type: " << ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
             }
             break;
         }
@@ -2745,7 +2755,7 @@ protected:
             HFunc(TEvents::TEvUndelivered, Handle);
             IgnoreFunc(TEvInterconnect::TEvNodeConnected);
             HFunc(TEvInterconnect::TEvNodeDisconnected, Handle);
-            HFunc(TEvPrivate::TEvSubDomainPathIdFound, Handle);
+            HFunc(NSchemeShard::TEvSchemeShard::TEvSubDomainPathIdFound, Handle);
             HFunc(TEvTxProxySchemeCache::TEvWatchNotifyUpdated, Handle);
             IgnoreFunc(TEvTxProxySchemeCache::TEvWatchNotifyDeleted);
             IgnoreFunc(TEvTxProxySchemeCache::TEvWatchNotifyUnavailable);
@@ -2773,7 +2783,7 @@ protected:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_WARN_S(ctx, NKikimrServices::TX_DATASHARD,
                            "TDataShard::StateWork unhandled event type: "<< ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
             }
             break;
         }
@@ -2797,7 +2807,7 @@ protected:
         default:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_WARN_S(ctx, NKikimrServices::TX_DATASHARD, "TDataShard::StateWorkAsFollower unhandled event type: " << ev->GetTypeRewrite()
-                           << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
+                           << " event: " << ev->ToString());
             }
             break;
         }
@@ -2812,8 +2822,8 @@ protected:
         default:
             LOG_WARN_S(ctx, NKikimrServices::TX_DATASHARD, "TDataShard::BrokenState at tablet " << TabletID()
                        << " unhandled event type: " << ev->GetTypeRewrite()
-                       << " event: " << (ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?"));
-            ctx.Send(ev->ForwardOnNondelivery(TEvents::TEvUndelivered::ReasonActorUnknown));
+                       << " event: " << ev->ToString());
+            ctx.Send(IEventHandle::ForwardOnNondelivery(ev, TEvents::TEvUndelivered::ReasonActorUnknown));
             break;
         }
     }

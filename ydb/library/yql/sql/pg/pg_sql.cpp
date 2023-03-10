@@ -1,3 +1,4 @@
+#include "utils.h"
 #include <ydb/library/yql/sql/settings/partitioning.h>
 #include <ydb/library/yql/parser/pg_wrapper/interface/parser.h>
 #include <ydb/library/yql/parser/pg_wrapper/parser.h>
@@ -168,7 +169,7 @@ public:
         bool InjectRead = false;
     };
 
-    struct TInsertDesc {
+    struct TWriteRangeDesc {
         TAstNode* Sink = nullptr;
         TAstNode* Key = nullptr;
     };
@@ -205,6 +206,11 @@ public:
             } else if (flag == "DqEngineForce") {
                 DqEngineForce = true;
             }
+        }
+
+        for (const auto& [cluster, provider] : Settings.ClusterMapping) {
+            Provider = provider;
+            break;
         }
     }
 
@@ -265,6 +271,8 @@ public:
             return ParseDropStmt(CAST_NODE(DropStmt, node)) != nullptr;
         case T_VariableSetStmt:
             return ParseVariableSetStmt(CAST_NODE(VariableSetStmt, node)) != nullptr;
+        case T_DeleteStmt:
+            return ParseDeleteStmt(CAST_NODE(DeleteStmt, node)) != nullptr;
         default:
             NodeNotImplemented(value, node);
             return false;
@@ -275,7 +283,7 @@ public:
     using TTraverseNodeStack = TStack<std::pair<const Node*, bool>>;
 
     [[nodiscard]]
-    TAstNode* ParseSelectStmt(const SelectStmt* value, bool inner) {
+    TAstNode* ParseSelectStmt(const SelectStmt* value, bool inner, TVector <TAstNode*> targetColumns = {}) {
         CTE.emplace_back();
         Y_DEFER {
             CTE.pop_back();
@@ -698,6 +706,9 @@ public:
             }
 
             TVector<TAstNode*> setItemOptions;
+            if (targetColumns) {
+                setItemOptions.push_back(QL(QA("target_columns"), QVL(targetColumns.data(), targetColumns.size())));
+            }
             if (ListLength(x->targetList) > 0) {
                 setItemOptions.push_back(QL(QA("result"), QVL(res.data(), res.size())));
             } else {
@@ -876,11 +887,6 @@ public:
 
     [[nodiscard]]
     TAstNode* ParseInsertStmt(const InsertStmt* value) {
-        if (ListLength(value->cols) > 0) {
-            AddError("InsertStmt: target columns are not supported");
-            return nullptr;
-        }
-
         if (!value->selectStmt) {
             AddError("InsertStmt: expected Select");
             return nullptr;
@@ -906,14 +912,45 @@ public:
             return nullptr;
         }
 
-        auto select = ParseSelectStmt(CAST_NODE(SelectStmt, value->selectStmt), true);
+        TVector <TAstNode*> targetColumns;
+        if (value->cols) {
+            for (size_t i = 0; i < ListLength(value->cols); i++) {
+                auto node = ListNodeNth(value->cols, i);
+                if (NodeTag(node) != T_ResTarget) {
+                    NodeNotImplemented(value, node);
+                    return nullptr;
+                }
+                auto r = CAST_NODE(ResTarget, node);
+                if (!r->name) {
+                    AddError("SelectStmt: expected name");
+                    return nullptr;
+                }
+                targetColumns.push_back(QA(r->name));
+            }
+        }
+
+        auto select = ParseSelectStmt(CAST_NODE(SelectStmt, value->selectStmt), true, targetColumns);
         if (!select) {
             return nullptr;
         }
 
-        auto writeOptions = QL(QL(QA("mode"), QA("append")));
-        Statements.push_back(L(A("let"), A("world"), L(A("Write!"),
-            A("world"), insertDesc.Sink, insertDesc.Key, select, writeOptions)));
+        auto insertMode = (ProviderToInsertModeMap.contains(Provider))
+            ? ProviderToInsertModeMap.at(Provider)
+            : "append";
+
+        auto writeOptions = QL(QL(QA("mode"), QA(insertMode)));
+        Statements.push_back(L(
+            A("let"),
+            A("world"),
+            L(
+                A("Write!"),
+                A("world"),
+                insertDesc.Sink,
+                insertDesc.Key,
+                select,
+                writeOptions
+            )
+        ));
 
         return Statements.back();
     }
@@ -1102,6 +1139,88 @@ public:
         return Statements.back();
     }
 
+    [[nodiscard]]
+    TAstNode* ParseDeleteStmt(const DeleteStmt* value) {
+        if (value->usingClause) {
+            AddError("using is not supported");
+            return nullptr;
+        }
+        if (value->returningList) {
+            AddError("returning is not supported");
+            return nullptr;
+        }
+        if (value->withClause) {
+            AddError("with is not supported");
+            return nullptr;
+        }
+
+        if (!value->relation) {
+            AddError("DeleteStmt: expected relation");
+            return nullptr;
+        }
+
+        TVector<TAstNode*> fromList;
+        auto p = ParseRangeVar(value->relation);
+        if (!p.Source) {
+            return nullptr;
+        }
+        AddFrom(p, fromList);
+
+        TAstNode* whereFilter = nullptr;
+        if (value->whereClause) {
+            TExprSettings settings;
+            settings.AllowColumns = true;
+            settings.AllowSubLinks = true;
+            settings.Scope = "WHERE";
+            whereFilter = ParseExpr(value->whereClause, settings);
+            if (!whereFilter) {
+                return nullptr;
+            }
+        }
+
+        TAstNode* starLambda = L(A("lambda"), QL(), L(A("PgStar")));
+        TAstNode* resultItem = L(A("PgResultItem"), QAX(""), L(A("Void")), starLambda);
+
+        TVector<TAstNode*> setItemOptions;
+
+        setItemOptions.push_back(QL(QA("result"), QVL(resultItem)));
+        setItemOptions.push_back(QL(QA("from"), QVL(fromList.data(), fromList.size())));
+        setItemOptions.push_back(QL(QA("join_ops"), QVL(QL())));
+
+        NYql::TAstNode* lambda = nullptr;
+        if (whereFilter) {
+            lambda = L(A("lambda"), QL(), whereFilter);
+            setItemOptions.push_back(QL(QA("where"), L(A("PgWhere"), L(A("Void")), lambda)));
+        }
+
+        auto setItemNode = L(A("PgSetItem"), QVL(setItemOptions.data(), setItemOptions.size()));
+
+        TVector<TAstNode*> selectOptions;
+        selectOptions.push_back(QL(QA("set_items"), QVL(setItemNode)));
+        selectOptions.push_back(QL(QA("set_ops"), QVL(QA("push"))));
+
+        auto select = L(A("PgSelect"), QVL(selectOptions.data(), selectOptions.size()));
+
+        auto [sink, key] = ParseWriteRangeVar(value->relation);
+
+        Statements.push_back(L(
+            A("let"),
+            A("world"),
+            L(
+                A("Write!"),
+                A("world"),
+                sink,
+                key,
+                L(A("Void")),
+                QL(
+                    QL(QA("pg_delete"), select),
+                    QL(QA("mode"), QA("delete"))
+                )
+            )
+        ));
+        return Statements.back();
+    }
+
     TFromDesc ParseFromClause(const Node* node) {
         switch (NodeTag(node)) {
         case T_RangeVar:
@@ -1150,15 +1269,10 @@ public:
         return true;
     }
 
-    TInsertDesc ParseWriteRangeVar(const RangeVar* value) {
+    TWriteRangeDesc ParseWriteRangeVar(const RangeVar* value) {
         AT_LOCATION(value);
         if (StrLength(value->catalogname) > 0) {
             AddError("catalogname is not supported");
-            return {};
-        }
-
-        if (StrLength(value->schemaname) == 0) {
-            AddError("schemaname should be specified");
             return {};
         }
 
@@ -1180,7 +1294,7 @@ public:
         }
 
         auto sink = L(A("DataSink"), QAX(*p), QAX(schemaname));
-        auto key = L(A("Key"), QL(QA("table"), L(A("String"), QAX(value->relname))));
+        auto key = L(A("Key"), QL(QA("table"), L(A("String"), QAX(TablePathPrefix + value->relname))));
         return { sink, key };
     }
 
@@ -1267,7 +1381,7 @@ public:
 
         for (auto& [key, value] : bindingInfo.Attributes) {
             TVector<TAstNode*> hintValues;
-            hintValues.push_back(QA(key));
+            hintValues.push_back(QA(NormalizeName(key)));
             for (auto& v : value) {
                 hintValues.push_back(QA(v));
             }
@@ -2644,6 +2758,10 @@ public:
         return Q(VL(nodes, size, pos), pos);
     }
 
+    TAstNode* QVL(TAstNode* node, TPosition pos = {}) {
+        return QVL(&node, 1, pos);
+    }
+
     TAstNode* A(const TString& str, TPosition pos = {}, ui32 flags = 0) {
         return TAstNode::NewAtom(pos.Row ? pos : Positions.back(), str, *AstParseResult.Pool, flags);
     }
@@ -2782,6 +2900,13 @@ private:
     TVector<NYql::TPosition> Positions;
     TVector<ui32> RowStarts;
     ui32 QuerySize;
+    TString Provider;
+    static const THashMap<TStringBuf, TString> ProviderToInsertModeMap;
+};
+
+const THashMap<TStringBuf, TString> TConverter::ProviderToInsertModeMap = {
+    {NYql::KikimrProviderName, "insert_abort"},
+    {NYql::YtProviderName, "append"}
 };
 
 NYql::TAstParseResult PGToYql(const TString& query, const NSQLTranslation::TTranslationSettings& settings) {

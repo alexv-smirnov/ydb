@@ -27,13 +27,18 @@ namespace NKikimr {
     public:
         TDefragQuantum(const std::shared_ptr<TDefragCtx>& dctx, const TVDiskID& selfVDiskId,
                 std::optional<TChunksToDefrag> chunksToDefrag)
-            : TActorCoroImpl(65536, true, true)
+            : TActorCoroImpl(64_KB, true)
             , DCtx(dctx)
             , SelfVDiskId(selfVDiskId)
             , ChunksToDefrag(std::move(chunksToDefrag))
         {}
 
         void ProcessUnexpectedEvent(TAutoPtr<IEventHandle> ev) override {
+            switch (ev->GetTypeRewrite()) {
+                case TEvents::TSystem::Poison:
+                    throw TStopCoroutineException();
+            }
+
             Y_FAIL("unexpected event Type# 0x%08" PRIx32, ev->GetTypeRewrite());
         }
 
@@ -70,8 +75,8 @@ namespace NKikimr {
                 THolder<TEvDefragRewritten::THandle> ev;
                 try {
                     ev = WaitForSpecificEvent<TEvDefragRewritten>();
-                } catch (const TPoisonPillException&) {
-                    Send(new IEventHandle(TEvents::TSystem::Poison, 0, rewriterActorId, {}, nullptr, 0));
+                } catch (const TStopCoroutineException&) {
+                    Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, rewriterActorId, {}, nullptr, 0));
                     throw;
                 }
                 stat.RewrittenRecs = ev->Get()->RewrittenRecs;
@@ -92,7 +97,7 @@ namespace NKikimr {
         }
 
         void Yield() {
-            Send(new IEventHandle(EvResume, 0, SelfActorId, {}, nullptr, 0));
+            Send(new IEventHandleFat(EvResume, 0, SelfActorId, {}, nullptr, 0));
             WaitForSpecificEvent([](IEventHandle& ev) { return ev.Type == EvResume; });
         }
 

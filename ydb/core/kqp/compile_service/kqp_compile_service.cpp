@@ -177,7 +177,7 @@ private:
 
 struct TKqpCompileRequest {
     TKqpCompileRequest(const TActorId& sender, const TString& uid, TKqpQueryId query, bool keepInCache,
-        const TString& userToken, const TInstant& deadline, TKqpDbCountersPtr dbCounters,
+        const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TInstant& deadline, TKqpDbCountersPtr dbCounters,
         NLWTrace::TOrbit orbit = {}, NWilson::TSpan span = {})
         : Sender(sender)
         , Query(std::move(query))
@@ -193,7 +193,7 @@ struct TKqpCompileRequest {
     TKqpQueryId Query;
     TString Uid;
     bool KeepInCache = false;
-    TString UserToken;
+    TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
     TInstant Deadline;
     TKqpDbCountersPtr DbCounters;
     TActorId CompileActor;
@@ -303,7 +303,8 @@ public:
 
     TKqpCompileService(const TTableServiceConfig& serviceConfig, const TKqpSettings::TConstPtr& kqpSettings,
         TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
-        std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory)
+        std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory,
+        NYql::IHTTPGateway::TPtr httpGateway)
         : Config(serviceConfig)
         , KqpSettings(kqpSettings)
         , ModuleResolverState(moduleResolverState)
@@ -311,6 +312,7 @@ public:
         , QueryCache(Config.GetCompileQueryCacheSize(), TDuration::Seconds(Config.GetCompileQueryCacheTTLSec()))
         , RequestsQueue(Config.GetCompileRequestQueueSize())
         , QueryReplayFactory(std::move(queryReplayFactory))
+        , HttpGateway(std::move(httpGateway))
     {}
 
     void Bootstrap(const TActorContext& ctx) {
@@ -325,7 +327,7 @@ public:
 
         Become(&TKqpCompileService::MainState);
         if (Config.GetCompileQueryCacheTTLSec()) {
-            StartCheckQueriesTtlTimer(ctx);
+            StartCheckQueriesTtlTimer();
         }
     }
 
@@ -341,7 +343,7 @@ private:
             hFunc(NConsole::TEvConsole::TEvConfigNotificationRequest, HandleConfig);
             hFunc(TEvents::TEvUndelivered, HandleUndelivery);
 
-            CFunc(TEvents::TSystem::Wakeup, HandleTimeout);
+            CFunc(TEvents::TSystem::Wakeup, HandleTtlTimer);
             cFunc(TEvents::TEvPoison::EventType, PassAway);
         default:
             Y_FAIL("TKqpCompileService: unexpected event 0x%08" PRIx32, ev->GetTypeRewrite());
@@ -356,11 +358,32 @@ private:
     void HandleConfig(NConsole::TEvConsole::TEvConfigNotificationRequest::TPtr& ev) {
         auto &event = ev->Get()->Record;
 
+        bool enableKqpDataQueryStreamLookup = Config.GetEnableKqpDataQueryStreamLookup();
+        bool enableKqpScanQueryStreamLookup = Config.GetEnableKqpScanQueryStreamLookup();
+
+        bool enableKqpDataQuerySourceRead = Config.GetEnableKqpDataQuerySourceRead();
+        bool enableKqpScanQuerySourceRead = Config.GetEnableKqpScanQuerySourceRead();
+
         Config.Swap(event.MutableConfig()->MutableTableServiceConfig());
         LOG_INFO(*TlsActivationContext, NKikimrServices::KQP_COMPILE_SERVICE, "Updated config");
 
         auto responseEv = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationResponse>(event);
         Send(ev->Sender, responseEv.Release(), IEventHandle::FlagTrackDelivery, ev->Cookie);
+
+        if (Config.GetEnableKqpDataQueryStreamLookup() != enableKqpDataQueryStreamLookup ||
+            Config.GetEnableKqpScanQueryStreamLookup() != enableKqpScanQueryStreamLookup ||
+            Config.GetEnableKqpDataQuerySourceRead() != enableKqpDataQuerySourceRead ||
+            Config.GetEnableKqpScanQuerySourceRead() != enableKqpScanQuerySourceRead) {
+
+            LOG_NOTICE_S(*TlsActivationContext, NKikimrServices::KQP_COMPILE_SERVICE,
+                "Iterator read flags was changed. StreamLookup from " << enableKqpDataQueryStreamLookup <<
+                " to " << Config.GetEnableKqpDataQueryStreamLookup() << " for data queries, from " <<
+                enableKqpScanQueryStreamLookup << " to " << Config.GetEnableKqpScanQueryStreamLookup() << " for scan queries."
+                << " Sources for data queries from " << enableKqpDataQuerySourceRead << " to " << Config.GetEnableKqpDataQuerySourceRead()
+                << "for scan queries from " << enableKqpScanQuerySourceRead << " to " << Config.GetEnableKqpScanQuerySourceRead());
+
+            QueryCache.Clear();
+        }
     }
 
     void HandleUndelivery(TEvents::TEvUndelivered::TPtr& ev) {
@@ -411,7 +434,7 @@ private:
         *Counters->CompileQueryCacheSize = QueryCache.Size();
         *Counters->CompileQueryCacheBytes = QueryCache.Bytes();
 
-        auto userSid = NACLib::TUserToken(request.UserToken).GetUserSID();
+        auto userSid = request.UserToken->GetUserSID();
         auto dbCounters = request.DbCounters;
 
         if (request.Uid) {
@@ -640,7 +663,7 @@ private:
         QueryCache.EraseByUid(request.Uid);
     }
 
-    void HandleTimeout(const TActorContext& ctx) {
+    void HandleTtlTimer(const TActorContext& ctx) {
         LOG_DEBUG_S(ctx, NKikimrServices::KQP_COMPILE_SERVICE, "Received check queries TTL timeout");
 
         auto evicted = QueryCache.EraseExpiredQueries();
@@ -648,7 +671,7 @@ private:
             Counters->CompileQueryCacheEvicted->Add(evicted);
         }
 
-        StartCheckQueriesTtlTimer(ctx);
+        StartCheckQueriesTtlTimer();
     }
 
 private:
@@ -679,7 +702,7 @@ private:
     }
 
     void StartCompilation(TKqpCompileRequest&& request, const TActorContext& ctx) {
-        auto compileActor = CreateKqpCompileActor(ctx.SelfID, KqpSettings, Config, ModuleResolverState, Counters,
+        auto compileActor = CreateKqpCompileActor(ctx.SelfID, KqpSettings, Config, HttpGateway, ModuleResolverState, Counters,
             request.Uid, request.Query, request.UserToken, request.DbCounters, request.CompileServiceSpan.GetTraceId());
         auto compileActorId = ctx.ExecutorThread.RegisterActor(compileActor, TMailboxType::HTSwap,
             AppData(ctx)->UserPoolId);
@@ -692,9 +715,8 @@ private:
         RequestsQueue.AddActiveRequest(std::move(request));
     }
 
-    void StartCheckQueriesTtlTimer(const TActorContext& ctx) {
-        CheckQueriesTtlTimer = CreateLongTimer(ctx, TDuration::Seconds(Config.GetCompileQueryCacheTTLSec()),
-            new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
+    void StartCheckQueriesTtlTimer() {
+        Schedule(TDuration::Seconds(Config.GetCompileQueryCacheTTLSec()), new TEvents::TEvWakeup());
     }
 
     void Reply(const TActorId& sender, const TKqpCompileResult::TConstPtr& compileResult,
@@ -766,16 +788,17 @@ private:
 
     TKqpQueryCache QueryCache;
     TKqpRequestsQueue RequestsQueue;
-    TActorId CheckQueriesTtlTimer;
     std::shared_ptr<IQueryReplayBackendFactory> QueryReplayFactory;
+    NYql::IHTTPGateway::TPtr HttpGateway;
 };
 
 IActor* CreateKqpCompileService(const TTableServiceConfig& serviceConfig, const TKqpSettings::TConstPtr& kqpSettings,
     TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
-    std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory)
+    std::shared_ptr<IQueryReplayBackendFactory> queryReplayFactory,
+    NYql::IHTTPGateway::TPtr httpGateway)
 {
     return new TKqpCompileService(serviceConfig, kqpSettings, moduleResolverState, counters,
-            std::move(queryReplayFactory));
+            std::move(queryReplayFactory), std::move(httpGateway));
 }
 
 } // namespace NKqp

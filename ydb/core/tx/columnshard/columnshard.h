@@ -15,6 +15,36 @@ namespace NKikimr {
 
 namespace NColumnShard {
 class TBlobGroupSelector;
+
+inline Ydb::StatusIds::StatusCode ConvertToYdbStatus(NKikimrTxColumnShard::EResultStatus columnShardStatus) {
+    switch (columnShardStatus) {
+    case NKikimrTxColumnShard::UNSPECIFIED:
+        return Ydb::StatusIds::STATUS_CODE_UNSPECIFIED;
+
+    case NKikimrTxColumnShard::PREPARED:
+    case NKikimrTxColumnShard::SUCCESS:
+        return Ydb::StatusIds::SUCCESS;
+
+    case NKikimrTxColumnShard::ABORTED:
+        return Ydb::StatusIds::ABORTED;
+
+    case NKikimrTxColumnShard::ERROR:
+        return Ydb::StatusIds::GENERIC_ERROR;
+
+    case NKikimrTxColumnShard::TIMEOUT:
+        return Ydb::StatusIds::TIMEOUT;
+
+    case NKikimrTxColumnShard::SCHEMA_ERROR:
+    case NKikimrTxColumnShard::SCHEMA_CHANGED:
+        return Ydb::StatusIds::SCHEME_ERROR;
+
+    case NKikimrTxColumnShard::OVERLOADED:
+        return Ydb::StatusIds::OVERLOADED;
+
+    default:
+        return Ydb::StatusIds::GENERIC_ERROR;
+    }
+}
 }
 
 struct TEvColumnShard {
@@ -26,6 +56,7 @@ struct TEvColumnShard {
         EvNotifyTxCompletionResult,
         EvReadBlobRanges,
         EvReadBlobRangesResult,
+        EvCheckPlannedTransaction,
 
         EvWrite = EvProposeTransaction + 256,
         EvRead,
@@ -46,27 +77,46 @@ struct TEvColumnShard {
         TEvProposeTransaction() = default;
 
         TEvProposeTransaction(NKikimrTxColumnShard::ETransactionKind txKind, const TActorId& source,
-                ui64 txId, TString txBody)
+                ui64 txId, TString txBody, const ui32 flags = 0)
         {
             Record.SetTxKind(txKind);
             ActorIdToProto(source, Record.MutableSource());
             Record.SetTxId(txId);
             Record.SetTxBody(std::move(txBody));
+            Record.SetFlags(flags);
         }
 
         TEvProposeTransaction(NKikimrTxColumnShard::ETransactionKind txKind, ui64 ssId, const TActorId& source,
-                ui64 txId, TString txBody)
-            : TEvProposeTransaction(txKind, source, txId, std::move(txBody))
+                ui64 txId, TString txBody, const ui32 flags = 0)
+            : TEvProposeTransaction(txKind, source, txId, std::move(txBody), flags)
         {
             Y_VERIFY(txKind == NKikimrTxColumnShard::TX_KIND_SCHEMA);
             Record.SetSchemeShardId(ssId);
         }
 
         TEvProposeTransaction(NKikimrTxColumnShard::ETransactionKind txKind, ui64 ssId, const TActorId& source,
-                ui64 txId, TString txBody, const NKikimrSubDomains::TProcessingParams& processingParams)
-            : TEvProposeTransaction(txKind, ssId, source, txId, std::move(txBody))
+                ui64 txId, TString txBody, const NKikimrSubDomains::TProcessingParams& processingParams, const ui32 flags = 0)
+            : TEvProposeTransaction(txKind, ssId, source, txId, std::move(txBody), flags)
         {
             Record.MutableProcessingParams()->CopyFrom(processingParams);
+        }
+
+        TActorId GetSource() const {
+            return ActorIdFromProto(Record.GetSource());
+        }
+    };
+
+    struct TEvCheckPlannedTransaction
+        : public TEventPB<TEvCheckPlannedTransaction,
+                          NKikimrTxColumnShard::TEvCheckPlannedTransaction,
+                          EvCheckPlannedTransaction>
+    {
+        TEvCheckPlannedTransaction() = default;
+
+        TEvCheckPlannedTransaction(const TActorId& source, ui64 planStep, ui64 txId) {
+            ActorIdToProto(source, Record.MutableSource());
+            Record.SetStep(planStep);
+            Record.SetTxId(txId);
         }
 
         TActorId GetSource() const {
@@ -272,6 +322,10 @@ struct TEvColumnShard {
 };
 
 inline auto& Proto(TEvColumnShard::TEvProposeTransaction* ev) {
+    return ev->Record;
+}
+
+inline auto& Proto(TEvColumnShard::TEvCheckPlannedTransaction* ev) {
     return ev->Record;
 }
 

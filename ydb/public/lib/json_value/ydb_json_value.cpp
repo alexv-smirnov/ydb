@@ -658,7 +658,7 @@ namespace {
                 break;
 
             case TTypeParser::ETypeKind::Pg: {
-                    TPgType pgType(0, -1, -1);
+                    TPgType pgType(""); // TODO: correct type?
                     if (jsonValue.GetType() == NJson::JSON_STRING) {
                         ValueBuilder.Pg(TPgValue(TPgValue::VK_TEXT, jsonValue.GetString(), pgType));
                     } else if (jsonValue.GetType() == NJson::JSON_NULL) {
@@ -716,7 +716,6 @@ namespace {
                 TypeParser.OpenStruct();
                 ValueBuilder.BeginStruct();
 
-                size_t counter = 0;
                 const auto& jsonMap = jsonValue.GetMap();
                 while (TypeParser.TryNextMember()) {
                     const TString& memberName = TypeParser.GetMemberName();
@@ -727,10 +726,6 @@ namespace {
                     }
                     ValueBuilder.AddMember(memberName);
                     ParseValue(it->second);
-                    ++counter;
-                }
-                if (counter != jsonMap.size()) {
-                    ThrowFatalError("Map in json string contains more members than YDB struct does");
                 }
 
                 ValueBuilder.EndStruct();

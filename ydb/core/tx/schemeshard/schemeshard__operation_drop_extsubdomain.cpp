@@ -9,40 +9,12 @@ namespace {
 using namespace NKikimr;
 using namespace NSchemeShard;
 
-class TDeletePrivateShards: public TSubOperationState {
-private:
-    TOperationId OperationId;
-
-    TString DebugHint() const override {
-        return TStringBuilder()
-            << "TDropExtSubdomain TDeletePrivateShards"
-            << ", operationId: " << OperationId;
-    }
-
+class TDeletePrivateShards: public TDeleteParts {
 public:
-    TDeletePrivateShards(TOperationId id)
-        : OperationId(id)
+    explicit TDeletePrivateShards(const TOperationId& id)
+        : TDeleteParts(id, TTxState::Done)
     {
         IgnoreMessages(DebugHint(), AllIncomingEvents());
-    }
-
-    bool ProgressState(TOperationContext& context) override {
-        TTabletId ssId = context.SS->SelfTabletId();
-
-        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                   DebugHint() << " ProgressState"
-                               << ", at schemeshard: " << ssId);
-
-        TTxState* txState = context.SS->FindTx(OperationId);
-
-        // Initiate asynchronous deletion of all shards
-        for (auto shard : txState->Shards) {
-            context.OnComplete.DeleteShard(shard.Idx);
-        }
-
-        NIceDb::TNiceDb db(context.GetDB());
-        context.SS->ChangeTxState(db, OperationId, TTxState::Done);
-        return true;
     }
 };
 
@@ -382,27 +354,7 @@ public:
     }
 
     void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {
-        LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                     "TDropExtSubdomain AbortUnsafe"
-                         << ", opId: " << OperationId
-                         << ", forceDropId: " << forceDropTxId
-                         << ", at schemeshard: " << context.SS->TabletID());
-
-        TTxState* txState = context.SS->FindTx(OperationId);
-        Y_VERIFY(txState);
-
-        TPathId pathId = txState->TargetPathId;
-        Y_VERIFY(context.SS->PathsById.contains(pathId));
-        TPathElement::TPtr path = context.SS->PathsById.at(pathId);
-        Y_VERIFY(path);
-
-        if (path->Dropped()) {
-            for (auto shard : txState->Shards) {
-                context.OnComplete.DeleteShard(shard.Idx);
-            }
-        }
-
-        context.OnComplete.DoneOperation(OperationId);
+        AbortUnsafeDropOperation(OperationId, forceDropTxId, context);
     }
 };
 
@@ -410,11 +362,11 @@ public:
 
 namespace NKikimr::NSchemeShard {
 
-ISubOperationBase::TPtr CreateForceDropExtSubDomain(TOperationId id, const TTxTransaction& tx) {
+ISubOperation::TPtr CreateForceDropExtSubDomain(TOperationId id, const TTxTransaction& tx) {
     return MakeSubOperation<TDropExtSubdomain>(id, tx);
 }
 
-ISubOperationBase::TPtr CreateForceDropExtSubDomain(TOperationId id, TTxState::ETxState state) {
+ISubOperation::TPtr CreateForceDropExtSubDomain(TOperationId id, TTxState::ETxState state) {
     Y_VERIFY(state != TTxState::Invalid);
     return MakeSubOperation<TDropExtSubdomain>(id, state);
 }

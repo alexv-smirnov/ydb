@@ -29,7 +29,7 @@ public:
         return NKikimrServices::TActivity::KQP_COMPILE_REQUEST;
     }
 
-    TKqpCompileRequestActor(const TActorId& owner, const TString& userToken, const TMaybe<TString>& uid,
+    TKqpCompileRequestActor(const TActorId& owner, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TMaybe<TString>& uid,
         TMaybe<TKqpQueryId>&& query, bool keepInCache, const TInstant& deadline, TKqpDbCountersPtr dbCounters, NLWTrace::TOrbit orbit,
         NWilson::TTraceId traceId)
         : Owner(owner)
@@ -46,9 +46,6 @@ public:
         LWTRACK(KqpCompileRequestBootstrap,
             Orbit,
             Query ? Query->UserSid : 0);
-
-        TimeoutTimerId = CreateLongTimer(ctx, Deadline - TInstant::Now(),
-            new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
 
         TMaybe<TKqpQueryId> query;
         std::swap(Query, query);
@@ -75,7 +72,7 @@ public:
                 CompileRequestSpan.End();
             }
 
-            ctx.Send(Owner, ev->Release().Release());
+            ctx.Send(Owner, ev.Release());
             Die(ctx);
             return;
         }
@@ -86,12 +83,12 @@ public:
                 CompileRequestSpan.End();
             }
 
-            ctx.Send(Owner, ev->Release().Release());
+            ctx.Send(Owner, ev.Release());
             Die(ctx);
             return;
         }
 
-        DeferredResponse.Reset(ev->Release().Release());
+        DeferredResponse.Reset(ev.Release());
     }
 
     void Handle(TEvTxProxySchemeCache::TEvNavigateKeySetResult::TPtr& ev, const TActorContext &ctx) {
@@ -119,20 +116,8 @@ public:
         DeferredResponse.Reset();
     }
 
-    void HandleTimeout(const TActorContext& ctx) {
-        LOG_NOTICE_S(ctx, NKikimrServices::KQP_COMPILE_REQUEST, "Compile request deadline exceeded"
-            << ", self: " << ctx.SelfID);
-
-        NYql::TIssue issue(NYql::TPosition(), "Deadline exceeded during query compilation.");
-        return ReplyError(Ydb::StatusIds::TIMEOUT, {issue}, ctx);
-    }
-
-    void Die(const NActors::TActorContext& ctx) override {
-        if (TimeoutTimerId) {
-            ctx.Send(TimeoutTimerId, new TEvents::TEvPoisonPill());
-        }
-
-        TBase::Die(ctx);
+    void Handle(TEvKqp::TEvAbortExecution::TPtr& , const TActorContext &ctx) {
+        this->Die(ctx);
     }
 
 private:
@@ -141,7 +126,7 @@ private:
             switch (ev->GetTypeRewrite()) {
                 HFunc(TEvKqp::TEvCompileResponse, Handle);
                 HFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
-                CFunc(TEvents::TSystem::Wakeup, HandleTimeout);
+                HFunc(TEvKqp::TEvAbortExecution, Handle);
             default:
                 UnexpectedEvent("MainState", ev->GetTypeRewrite(), ctx);
             }
@@ -203,8 +188,8 @@ private:
 
         auto navigate = MakeHolder<TSchemeCacheNavigate>();
         navigate->DatabaseName = database;
-        if (!UserToken.empty()) {
-            navigate->UserToken = new NACLib::TUserToken(UserToken);
+        if (UserToken && !UserToken->GetSerializedToken().empty()) {
+            navigate->UserToken = UserToken;
         }
 
         for (const auto& [tableId, _] : TableVersions) {
@@ -321,22 +306,20 @@ private:
 
 private:
     TActorId Owner;
-    TString UserToken;
+    TIntrusiveConstPtr<NACLib::TUserToken> UserToken;
     TMaybe<TString> Uid;
     TMaybe<TKqpQueryId> Query;
     bool KeepInCache = false;
     TInstant Deadline;
     TKqpDbCountersPtr DbCounters;
-    TActorId TimeoutTimerId;
     THashMap<TTableId, ui64> TableVersions;
     THolder<TEvKqp::TEvCompileResponse> DeferredResponse;
-
     NLWTrace::TOrbit Orbit;
     NWilson::TSpan CompileRequestSpan;
 };
 
 
-IActor* CreateKqpCompileRequestActor(const TActorId& owner, const TString& userToken, const TMaybe<TString>& uid,
+IActor* CreateKqpCompileRequestActor(const TActorId& owner, const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, const TMaybe<TString>& uid,
     TMaybe<TKqpQueryId>&& query, bool keepInCache, const TInstant& deadline, TKqpDbCountersPtr dbCounters, NLWTrace::TOrbit orbit,
     NWilson::TTraceId traceId)
 {

@@ -120,6 +120,12 @@ struct TTxState {
         item(TxAlterExtSubDomainCreateHive, 74) \
         item(TxAlterCdcStreamAtTableDropSnapshot, 75) \
         item(TxDropCdcStreamAtTableDropSnapshot, 76) \
+        item(TxCreateExternalTable, 77) \
+        item(TxDropExternalTable, 78) \
+        item(TxAlterExternalTable, 79) \
+        item(TxCreateExternalDataSource, 80) \
+        item(TxDropExternalDataSource, 81) \
+        item(TxAlterExternalDataSource, 82) \
 
     // TX_STATE_TYPE_ENUM
 
@@ -327,6 +333,8 @@ struct TTxState {
         case TxCreateSequence:
         case TxCreateReplication:
         case TxCreateBlobDepot:
+        case TxCreateExternalTable:
+        case TxCreateExternalDataSource:
             return true;
         case TxInitializeBuildIndex: //this is more like alter
         case TxCreateCdcStreamAtTable:
@@ -357,6 +365,8 @@ struct TTxState {
         case TxDropReplication:
         case TxDropBlobDepot:
         case TxUpdateMainTableOnIndexMove:
+        case TxDropExternalTable:
+        case TxDropExternalDataSource:
             return false;
         case TxAlterPQGroup:
         case TxAlterTable:
@@ -385,6 +395,8 @@ struct TTxState {
         case TxAlterSequence:
         case TxAlterReplication:
         case TxAlterBlobDepot:
+        case TxAlterExternalTable:
+        case TxAlterExternalDataSource:
             return false;
         case TxMoveTable:
         case TxMoveTableIndex:
@@ -414,6 +426,8 @@ struct TTxState {
         case TxDropSequence:
         case TxDropReplication:
         case TxDropBlobDepot:
+        case TxDropExternalTable:
+        case TxDropExternalDataSource:
             return true;
         case TxMkDir:
         case TxCreateTable:
@@ -445,6 +459,8 @@ struct TTxState {
         case TxDropCdcStreamAtTable:
         case TxDropCdcStreamAtTableDropSnapshot:
         case TxUpdateMainTableOnIndexMove:
+        case TxCreateExternalTable:
+        case TxCreateExternalDataSource:
             return false;
         case TxAlterPQGroup:
         case TxAlterTable:
@@ -473,6 +489,8 @@ struct TTxState {
         case TxAlterSequence:
         case TxAlterReplication:
         case TxAlterBlobDepot:
+        case TxAlterExternalTable:
+        case TxAlterExternalDataSource:
             return false;
         case TxMoveTable:
         case TxMoveTableIndex:
@@ -506,6 +524,8 @@ struct TTxState {
         case TxDropTableIndex:
         case TxRmDir:
         case TxFinalizeBuildIndex:
+        case TxDropExternalTable:
+        case TxDropExternalDataSource:
             return false;
         case TxMkDir:
         case TxCreateTable:
@@ -535,6 +555,8 @@ struct TTxState {
         case TxDropCdcStreamAtTable:
         case TxDropCdcStreamAtTableDropSnapshot:
         case TxUpdateMainTableOnIndexMove:
+        case TxCreateExternalTable:
+        case TxCreateExternalDataSource:
             return false;
         case TxAlterPQGroup:
         case TxAlterTable:
@@ -564,6 +586,8 @@ struct TTxState {
         case TxAlterSequence:
         case TxAlterReplication:
         case TxAlterBlobDepot:
+        case TxAlterExternalTable:
+        case TxAlterExternalDataSource:
             return false;
         case TxInvalid:
             Y_VERIFY_DEBUG("UNREACHABLE");
@@ -657,6 +681,10 @@ struct TTxState {
             case NKikimrSchemeOp::ESchemeOpMoveIndex: return TxInvalid;
             case NKikimrSchemeOp::ESchemeOpAllocatePersQueueGroup: return TxAllocatePQ;
             case NKikimrSchemeOp::ESchemeOpDeallocatePersQueueGroup: return TxInvalid;
+            case NKikimrSchemeOp::ESchemeOpCreateExternalTable: return TxCreateExternalTable;
+            case NKikimrSchemeOp::ESchemeOpAlterExternalTable: return TxAlterExternalTable;
+            case NKikimrSchemeOp::ESchemeOpCreateExternalDataSource: return TxCreateExternalDataSource;
+            case NKikimrSchemeOp::ESchemeOpAlterExternalDataSource: return TxAlterExternalDataSource;
             default: return TxInvalid;
         }
     }

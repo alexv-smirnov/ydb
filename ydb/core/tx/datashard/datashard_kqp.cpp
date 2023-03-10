@@ -314,9 +314,10 @@ using TWriteOpMeta = NKikimrTxDataShard::TKqpTransaction::TDataTaskMeta::TWriteO
 using TColumnMeta = NKikimrTxDataShard::TKqpTransaction::TColumnMeta;
 
 NTable::TColumn GetColumn(const TColumnMeta& columnMeta) {
-    auto typeInfo = NScheme::TypeInfoFromProtoColumnType(columnMeta.GetType(),
+    auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(columnMeta.GetType(),
         columnMeta.HasTypeInfo() ? &columnMeta.GetTypeInfo() : nullptr);
-    return NTable::TColumn(columnMeta.GetName(), columnMeta.GetId(), typeInfo);
+    return NTable::TColumn(columnMeta.GetName(), columnMeta.GetId(),
+        typeInfoMod.TypeInfo, typeInfoMod.TypeMod);
 }
 
 TVector<NTable::TColumn> GetColumns(const TReadOpMeta& readMeta) {
@@ -885,7 +886,7 @@ void KqpEraseLocks(ui64 origin, TActiveTransaction* tx, TSysLocks& sysLocks) {
     }
 }
 
-void KqpCommitLocks(ui64 origin, TActiveTransaction* tx, const TRowVersion& writeVersion, TDataShard& dataShard, TTransactionContext& txc) {
+void KqpCommitLocks(ui64 origin, TActiveTransaction* tx, const TRowVersion& writeVersion, TDataShard& dataShard) {
     auto& kqpTx = tx->GetDataTx()->GetKqpTransaction();
 
     if (!kqpTx.HasLocks()) {
@@ -909,7 +910,7 @@ void KqpCommitLocks(ui64 origin, TActiveTransaction* tx, const TRowVersion& writ
             TTableId tableId(lockProto.GetSchemeShard(), lockProto.GetPathId());
             auto txId = lockProto.GetLockId();
 
-            tx->GetDataTx()->CommitChanges(tableId, txId, writeVersion, txc);
+            tx->GetDataTx()->CommitChanges(tableId, txId, writeVersion);
         }
     } else {
         KqpEraseLocks(origin, tx, sysLocks);

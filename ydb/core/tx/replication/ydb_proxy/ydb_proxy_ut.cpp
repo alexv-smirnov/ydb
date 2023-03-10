@@ -8,8 +8,7 @@
 
 #include <ydb/core/base/ticket_parser.h>
 
-namespace NKikimr {
-namespace NReplication {
+namespace NKikimr::NReplication {
 
 Y_UNIT_TEST_SUITE(YdbProxyTests) {
     template <bool UseDatabase = true>
@@ -93,14 +92,14 @@ Y_UNIT_TEST_SUITE(YdbProxyTests) {
                 UNIT_ASSERT(desc.GetPathDescription().GetDomainDescription().HasSecurityState());
 
                 const auto& secState = desc.GetPathDescription().GetDomainDescription().GetSecurityState();
-                Server.GetRuntime()->Send(new IEventHandle(MakeTicketParserID(), Sender,
+                Server.GetRuntime()->Send(new IEventHandleFat(MakeTicketParserID(), Sender,
                     new TEvTicketParser::TEvUpdateLoginSecurityState(secState)));
             }
         }
 
         template <typename TEvResponse>
         auto Send(IEventBase* ev) {
-            Server.GetRuntime()->Send(new IEventHandle(YdbProxy, Sender, ev));
+            Server.GetRuntime()->Send(new IEventHandleFat(YdbProxy, Sender, ev));
             return Server.GetRuntime()->GrabEdgeEvent<TEvResponse>(Sender);
         }
 
@@ -465,7 +464,52 @@ Y_UNIT_TEST_SUITE(YdbProxyTests) {
         }
     }
 
+    Y_UNIT_TEST(CreateCdcStream) {
+        TEnv<false> env;
+        // create table
+        {
+            auto schema = NYdb::NTable::TTableBuilder()
+                .AddNullableColumn("key", NYdb::EPrimitiveType::Uint64)
+                .AddNullableColumn("value", NYdb::EPrimitiveType::Utf8)
+                .SetPrimaryKeyColumn("key")
+                .Build();
+
+            auto ev = env.Send<TEvYdbProxy::TEvCreateTableResponse>(
+                new TEvYdbProxy::TEvCreateTableRequest("/Root/table", std::move(schema), {}));
+            UNIT_ASSERT(ev);
+            UNIT_ASSERT(ev->Get()->Result.IsSuccess());
+        }
+
+        const auto feed = NYdb::NTable::TChangefeedDescription("updates",
+            NYdb::NTable::EChangefeedMode::Updates, NYdb::NTable::EChangefeedFormat::Json
+        );
+
+        // two attempts: create, check, retry, check
+        for (int i = 1; i <= 2; ++i) {
+            // create cdc stream
+            {
+                auto settings = NYdb::NTable::TAlterTableSettings()
+                    .AppendAddChangefeeds(feed);
+
+                auto ev = env.Send<TEvYdbProxy::TEvAlterTableResponse>(
+                    new TEvYdbProxy::TEvAlterTableRequest("/Root/table", settings));
+                UNIT_ASSERT(ev);
+                UNIT_ASSERT(ev->Get()->Result.IsSuccess());
+            }
+            // describe
+            {
+                auto ev = env.Send<TEvYdbProxy::TEvDescribeTableResponse>(
+                    new TEvYdbProxy::TEvDescribeTableRequest("/Root/table", {}));
+                UNIT_ASSERT(ev);
+                UNIT_ASSERT(ev->Get()->Result.IsSuccess());
+
+                const auto& schema = ev->Get()->Result.GetTableDescription();
+                UNIT_ASSERT_EQUAL(schema.GetChangefeedDescriptions().size(), 1);
+                UNIT_ASSERT_EQUAL(schema.GetChangefeedDescriptions().at(0), feed);
+            }
+        }
+    }
+
 } // YdbProxyTests
 
-} // NReplication
-} // NKikimr
+}

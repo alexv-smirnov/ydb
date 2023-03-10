@@ -1,6 +1,7 @@
 #include "schemeshard_utils.h"
 
 #include <ydb/core/mind/hive/hive.h>
+#include <ydb/core/persqueue/utils.h>
 #include <ydb/core/protos/counters_schemeshard.pb.h>
 
 namespace NKikimr {
@@ -199,6 +200,11 @@ void TSelfPinger::ScheduleSelfPingWakeup(const NActors::TActorContext &ctx) {
     SelfPingWakeupScheduledTime = AppData(ctx)->TimeProvider->Now();
 }
 
+PQGroupReserve::PQGroupReserve(const ::NKikimrPQ::TPQTabletConfig& tabletConfig, ui64 partitions) {
+    Storage = partitions * NPQ::TopicPartitionReserveSize(tabletConfig);
+    Throughput = partitions * NPQ::TopicPartitionReserveThroughput(tabletConfig);
+}
+
 }
 
 namespace NTableIndex {
@@ -276,8 +282,6 @@ NKikimrSchemeOp::TTableDescription CalcImplTableDesc(
         implKeyToImplColumn[implTableColumns.Keys[keyId]] = keyId;
     }
 
-    const TAppData* appData = AppData();
-
     result.ClearColumns();
     for (auto& iter: baseTableInfo->Columns) {
         const NSchemeShard::TTableInfo::TColumn& column = iter.second;
@@ -288,11 +292,7 @@ NKikimrSchemeOp::TTableDescription CalcImplTableDesc(
         if (implTableColumns.Columns.contains(column.Name)) {
             auto item = result.AddColumns();
             item->SetName(column.Name);
-
-            // TODO: support pg types
-            Y_VERIFY(column.PType.GetTypeId() != NScheme::NTypeIds::Pg);
-            item->SetType(appData->TypeRegistry->GetTypeName(column.PType.GetTypeId()));
-
+            item->SetType(NScheme::TypeName(column.PType, column.PTypeMod));
             ui32 order = Max<ui32>();
             if (implKeyToImplColumn.contains(column.Name)) {
                 order = implKeyToImplColumn.at(column.Name);

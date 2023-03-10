@@ -118,10 +118,10 @@ private:
     }
 
     bool CheckAccess(TString& errorMessage) {
-        if (Request->GetInternalToken().empty())
+        if (Request->GetSerializedToken().empty())
             return true;
 
-        NACLib::TUserToken userToken(Request->GetInternalToken());
+        NACLib::TUserToken userToken(Request->GetSerializedToken());
         // TODO: check describe rights for root?
 
         Y_UNUSED(errorMessage);
@@ -190,8 +190,8 @@ private:
     }
 };
 
-void DoGetShardLocationsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TGetShardLocationsRPC(std::move(p)));
+void DoGetShardLocationsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TGetShardLocationsRPC(std::move(p)));
 }
 
 } // namespace NKikimr

@@ -66,6 +66,22 @@ namespace NKikimr {
             return proto.ParseFromString(s) ? SingleLineProto(proto) : "<error>";
         }
 
+        static std::optional<TPDiskId> FindPDisk(const TDiskInfo& disk, const TBlobStorageController::TConfigState& state) {
+            auto id = state.FindPDiskByLocation(disk.NodeId, disk.Path);
+            if (!id) {
+                id = state.FindPDiskByLocation(disk.NodeId, disk.Serial);
+            }
+            return id;
+        }
+
+        static std::optional<TPDiskId> FindStaticPDisk(const TDiskInfo& disk, const TBlobStorageController::TConfigState& state) {
+            auto id = state.FindStaticPDiskByLocation(disk.NodeId, disk.Path);
+            if (!id) {
+                id = state.FindStaticPDiskByLocation(disk.NodeId, disk.Serial);
+            }
+            return id;
+        }
+
         static void UpdatePDiskIfNeeded(const TPDiskId& pdiskId, const TDiskInfo& disk, ui32 defaultMaxSlots, TBlobStorageController::TConfigState& state) {
             auto pdiskInfo = state.PDisks.Find(pdiskId);
             Y_VERIFY(pdiskInfo != nullptr);
@@ -84,7 +100,7 @@ namespace NKikimr {
                 pdiskInfo->BoxId = disk.BoxId;
                 if (pdiskInfo->PDiskConfig != disk.PDiskConfig) {
                     // update PDiskConfig only for nonstatic PDisks
-                    if (!state.FindStaticPDiskByLocation(disk.NodeId, disk.Path)) {
+                    if (!NKikimr::NBsController::FindStaticPDisk(disk, state)) {
                         pdiskInfo->PDiskConfig = disk.PDiskConfig;
                     } else {
                         throw TExError() << "Skipping PDiskConfig update for static disk" << TErrorParams::NodeId(disk.NodeId) << TErrorParams::Path(disk.Path);
@@ -135,7 +151,7 @@ namespace NKikimr {
             return TString();
         }
 
-        static std::unordered_map<TDiskId, TDiskInfo> GetDisksFromHostConfig(TBlobStorageController::TConfigState& state, std::set<TBoxId>& relevantBoxes) {
+        static std::unordered_map<TDiskId, TDiskInfo> GetDisksFromHostConfig(const TBlobStorageController::TConfigState& state, const std::set<TBoxId>& relevantBoxes) {
             std::unordered_map<TDiskId, TDiskInfo> disks;
 
             const auto& hostConfigs = state.HostConfigs.Get();
@@ -193,39 +209,42 @@ namespace NKikimr {
             return disks;
         }
 
-        static std::unordered_map<TDiskId, TDiskInfo> GetDisksFromDrivesSerials(TBlobStorageController::TConfigState& state, std::set<TBoxId>& relevantBoxes) {
+        static std::unordered_map<TDiskId, TDiskInfo> GetDisksFromDrivesSerials(const TBlobStorageController::TConfigState& state, const std::set<TBoxId>& relevantBoxes) {
             std::unordered_map<TDiskId, TDiskInfo> disks;
 
-            state.DrivesSerials.ScanRange({}, {}, [&](const auto& serial, const auto& driveInfo, const auto&) {
+            state.DrivesSerials.ForEachInRange({}, {}, [&](const auto& serial, const auto& driveInfo) {
                 if (!relevantBoxes.contains(driveInfo.BoxId)) {
                     return true;
                 }
 
-                if (serial.Serial.empty()) {
-                    STLOG(PRI_ERROR, BS_CONTROLLER, BSCFP04, "Missing disks's serial number");
+                if (driveInfo.LifeStage != NKikimrBlobStorage::TDriveLifeStage::ADDED_BY_DSTOOL) {
                     return true;
+                }
+
+                if (serial.Serial.empty()) {
+                    throw TExError() << "Missing disks's serial number";
                 }
 
                 auto nodeId = driveInfo.NodeId;
                 if (!nodeId) {
-                    STLOG(PRI_ERROR, BS_CONTROLLER, BSCFP05, "Empty node id for disk with serial number.", (SerialNumber, serial.Serial));
-                    return true;
+                    throw TExError() << "Empty node id for disk with serial number " << TErrorParams::DiskSerialNumber(serial.Serial);
                 }
                 auto hostId = state.HostRecords->GetHostId(*nodeId);
                 if (!hostId) {
-                    STLOG(PRI_ERROR, BS_CONTROLLER, BSCFP06, "Couldn't find host id for node.", (NodeId, *nodeId));
-                    return true;
+                    throw TExError() << "Couldn't find host id for node " << TErrorParams::NodeId(*nodeId);
                 }
-
-                auto path = GetDiskPathFromNode(*nodeId, serial, state, /* throwOnError */ true);
+                auto path = driveInfo.Path;
+                if (!path) {
+                    throw TExError() << "Couldn't get path for disk with serial number " << TErrorParams::DiskSerialNumber(serial.Serial);
+                }
 
                 TDiskInfo disk;
                 disk.BoxId = driveInfo.BoxId;
                 disk.HostId = *hostId;
-                disk.LastSeenPath = path;
-                disk.LastSeenSerial = TString();
+                disk.LastSeenPath = GetDiskPathFromNode(*nodeId, serial, state, /* throwOnError */ false);
+                disk.LastSeenSerial = serial;
                 disk.NodeId = *nodeId;
-                disk.Path = path;
+                disk.Path = *path;
                 disk.PDiskCategory = TPDiskCategory(PDiskTypeToPDiskType(driveInfo.PDiskType), driveInfo.Kind);
                 disk.PDiskConfig = driveInfo.PDiskConfig.GetOrElse(TString());
                 disk.ReadCentric = false;
@@ -244,39 +263,44 @@ namespace NKikimr {
             return disks;
         }
 
-        static std::unordered_map<TDiskId, TDiskInfo> GetDisksFromDrivesSerialsAndHostConfig(TBlobStorageController::TConfigState& state, std::set<TBoxId>& relevantBoxes) {
+        static std::unordered_map<TDiskId, TDiskInfo> GetDisksFromDrivesSerialsAndHostConfig(
+            const TBlobStorageController::TConfigState& state, const std::set<TBoxId>& relevantBoxes)
+        {
             auto disksFromDrivesSerials = GetDisksFromDrivesSerials(state, relevantBoxes);
             auto disksFromHostConfig = GetDisksFromHostConfig(state, relevantBoxes);
             disksFromHostConfig.merge(disksFromDrivesSerials);
             return disksFromHostConfig;
         }
 
-        Schema::PDisk::Guid::Type TBlobStorageController::CheckStaticPDisk(TConfigState &state, TPDiskId pdiskId,
-                const TPDiskCategory& category, const TMaybe<Schema::PDisk::PDiskConfig::Type>& pdiskConfig,
-                ui32 *staticSlotUsage) {
-            const TStaticPDiskInfo& info = state.StaticPDisks.at(pdiskId);
+        static Schema::PDisk::Guid::Type GetGuidAndValidateStaticPDisk(
+            const TPDiskId& pdiskId,
+            const TDiskInfo& disk,
+            const TBlobStorageController::TConfigState& state,
+            ui32& staticSlotUsage)
+        {
+            const auto& info = state.StaticPDisks.at(pdiskId);
 
             // create new disk entry; the PDisk with this number MUST NOT exist, otherwise we can
             // have a collision
             if (state.PDisks.Find(pdiskId)) {
                 throw TExError() << "PDisk from static config collides with dynamic one"
-                    << " PDiskId# " << pdiskId;
+                    << TErrorParams::NodeId(pdiskId.NodeId) << TErrorParams::PDiskId(pdiskId.PDiskId);
             }
 
             // validate fields
-            if (pdiskConfig.GetOrElse(TString()) != info.PDiskConfig) {
+            if (disk.PDiskConfig != info.PDiskConfig) {
                 throw TExError() << "PDiskConfig field doesn't match static one"
-                    << " pdiskConfig# " << (pdiskConfig ? FormatPDiskConfig(*pdiskConfig) : "(empty)")
+                    << " pdiskConfig# " << (disk.PDiskConfig ? FormatPDiskConfig(disk.PDiskConfig) : "(empty)")
                     << " info.PDiskConfig# " << FormatPDiskConfig(info.PDiskConfig);
-            } else if (category != info.Category) {
+            } else if (disk.PDiskCategory != info.Category) {
                 throw TExError() << "Type/Kind fields do not match static one";
             }
 
-            *staticSlotUsage = info.StaticSlotUsage;
+            staticSlotUsage = info.StaticSlotUsage;
             return info.Guid;
         }
 
-        void TBlobStorageController::FitPDisksForUserConfig(TConfigState &state) {
+        void TBlobStorageController::FitPDisksForUserConfig(TConfigState& state) {
             auto relevantBoxes = std::exchange(state.Fit.Boxes, {});
             if (relevantBoxes.empty()) {
                 return;
@@ -295,19 +319,21 @@ namespace NKikimr {
             for (const auto& [diskId, disk] : disks) {
                 TPDiskId pdiskId;
                 // check if we already have spawned some PDisk at this location
-                if (auto pdiskIdOptional = state.FindPDiskByLocation(diskId.NodeId, diskId.Path)) {
-                    pdiskId = *pdiskIdOptional;
+                if (auto pdiskIdOptional = NKikimr::NBsController::FindPDisk(disk, state)) {
                     // yes, we have; find it by id and update some characteristics (that we can update)
+                    pdiskId = *pdiskIdOptional;
                     UpdatePDiskIfNeeded(pdiskId, disk, DefaultMaxSlots, state);
                 } else {
-                    // no, this disk is not in map yet; see if it is mentioned in static configuration
-                    Schema::PDisk::Guid::Type guid;
-
+                    // no, we haven't; see if it is mentioned in static configuration
                     ui32 staticSlotUsage = 0;
-                    if (auto pdiskIdOptional = state.FindStaticPDiskByLocation(disk.NodeId, disk.Path)) {
+                    Schema::PDisk::Guid::Type guid{};
+                    if (auto pdiskIdOptional = NKikimr::NBsController::FindStaticPDisk(disk, state)) {
                         // yes, take some data from static configuration
                         pdiskId = *pdiskIdOptional;
-                        guid = CheckStaticPDisk(state, pdiskId, disk.PDiskCategory, disk.PDiskConfig, &staticSlotUsage);
+                        guid = GetGuidAndValidateStaticPDisk(pdiskId, disk, state, staticSlotUsage);
+                    } else if (auto info = state.DrivesSerials.Find(disk.Serial); info && info->Guid) {
+                        pdiskId = FindFirstEmptyPDiskId(state.PDisks, disk.NodeId);
+                        guid = *info->Guid;
                     } else {
                         pdiskId = FindFirstEmptyPDiskId(state.PDisks, disk.NodeId);
                         guid = RandomNumber<Schema::PDisk::Guid::Type>();
@@ -321,6 +347,12 @@ namespace NKikimr {
                             NKikimrBlobStorage::EDecommitStatus::DECOMMIT_NONE,
                             disk.Serial, disk.LastSeenSerial, disk.LastSeenPath, staticSlotUsage);
 
+                    // Set PDiskId and Guid in DrivesSerials
+                    if (auto info = state.DrivesSerials.FindForUpdate(disk.Serial)) {
+                        info->PDiskId = pdiskId.PDiskId;
+                        info->Guid = guid;
+                    }
+
                     STLOG(PRI_NOTICE, BS_CONTROLLER, BSCFP02, "Create new pdisk", (PDiskId, pdiskId), (Path, disk.Path));
                 }
 
@@ -331,9 +363,6 @@ namespace NKikimr {
                 STLOG(PRI_NOTICE, BS_CONTROLLER, BSCFP03, "PDisk to remove:", (PDiskId, pdiskId));
             }
             state.CheckConsistency();
-        }
-
-        void TBlobStorageController::FitPDisksForNode(TConfigState&, ui32, const std::vector<TSerial>&) {
         }
 
     } // NBsController

@@ -13,6 +13,7 @@
 #include "mkql_block_logical.h"
 #include "mkql_block_compress.h"
 #include "mkql_block_skiptake.h"
+#include "mkql_block_top.h"
 #include "mkql_callable.h"
 #include "mkql_chain_map.h"
 #include "mkql_chain1_map.h"
@@ -62,6 +63,7 @@
 #include "mkql_map_join.h"
 #include "mkql_multimap.h"
 #include "mkql_next_value.h"
+#include "mkql_nop.h"
 #include "mkql_now.h"
 #include "mkql_null.h"
 #include "mkql_pickle.h"
@@ -277,6 +279,9 @@ struct TCallableComputationNodeBuilderFuncMapFiller {
         {"WideFromBlocks", &WrapWideFromBlocks},
         {"WideSkipBlocks", &WrapWideSkipBlocks},
         {"WideTakeBlocks", &WrapWideTakeBlocks},
+        {"WideTopBlocks", &WrapWideTopBlocks},
+        {"WideTopSortBlocks", &WrapWideTopSortBlocks},
+        {"WideSortBlocks", &WrapWideSortBlocks},
         {"AsScalar", &WrapAsScalar},
         {"BlockCoalesce", &WrapBlockCoalesce},
         {"BlockIf", &WrapBlockIf},
@@ -321,6 +326,7 @@ struct TCallableComputationNodeBuilderFuncMapFiller {
         {"WideChopper", &WrapWideChopper},
         {"WideTop", &WrapWideTop},
         {"WideTopSort", &WrapWideTopSort},
+        {"WideSort", &WrapWideSort},
         {"WideFlowArg", &WrapWideFlowArg},
         {"Source", &WrapSource},
         {"RangeCreate", &WrapRangeCreate},
@@ -331,6 +337,7 @@ struct TCallableComputationNodeBuilderFuncMapFiller {
         {"RoundUp", &WrapRound},
         {"RoundDown", &WrapRound},
         {"NextValue", &WrapNextValue},
+        {"Nop", &WrapNop},
     };
 };
 

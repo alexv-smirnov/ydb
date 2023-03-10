@@ -18,6 +18,7 @@ option java_package = "ru.yandex.kikimr.proto";
 message TPartitionMeta {
     optional uint64 StartOffset = 1;
     optional uint64 EndOffset = 2;
+    optional bool SubDomainOutOfSpace = 3 [default = false];
 }
 
 message TPartitionTxMeta {
@@ -173,10 +174,13 @@ message TPQConfig {
         optional bool LBFrontEnabled = 3 [default = true];
         optional bool UseLbAccountAlias = 4 [default = true];
         optional string LbUserDatabaseRoot = 5 [default = ""];
+        optional bool UseDynNodesMapping = 6 [default = false];
+        optional uint64 NodesMappingRescanIntervalMilliSeconds = 7 [default = 10000];
     }
     optional TPQDiscoveryConfig PQDiscoveryConfig = 46;
 
     optional uint32 MaxStorageNodePort = 50 [default = 19001];
+    optional uint32 MaxStorageNodeId = 53 [default = 999];
 
     message TMoveTopicActorConfig {
         repeated string AllowedUserSIDs = 1;
@@ -184,6 +188,7 @@ message TPQConfig {
 
     optional TMoveTopicActorConfig MoveTopicActorConfig = 51;
 
+    optional uint64 BalancerWakeupIntervalSec = 54 [default = 30];
 }
 
 message TChannelProfile {
@@ -672,6 +677,8 @@ message TStatusResponse {
         repeated TErrorMessage Errors = 29;
 
         repeated TConsumerResult ConsumerResult = 30;
+
+        optional int64 UsedReserveSize = 31;
     }
 
     message TConsumerResult {
@@ -773,14 +780,14 @@ message TYdsShardIterator {
 }
 
 message TPartitionOperation {
-    required uint64 PartitionId = 1;
+    optional uint32 PartitionId = 1;
     optional uint64 Begin = 2;
     optional uint64 End = 3;
     optional string Consumer = 4;
-    required string Path = 5; // topic path
+    optional string Path = 5; // topic path
 };
 
-message TKqpTransaction {
+message TDataTransaction {
     enum ELocksOp {
         Unspecified = 0;
         Validate = 1;
@@ -789,17 +796,25 @@ message TKqpTransaction {
     }
 
     repeated TPartitionOperation Operations = 1;
-    required ELocksOp Op = 2;
+    optional ELocksOp Op = 2;
     repeated uint64 SendingShards = 3;
     repeated uint64 ReceivingShards = 4;
-    required bool Immediate = 5;
+    optional bool Immediate = 5;
     optional fixed64 LockTxId = 6;
 }
 
+message TConfigTransaction {
+    optional TPQTabletConfig TabletConfig = 2;
+    optional TBootstrapConfig BootstrapConfig = 3;
+}
+
 message TEvProposeTransaction {
-    required NActorsProto.TActorId Source = 1;
-    required TKqpTransaction TxBody = 2;
-    required uint64 TxId = 3;
+    optional NActorsProto.TActorId Source = 1;
+    optional uint64 TxId = 2;
+    oneof TxBody {
+        TDataTransaction Data = 3;
+        TConfigTransaction Config = 4;
+    }
 };
 
 message TEvProposeTransactionResult {
@@ -814,14 +829,94 @@ message TEvProposeTransactionResult {
         OVERLOADED = 8;
     };
 
-    required uint64 Origin = 1; // Tablet Id
-    required EStatus Status = 2;
-    required uint64 TxId = 3;
+    optional uint64 Origin = 1; // Tablet Id
+    optional EStatus Status = 2;
+    optional uint64 TxId = 3;
     optional uint64 MinStep = 4;
     optional uint64 MaxStep = 6;
-    optional uint64 Step = 7;
+    optional string StatusMessage = 7;
+    optional uint64 Step = 8;
 };
 
 message TEvCancelTransactionProposal {
-    required uint64 TxId = 1;
+    optional uint64 TxId = 1;
 };
+
+message TEvPeriodicTopicStats {
+    required uint64 PathId = 1;
+
+    required uint64 Generation = 2;
+    required uint64 Round = 3;
+
+    required uint64 DataSize = 4;
+    required uint64 UsedReserveSize = 5;
+};
+
+message TEvSubDomainStatus {
+    required bool SubDomainOutOfSpace = 1;
+};
+
+message TTransaction {
+    enum EKind {
+        KIND_UNKNOWN = 0;
+        KIND_DATA = 1;
+        KIND_CONFIG = 2;
+    };
+
+    enum EState {
+        UNKNOWN = 0;
+        PREPARING = 1;
+        PREPARED = 2;     // хранится
+        PLANNING = 3;
+        PLANNED = 4;      // хранится. хотим выкинуть и не персистить
+        CALCULATING = 5;
+        CALCULATED = 6;
+        WAIT_RS = 7;      // хранится
+        EXECUTING = 8;
+        EXECUTED = 9;
+    };
+
+    optional EKind Kind = 11;
+    optional uint64 Step = 8;
+    optional uint64 TxId = 1;
+    optional EState State = 2;
+    optional uint64 MinStep = 3;
+    optional uint64 MaxStep = 4;
+
+    //
+    // TDataTransaction
+    //
+    repeated uint64 Senders = 5;
+    repeated uint64 Receivers = 6;
+    repeated TPartitionOperation Operations = 7;
+    optional bool SelfPredicate = 9;  // только предикаты партиций. предикаты коллег отдельно
+    optional bool AggrPredicate = 10; // заполненено одно из полей Senders or AggrPredicate
+
+    //
+    // TConfigTransaction
+    //
+    optional TPQTabletConfig TabletConfig = 12;
+    optional TBootstrapConfig BootstrapConfig = 13;
+};
+
+message TTabletTxInfo {
+    //
+    // использовать RangeRead. может венутьнеполный список
+    //
+    repeated uint64 TxIds = 1;
+
+    //
+    // оставить
+    //
+    optional uint64 LastStep = 2;
+    optional uint64 LastTxId = 3;
+
+    //
+    // держать в памяти
+    //
+    optional uint64 ActiveTxId = 4;
+    //
+    // выкинуть
+    //
+    optional uint64 ReadSetSeqNo = 5 [ default = 1 ];
+}

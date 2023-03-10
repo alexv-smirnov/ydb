@@ -10,8 +10,6 @@ namespace NKikimr::NPrivate {
 ** class TPQCounters
  */
 
-THashMap<TString, TAutoPtr<TAggregatedLabeledCounters>> TPQCounters::LabeledCountersByGroupReference = {};
-
 TPQCounters::TPQCounters(NMonitoring::TDynamicCounterPtr counters) {
     Group = counters;
 }
@@ -19,7 +17,10 @@ TPQCounters::TPQCounters(NMonitoring::TDynamicCounterPtr counters) {
 void TPQCounters::Apply(ui64 tabletId, const NKikimr::TTabletLabeledCountersBase* labeledCounters) {
     const TString group = labeledCounters->GetGroup();
     TString groupNames;
-
+    if (labeledCounters->GetDrop()) {
+        LabeledCountersByGroup.Erase(group);
+        return;
+    }
     if (!LabeledCountersByGroup.Has(group)) {
         TVector<TString> rr;
         StringSplitter(group).Split('|').Collect(&rr);
@@ -27,12 +28,6 @@ void TPQCounters::Apply(ui64 tabletId, const NKikimr::TTabletLabeledCountersBase
             if (i > 0)
                 groupNames += '|';
             groupNames += labeledCounters->GetGroupName(i);
-        }
-
-        if (!LabeledCountersByGroupReference.contains(groupNames)) {
-            LabeledCountersByGroupReference.emplace(groupNames, new TAggregatedLabeledCounters(
-                labeledCounters->GetCounters().Size(), labeledCounters->GetAggrFuncs(),
-                labeledCounters->GetNames(), labeledCounters->GetTypes(), groupNames));
         }
     }
 
@@ -109,8 +104,8 @@ void TDbLabeledCounters::FromProto(NKikimr::NSysView::TDbServiceCounters& counte
         }
         const TString groupNamesStr = (groups.size() == 3) ? "client|important|topic" : "topic";
 
-        LabeledCountersByGroupReference[groupNamesStr]->FromProto(countersGroup,
-                                                                  proto.GetAggregatedPerTablets());
+        LabeledCountersByGroupReference.at(groupNamesStr)->FromProto(countersGroup,
+                                                                     proto.GetAggregatedPerTablets());
     }
 }
 

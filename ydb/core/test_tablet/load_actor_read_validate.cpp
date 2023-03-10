@@ -78,7 +78,7 @@ namespace NKikimr::NTestShard {
                 IssueNextStateServerQuery();
             } else {
                 STLOG(PRI_ERROR, TEST_SHARD, TS05, "state server disconnected", (TabletId, TabletId));
-                TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, TabletActorId, SelfId(), nullptr, 0));
+                TActivationContext::Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, TabletActorId, SelfId(), nullptr, 0));
                 PassAway();
             }
         }
@@ -198,13 +198,14 @@ namespace NKikimr::NTestShard {
                 return IssueRead(key);
             }
 
-            if (outcome == EReadOutcome::RETRY && RetryCount < 10) {
+            if (outcome == EReadOutcome::RETRY && RetryCount < 32) {
                 const bool inserted = KeyReadsWaitingForRetry.insert(key).second;
                 Y_VERIFY(inserted);
                 STLOG(PRI_ERROR, TEST_SHARD, TS24, "read key failed -- going to retry", (TabletId, TabletId),
                     (Key, key), (Message, message));
             } else {
-                Y_VERIFY_S(outcome == EReadOutcome::OK, "Message# " << message << " Key# " << key);
+                Y_VERIFY_S(outcome == EReadOutcome::OK, "Message# " << message << " Key# " << key << " Outcome# "
+                    << (int)outcome << " RetryCount# " << RetryCount);
 
                 const bool inserted = Keys.try_emplace(key, value.size()).second;
                 Y_VERIFY(inserted);
@@ -292,7 +293,7 @@ namespace NKikimr::NTestShard {
                     Y_FAIL_S("ERROR from StateServer TabletId# " << TabletId);
 
                 case ::NTestShard::TStateServer::RACE:
-                    TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, TabletActorId, SelfId(), nullptr, 0));
+                    TActivationContext::Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, TabletActorId, SelfId(), nullptr, 0));
                     PassAway();
                     return;
 
@@ -327,7 +328,7 @@ namespace NKikimr::NTestShard {
 
                 if (!KeyReadsWaitingForRetry.empty()) {
                     SendRetriesPending = true;
-                    TActivationContext::Schedule(TDuration::Seconds(10), new IEventHandle(EvRetryKeyReads, 0, SelfId(),
+                    TActivationContext::Schedule(TDuration::Seconds(10), new IEventHandleFat(EvRetryKeyReads, 0, SelfId(),
                         {}, nullptr, 0));
                     return;
                 }
@@ -442,7 +443,7 @@ namespace NKikimr::NTestShard {
                     Y_FAIL_S("ERROR from StateServer TabletId# " << TabletId);
 
                 case ::NTestShard::TStateServer::RACE:
-                    TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, TabletActorId, SelfId(), nullptr, 0));
+                    TActivationContext::Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, TabletActorId, SelfId(), nullptr, 0));
                     PassAway();
                     return;
 
@@ -590,7 +591,7 @@ namespace NKikimr::NTestShard {
         Action();
 
         if (Settings.RestartPeriodsSize() && ev->Get()->InitialCheck) {
-            TActivationContext::Schedule(GenerateRandomInterval(Settings.GetRestartPeriods()), new IEventHandle(
+            TActivationContext::Schedule(GenerateRandomInterval(Settings.GetRestartPeriods()), new IEventHandleFat(
                 TEvents::TSystem::Wakeup, 0, SelfId(), {}, nullptr, 0));
         }
     }

@@ -35,15 +35,22 @@ public:
                 continue;
             }
 
-            while (!it->second.empty() && removed < MaxRecordsToRemove) {
-                auto& record = it->second.back();
+            if (Self->GetVolatileTxManager().FindByCommitTxId(lockId)) {
+                // Don't remove records that are managed by volatile tx manager
+                Self->PendingLockChangeRecordsToRemove.pop_back();
+                continue;
+            }
+
+            while (!it->second.Changes.empty() && removed < MaxRecordsToRemove) {
+                auto& record = it->second.Changes.back();
                 db.Table<Schema::LockChangeRecords>().Key(record.LockId, record.LockOffset).Delete();
                 db.Table<Schema::LockChangeRecordDetails>().Key(record.LockId, record.LockOffset).Delete();
-                it->second.pop_back();
+                it->second.Changes.pop_back();
+                it->second.PersistentCount = it->second.Changes.size();
                 ++removed;
             }
 
-            if (!it->second.empty()) {
+            if (!it->second.Changes.empty()) {
                 // We couldn't remove everything, continue in the next transaction
                 break;
             }

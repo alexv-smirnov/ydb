@@ -189,7 +189,7 @@ public:
 
         YdbConnection = NewYdbConnection(StorageConfig, CredProviderFactory, YqSharedResources->CoreYdbDriver);
         TablePathPrefix = YdbConnection->TablePathPrefix;
-        DbPool = YqSharedResources->DbPoolHolder->GetOrCreate(static_cast<ui32>(EDbPoolId::MAIN), 10);
+        DbPool = YqSharedResources->DbPoolHolder->GetOrCreate(static_cast<ui32>(EDbPoolId::MAIN));
         Send(NActors::GetNameserviceActorId(), new NActors::TEvInterconnect::TEvListNodes());
         Become(&TQuotaManagementService::StateFunc);
         LOG_I("STARTED");
@@ -228,7 +228,7 @@ private:
         if (oldPeerCount != NodeIds.size()) {
             LOG_D("IC Peers[" << NodeIds.size() << "]: " << ToString(NodeIds));
         }
-        NActors::TActivationContext::Schedule(TDuration::Seconds(NodeIds.empty() ? 1 : 5), new IEventHandle(NActors::GetNameserviceActorId(), SelfId(), new NActors::TEvInterconnect::TEvListNodes()));
+        NActors::TActivationContext::Schedule(TDuration::Seconds(NodeIds.empty() ? 1 : 5), new IEventHandleFat(NActors::GetNameserviceActorId(), SelfId(), new NActors::TEvInterconnect::TEvListNodes()));
     }
 
     void Handle(TEvQuotaService::TQuotaGetRequest::TPtr& ev) {

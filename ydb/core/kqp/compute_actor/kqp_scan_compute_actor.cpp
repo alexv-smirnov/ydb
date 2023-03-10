@@ -166,6 +166,7 @@ public:
         settings.CollectBasicStats = GetStatsMode() >= NYql::NDqProto::DQ_STATS_MODE_BASIC;
         settings.CollectProfileStats = GetStatsMode() >= NYql::NDqProto::DQ_STATS_MODE_PROFILE;
         settings.OptLLVM = GetUseLLVM() ? "--compile-options=disable-opt" : "OFF";
+        settings.UseCacheForLLVM = AppData()->FeatureFlags.GetEnableLLVMCache();
         settings.AllowGeneratorsInUnboxedValues = false;
 
         NDq::TLogFunc logger;
@@ -257,6 +258,8 @@ public:
             // NKqpProto::TKqpComputeActorExtraStats extraStats;
 
             auto* taskStats = dst->MutableTasks(0);
+            taskStats->SetErrorsCount(ErrorsCount);
+
             auto* tableStats = taskStats->AddTables();
 
             tableStats->SetTablePath(ScanData->TablePath);
@@ -284,11 +287,6 @@ public:
 
             // dst->MutableExtra()->PackFrom(extraStats);
         }
-
-        if (last && dst->TasksSize() > 0) {
-            YQL_ENSURE(dst->TasksSize() == 1);
-            NComputeActor::FillTaskInputStats(GetTask(), *dst->MutableTasks(0));
-        }
     }
 
 protected:
@@ -302,7 +300,7 @@ private:
         ev->Record.SetLocalPathId(ScanData->TableId.PathId.LocalPathId);
         for (auto& column: ScanData->GetColumns()) {
             ev->Record.AddColumnTags(column.Tag);
-            auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(column.Type);
+            auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(column.Type, column.TypeMod);
             ev->Record.AddColumnTypes(columnType.TypeId);
             if (columnType.TypeInfo) {
                 *ev->Record.AddColumnTypeInfos() = *columnType.TypeInfo;
@@ -377,7 +375,7 @@ private:
             << " schedule after " << retryDelay);
 
         state->RetryTimer = CreateLongTimer(TlsActivationContext->AsActorContext(), retryDelay,
-            new IEventHandle(SelfId(), SelfId(), TEvPrivate::TEvRetryShard::CostsProblem(state->GetShardId()).Release()));
+            new IEventHandleFat(SelfId(), SelfId(), TEvPrivate::TEvRetryShard::CostsProblem(state->GetShardId()).Release()));
     }
 
     void StartCostsRequest(TShardCostsState::TPtr state) {
@@ -505,13 +503,13 @@ private:
                 case NKikimrTxDataShard::EScanDataFormat::CELLVEC:
                 case NKikimrTxDataShard::EScanDataFormat::UNSPECIFIED:
                     if (!msg.Rows.empty()) {
-                        bytes += ScanData->AddRows(msg.Rows, state->TabletId, TaskRunner->GetHolderFactory());
+                        bytes += ScanData->AddData(msg.Rows, state->TabletId, TaskRunner->GetHolderFactory());
                         rowsCount += msg.Rows.size();
                     }
                     break;
                 case NKikimrTxDataShard::EScanDataFormat::ARROW:
-                    if (!!msg.ArrowBatch) {
-                        bytes += ScanData->AddRows(*msg.ArrowBatch, state->TabletId, TaskRunner->GetHolderFactory());
+                    if (msg.ArrowBatch) {
+                        bytes += ScanData->AddData(*msg.ArrowBatch, state->TabletId, TaskRunner->GetHolderFactory());
                         rowsCount += msg.ArrowBatch->num_rows();
                     }
                     break;
@@ -613,6 +611,8 @@ private:
 
         YQL_ENSURE(state->Generation == msg.GetGeneration());
 
+        ++ErrorsCount;
+
         if (state->State == EShardState::Starting) {
             // TODO: Do not parse issues here, use status code.
             if (FindSchemeErrorInIssues(status, issues)) {
@@ -637,6 +637,9 @@ private:
             return;
         }
         YQL_ENSURE(ScanData);
+
+        ++ErrorsCount;
+
         auto& msg = *ev->Get();
 
         if (auto costsState = InFlightShards.GetCostsState(msg.TabletId)) {
@@ -969,7 +972,7 @@ private:
             << " schedule after " << retryDelay);
 
         state->RetryTimer = CreateLongTimer(TlsActivationContext->AsActorContext(), retryDelay,
-            new IEventHandle(SelfId(), SelfId(), new TEvPrivate::TEvRetryShard(state->TabletId, state->Generation)));
+            new IEventHandleFat(SelfId(), SelfId(), new TEvPrivate::TEvRetryShard(state->TabletId, state->Generation)));
     }
 
     bool IsQuotingEnabled() const {
@@ -1239,6 +1242,7 @@ private:
     NWilson::TProfileSpan KqpComputeActorSpan;
     TInFlightShards InFlightShards;
     ui32 ScansCounter = 0;
+    ui32 ErrorsCount = 0;
 
     std::set<ui32> TrackingNodes;
     ui32 MaxInFlight = 1024;

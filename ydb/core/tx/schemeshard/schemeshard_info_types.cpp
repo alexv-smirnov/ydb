@@ -123,6 +123,7 @@ TTableInfo::TAlterDataPtr TTableInfo::CreateAlterData(
             }
 
             NScheme::TTypeInfo typeInfo;
+            TString typeMod;
             if (type) {
                 // Only allow YQL types
                 if (!NScheme::NTypeIds::IsYqlType(type->GetTypeId())) {
@@ -137,6 +138,7 @@ TTableInfo::TAlterDataPtr TTableInfo::CreateAlterData(
                     return nullptr;
                 }
                 typeInfo = NScheme::TTypeInfo(NScheme::NTypeIds::Pg, typeDesc);
+                typeMod = NPg::TypeModFromPgTypeName(typeName);
             }
 
             ui32 colId = col.HasId() ? col.GetId() : alterData->NextColumnId;
@@ -154,7 +156,7 @@ TTableInfo::TAlterDataPtr TTableInfo::CreateAlterData(
 
             colName2Id[colName] = colId;
             TTableInfo::TColumn& column = alterData->Columns[colId];
-            column = TTableInfo::TColumn(colName, colId, typeInfo);
+            column = TTableInfo::TColumn(colName, colId, typeInfo, typeMod);
             column.Family = columnFamily ? columnFamily->GetId() : 0;
             column.NotNull = col.GetNotNull();
             if (source)
@@ -319,7 +321,7 @@ TVector<ui32> TTableInfo::FillDescriptionCache(TPathElement::TPtr pathInfo) {
             auto colDescr = TableDescription.AddColumns();
             colDescr->SetName(column.Name);
             colDescr->SetId(column.Id);
-            auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(column.PType);
+            auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(column.PType, column.PTypeMod);
             colDescr->SetTypeId(columnType.TypeId);
             if (columnType.TypeInfo) {
                 *colDescr->MutableTypeInfo() = *columnType.TypeInfo;
@@ -1591,28 +1593,31 @@ bool TTableInfo::CheckSplitByLoad(
     if (!Shard2PartitionIdx.contains(shardIdx))
         return false;
 
+    if (!IsSplitByLoadEnabled(mainTableForIndex)) {
+        return false;
+    }
+
     // A shard can be overloaded by heavy reads of non-existing keys.
     // So we want to be able to split it even if it has no data.
     const ui64 MIN_ROWS_FOR_SPLIT_BY_LOAD = 0;
     const ui64 MIN_SIZE_FOR_SPLIT_BY_LOAD = 0;
 
-    const auto& partitionConfig = PartitionConfig();
-    const auto& policy = partitionConfig.GetPartitioningPolicy();
+    const auto& policy = PartitionConfig().GetPartitioningPolicy();
+
+    const auto settings = GetEffectiveSplitByLoadSettings(mainTableForIndex);
+    const i64 cpuPercentage = settings.GetCpuPercentageThreshold();
+    const float cpuUsageThreshold = 0.01 * (cpuPercentage ? cpuPercentage : (i64)splitSettings.FastSplitCpuPercentageThreshold);
 
     ui64 maxShards = policy.GetMaxPartitionsCount();
     if (maxShards == 0) {
-        // Don't want to trigger "too many shards" or "too many readsets" errors
-        maxShards = splitSettings.SplitByLoadMaxShardsDefault;
+        if (mainTableForIndex) {
+            // For index table maxShards defaults to a number of partitions of its main table
+            maxShards = mainTableForIndex->GetPartitions().size();
+        } else {
+            // Don't want to trigger "too many shards" or "too many readsets" errors
+            maxShards = splitSettings.SplitByLoadMaxShardsDefault;
+        }
     }
-
-    if (!IsSplitByLoadEnabled(mainTableForIndex)) {
-        return false;
-    }
-
-    const auto settings = GetEffectiveSplitByLoadSettings(mainTableForIndex);
-    i64 cpuPercentage = settings.GetCpuPercentageThreshold();
-
-    float cpuUsageThreshold = 0.01 * (cpuPercentage ? cpuPercentage : (i64)splitSettings.FastSplitCpuPercentageThreshold);
 
     const auto& stats = *Stats.PartitionStats.FindPtr(shardIdx);
     if (rowCount < MIN_ROWS_FOR_SPLIT_BY_LOAD ||
@@ -1860,7 +1865,7 @@ const TString &TColumnFamiliesMerger::CanonizeName(const TString &familyName) {
     return familyName;
 }
 
-void TPQShardInfo::TKeyRange::SerializeToProto(NKikimrPQ::TPartitionKeyRange& proto) const {
+void TTopicTabletInfo::TKeyRange::SerializeToProto(NKikimrPQ::TPartitionKeyRange& proto) const {
     if (FromBound) {
         proto.SetFromBound(*FromBound);
     }
@@ -1870,7 +1875,7 @@ void TPQShardInfo::TKeyRange::SerializeToProto(NKikimrPQ::TPartitionKeyRange& pr
     }
 }
 
-bool TPersQueueGroupInfo::FillKeySchema(const NKikimrPQ::TPQTabletConfig& tabletConfig, TString& error) {
+bool TTopicInfo::FillKeySchema(const NKikimrPQ::TPQTabletConfig& tabletConfig, TString& error) {
     KeySchema.clear();
     KeySchema.reserve(tabletConfig.PartitionKeySchemaSize());
 
@@ -1889,7 +1894,7 @@ bool TPersQueueGroupInfo::FillKeySchema(const NKikimrPQ::TPQTabletConfig& tablet
     return true;
 }
 
-bool TPersQueueGroupInfo::FillKeySchema(const TString& tabletConfig) {
+bool TTopicInfo::FillKeySchema(const TString& tabletConfig) {
     NKikimrPQ::TPQTabletConfig proto;
     if (!proto.ParseFromString(tabletConfig)) {
         return false;
@@ -2045,7 +2050,7 @@ bool TOlapSchema::UpdateProto(NKikimrSchemeOp::TColumnTableSchema& proto, TStrin
 #endif
         }
 
-        auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(typeInfo);
+        auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(typeInfo, "");
         colProto.SetTypeId(columnType.TypeId);
         if (columnType.TypeInfo) {
             *colProto.MutableTypeInfo() = *columnType.TypeInfo;
@@ -2155,7 +2160,8 @@ bool TOlapSchema::Parse(const NKikimrSchemeOp::TColumnTableSchema& proto, TStrin
         }
 
         if (colProto.HasTypeInfo()) {
-            col.Type = NScheme::TypeInfoFromProtoColumnType(colProto.GetTypeId(), &colProto.GetTypeInfo());
+            auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(colProto.GetTypeId(), &colProto.GetTypeInfo());
+            col.Type = typeInfoMod.TypeInfo;
         } else {
             col.Type = NScheme::TTypeInfo(colProto.GetTypeId());
         }
@@ -2327,8 +2333,9 @@ TOlapStoreInfo::TOlapStoreInfo(
             auto& col = preset.Columns[colProto.GetId()];
             col.Id = colProto.GetId();
             col.Name = colProto.GetName();
-            col.Type = NScheme::TypeInfoFromProtoColumnType(colProto.GetTypeId(),
+            auto typeInfoMod = NScheme::TypeInfoModFromProtoColumnType(colProto.GetTypeId(),
                 colProto.HasTypeInfo() ? &colProto.GetTypeInfo() : nullptr);
+            col.Type = typeInfoMod.TypeInfo;
             preset.ColumnsByName[col.Name] = col.Id;
         }
         for (const auto& keyName : presetProto.GetSchema().GetKeyColumnNames()) {

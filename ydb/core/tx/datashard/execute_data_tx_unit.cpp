@@ -24,6 +24,7 @@ public:
 
 private:
     void ExecuteDataTx(TOperation::TPtr op,
+                       TTransactionContext& txc,
                        const TActorContext& ctx,
                        TSetupSysLocks& guardLocks);
     void AddLocksToResult(TOperation::TPtr op, const TActorContext& ctx);
@@ -158,7 +159,7 @@ EExecutionStatus TExecuteDataTxUnit::Execute(TOperation::TPtr op,
 
     try {
         try {
-            ExecuteDataTx(op, ctx, guardLocks);
+            ExecuteDataTx(op, txc, ctx, guardLocks);
         } catch (const TNotReadyTabletException&) {
             // We want to try pinning (actually precharging) all required pages
             // before restarting the transaction, to minimize future restarts.
@@ -178,6 +179,7 @@ EExecutionStatus TExecuteDataTxUnit::Execute(TOperation::TPtr op,
         engine->ReleaseUnusedMemory();
         txc.RequestMemory(txc.GetMemoryLimit() * MEMORY_REQUEST_FACTOR);
 
+        tx->GetDataTx()->ResetCollectedChanges();
         tx->ReleaseTxData(txc, ctx);
 
         return EExecutionStatus::Restart;
@@ -187,6 +189,7 @@ EExecutionStatus TExecuteDataTxUnit::Execute(TOperation::TPtr op,
 
         DataShard.IncCounter(COUNTER_TX_TABLET_NOT_READY);
 
+        tx->GetDataTx()->ResetCollectedChanges();
         tx->ReleaseTxData(txc, ctx);
 
         return EExecutionStatus::Restart;
@@ -194,6 +197,7 @@ EExecutionStatus TExecuteDataTxUnit::Execute(TOperation::TPtr op,
         LOG_TRACE_S(ctx, NKikimrServices::TX_DATASHARD, "Tablet " << DataShard.TabletID()
             << " needs to reschedule " << *op << " for dependencies");
 
+        tx->GetDataTx()->ResetCollectedChanges();
         tx->ReleaseTxData(txc, ctx);
 
         txc.Reschedule();
@@ -216,6 +220,7 @@ EExecutionStatus TExecuteDataTxUnit::Execute(TOperation::TPtr op,
 }
 
 void TExecuteDataTxUnit::ExecuteDataTx(TOperation::TPtr op,
+                                       TTransactionContext& txc,
                                        const TActorContext& ctx,
                                        TSetupSysLocks& guardLocks)
 {
@@ -310,6 +315,20 @@ void TExecuteDataTxUnit::ExecuteDataTx(TOperation::TPtr op,
 
     if (counters.InvisibleRowSkips && op->LockTxId()) {
         DataShard.SysLocksTable().BreakSetLocks();
+    }
+
+    // Note: any transaction (e.g. immediate or non-volatile) may decide to commit as volatile due to dependencies
+    // Such transactions would have no participants and become immediately committed
+    if (auto commitTxIds = tx->GetDataTx()->GetVolatileCommitTxIds()) {
+        TVector<ui64> participants; // empty participants
+        DataShard.GetVolatileTxManager().PersistAddVolatileTx(
+            tx->GetTxId(),
+            writeVersion,
+            commitTxIds,
+            tx->GetDataTx()->GetVolatileDependencies(),
+            participants,
+            tx->GetDataTx()->GetVolatileChangeGroup(),
+            txc);
     }
 
     AddLocksToResult(op, ctx);

@@ -100,11 +100,13 @@ private:
         TDuration PermissionDuration;
         NKikimrCms::ETenantPolicy TenantPolicy;
         NKikimrCms::EAvailabilityMode AvailabilityMode;
+        bool PartialPermissionAllowed;
 
         TActionOptions(TDuration dur)
             : PermissionDuration(dur)
             , TenantPolicy(NKikimrCms::DEFAULT)
             , AvailabilityMode(NKikimrCms::MODE_MAX_AVAILABILITY)
+            , PartialPermissionAllowed(false)
         {}
     };
 
@@ -150,7 +152,7 @@ private:
     }
 
     static void Reply(const IEventBase* request, TAutoPtr<IEventHandle> response, const TActorContext& ctx) {
-        AuditLog(request, response->GetBase(), ctx);
+        AuditLog(request, IEventHandleFat::GetFat(response)->GetBase(), ctx);
         ctx.Send(response);
     }
 
@@ -172,7 +174,7 @@ private:
     STFUNC(StateInit)
     {
         LOG_DEBUG(ctx, NKikimrServices::CMS, "StateInit event type: %" PRIx32 " event: %s",
-                  ev->GetTypeRewrite(), ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?");
+                  ev->GetTypeRewrite(), ev->ToString().data());
         StateInitImpl(ev, ctx);
     }
 
@@ -206,7 +208,7 @@ private:
         default:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_DEBUG(ctx, NKikimrServices::CMS, "StateNotSupported unexpected event type: %" PRIx32 " event: %s",
-                          ev->GetTypeRewrite(), ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?");
+                          ev->GetTypeRewrite(), ev->ToString().data());
             }
         }
     }
@@ -220,7 +222,7 @@ private:
             CFunc(TEvPrivate::EvCleanupExpired, CleanupExpired);
             CFunc(TEvPrivate::EvCleanupLog, CleanupLog);
             CFunc(TEvPrivate::EvCleanupWalle, CleanupWalleTasks);
-            CFunc(TEvPrivate::EvStartCollecting, StartCollecting); 
+            CFunc(TEvPrivate::EvStartCollecting, StartCollecting);
             FFunc(TEvCms::EvClusterStateRequest, EnqueueRequest);
             HFunc(TEvCms::TEvPermissionRequest, CheckAndEnqueueRequest);
             HFunc(TEvCms::TEvManageRequestRequest, Handle);
@@ -253,7 +255,7 @@ private:
         default:
             if (!HandleDefaultEvents(ev, ctx)) {
                 LOG_DEBUG(ctx, NKikimrServices::CMS, "StateWork unexpected event type: %" PRIx32 " event: %s",
-                          ev->GetTypeRewrite(), ev->HasEvent() ? ev->GetBase()->ToString().data() : "serialized?");
+                          ev->GetTypeRewrite(), ev->ToString().data());
             }
         }
     }
@@ -300,7 +302,7 @@ private:
                                    TErrorInfo &error) const;
     bool CheckSysTabletsNode(const NKikimrCms::TAction &action,
                              const TActionOptions &opts,
-                             const TNodeInfo &node, 
+                             const TNodeInfo &node,
                              TErrorInfo &error) const;
     bool TryToLockNode(const NKikimrCms::TAction &action,
                        const TActionOptions &options,
@@ -320,7 +322,7 @@ private:
                         TErrorInfo &error) const;
     bool TryToLockStateStorageReplica(const NKikimrCms::TAction &action,
                                       const TActionOptions &options,
-                                      const TNodeInfo &node, 
+                                      const TNodeInfo &node,
                                       TErrorInfo& error,
                                       const TActorContext &ctx) const;
     void AcceptPermissions(NKikimrCms::TPermissionResponse &resp, const TString &requestId,

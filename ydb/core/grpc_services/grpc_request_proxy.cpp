@@ -11,6 +11,8 @@
 #include <ydb/core/tx/tx_proxy/proxy.h>
 #include <ydb/core/tx/scheme_board/scheme_board.h>
 
+#include <shared_mutex>
+
 namespace NKikimr {
 namespace NGRpcService {
 
@@ -57,8 +59,8 @@ class TGRpcRequestProxyImpl
     using TBase = TActorBootstrapped<TGRpcRequestProxyImpl>;
 public:
     explicit TGRpcRequestProxyImpl(const NKikimrConfig::TAppConfig& appConfig)
-        : AppConfig(appConfig)
-    {}
+        : AppConfig(MakeIntrusive<TAppConfig>(appConfig))
+    { }
 
     void Bootstrap(const TActorContext& ctx);
     void StateFunc(TAutoPtr<IEventHandle>& ev, const TActorContext& ctx);
@@ -80,26 +82,23 @@ private:
     static bool IsAuthStateOK(const IRequestProxyCtx& ctx);
 
     template <typename TEvent>
-    void Handle(TAutoPtr<TEventHandle<TEvent>>& event, const TActorContext& ctx) {
+    void Handle(TAutoPtr<TEventHandleFat<TEvent>>& event, const TActorContext& ctx) {
         IRequestProxyCtx* requestBaseCtx = event->Get();
-        TString validationError;
-        if (!requestBaseCtx->Validate(validationError)) {
-            const auto issue = MakeIssue(NKikimrIssues::TIssuesIds::YDB_API_VALIDATION_ERROR, validationError);
-            requestBaseCtx->RaiseIssue(issue);
-            requestBaseCtx->ReplyWithYdbStatus(Ydb::StatusIds::BAD_REQUEST);
-        } else {
+        if (ValidateAndReplyOnError(requestBaseCtx)) {
+            TGRpcRequestProxyHandleMethods::Handle(event, ctx);
+        }
+    }
+
+    void Handle(TEvListEndpointsRequest::TPtr& event, const TActorContext& ctx) {
+        IRequestProxyCtx* requestBaseCtx = event->Get();
+        if (ValidateAndReplyOnError(requestBaseCtx)) {
             TGRpcRequestProxy::Handle(event, ctx);
         }
     }
 
     void Handle(TEvProxyRuntimeEvent::TPtr& event, const TActorContext&) {
         IRequestProxyCtx* requestBaseCtx = event->Get();
-        TString validationError;
-        if (!requestBaseCtx->Validate(validationError)) {
-            const auto issue = MakeIssue(NKikimrIssues::TIssuesIds::YDB_API_VALIDATION_ERROR, validationError);
-            requestBaseCtx->RaiseIssue(issue);
-            requestBaseCtx->ReplyWithYdbStatus(Ydb::StatusIds::BAD_REQUEST);
-        } else {
+        if (ValidateAndReplyOnError(requestBaseCtx)) {
             event->Release().Release()->Pass(*this);
         }
     }
@@ -116,7 +115,7 @@ private:
     // returns true and defer event if no updates for given database
     // otherwice returns false and leave event untouched
     template <typename TEvent>
-    bool DeferAndStartUpdate(const TString& database, TAutoPtr<TEventHandle<TEvent>>& ev, IRequestProxyCtx* reqCtx) {
+    bool DeferAndStartUpdate(const TString& database, TAutoPtr<TEventHandleFat<TEvent>>& ev, IRequestProxyCtx* reqCtx) {
         std::deque<TEventReqHolder>& queue = DeferredEvents[database];
         if (queue.size() >= MAX_DEFERRED_EVENTS_PER_DATABASE) {
             return false;
@@ -131,7 +130,7 @@ private:
     }
 
     template <typename TEvent>
-    void PreHandle(TAutoPtr<TEventHandle<TEvent>>& event, const TActorContext& ctx) {
+    void PreHandle(TAutoPtr<TEventHandleFat<TEvent>>& event, const TActorContext& ctx) {
         IRequestProxyCtx* requestBaseCtx = event->Get();
 
         LogRequest(event);
@@ -246,7 +245,11 @@ private:
 
             Register(CreateGrpcRequestCheckActor<TEvent>(SelfId(),
                 database->SchemeBoardResult->DescribeSchemeResult,
-                database->SecurityObject, event.Release(), Counters, skipCheckConnectRigths));
+                database->SecurityObject,
+                event.Release(),
+                Counters,
+                skipCheckConnectRigths,
+                this));
             return;
         }
 
@@ -261,19 +264,30 @@ private:
     void DoStartUpdate(const TString& database);
     bool DeferAndStartUpdate(const TString& database, TAutoPtr<IEventHandle>& ev, IRequestProxyCtx*);
 
-    const NKikimrConfig::TAppConfig& GetAppConfig() const override {
+    TIntrusiveConstPtr<TAppConfig> GetAppConfig() const override {
+        std::shared_lock lock(Mutex);
         return AppConfig;
     }
 
+    TActorId RegisterActor(IActor* actor) const override {
+        return TActivationContext::AsActorContext().Register(actor);
+    }
+
     virtual void PassAway() override {
-        for (auto& [database, queue] : DeferredEvents) {
+        for (auto& [_, queue] : DeferredEvents) {
             for (TEventReqHolder& req : queue) {
                 req.Ctx->ReplyUnavaliable();
             }
         }
-        for (const auto& [database, actor] : Subscribers) {
+
+        for (const auto& [_, actor] : Subscribers) {
             Send(actor, new TEvents::TEvPoisonPill());
         }
+
+        if (DiscoveryCacheActorID) {
+            Send(DiscoveryCacheActorID, new TEvents::TEvPoisonPill());
+        }
+
         TBase::PassAway();
     }
 
@@ -282,11 +296,12 @@ private:
     std::unordered_map<TString, TActorId> Subscribers;
     THashSet<TSubDomainKey> SubDomainKeys;
     bool AllowYdbRequestsWithoutDatabase = true;
-    NKikimrConfig::TAppConfig AppConfig;
+    TIntrusiveConstPtr<TAppConfig> AppConfig;
     TActorId SchemeCache;
     bool DynamicNode = false;
     TString RootDatabase;
     IGRpcProxyCounters::TPtr Counters;
+    mutable std::shared_mutex Mutex;
 };
 
 void TGRpcRequestProxyImpl::Bootstrap(const TActorContext& ctx) {
@@ -356,7 +371,11 @@ void TGRpcRequestProxyImpl::HandleConfig(NConsole::TEvConfigsDispatcher::TEvSetC
 void TGRpcRequestProxyImpl::HandleConfig(NConsole::TEvConsole::TEvConfigNotificationRequest::TPtr& ev) {
     auto &event = ev->Get()->Record;
 
-    AppConfig.Swap(event.MutableConfig());
+    {
+        std::unique_lock lock(Mutex);
+        AppConfig = MakeIntrusive<TAppConfig>(event.GetConfig());
+    }
+
     LOG_INFO(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "Updated app config");
 
     auto responseEv = MakeHolder<NConsole::TEvConsole::TEvConfigNotificationResponse>(event);
@@ -499,7 +518,7 @@ void LogRequest(const TEvent& event) {
     };
 
     if constexpr (std::is_same_v<TEvListEndpointsRequest::TPtr, TEvent>) {
-        LOG_NOTICE(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "%s", getDebugString().c_str());
+        LOG_INFO(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "%s", getDebugString().c_str());
     }
     else {
         LOG_DEBUG(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "%s", getDebugString().c_str());

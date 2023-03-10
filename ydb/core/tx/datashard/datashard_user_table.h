@@ -233,13 +233,15 @@ struct TUserTable : public TThrRefBase {
 
     struct TUserColumn {
         NScheme::TTypeInfo Type;
+        TString TypeMod;
         TString Name;
         bool IsKey;
         ui32 Family = 0;
         bool NotNull = false;
 
-        TUserColumn(NScheme::TTypeInfo type, TString name, bool isKey = false)
+        TUserColumn(NScheme::TTypeInfo type, TString typeMod, TString name, bool isKey = false)
             : Type(type)
+            , TypeMod(typeMod)
             , Name(name)
             , IsKey(isKey)
         {}
@@ -387,6 +389,8 @@ struct TUserTable : public TThrRefBase {
                     const NKikimrSchemeOp::TTableDescription& alter, TString& strError);
     void ApplyDefaults(NTabletFlatExecutor::TTransactionContext& txc) const;
 
+    void Fix_KIKIMR_17222(NTable::TDatabase& db) const;
+
     TTableRange GetTableRange() const { return Range.ToTableRange(); }
     const TString& GetSchema() const { return Schema; }
 
@@ -419,6 +423,8 @@ struct TUserTable : public TThrRefBase {
 private:
     void DoApplyCreate(NTabletFlatExecutor::TTransactionContext& txc, const TString& tableName, bool shadow,
             const NKikimrSchemeOp::TPartitionConfig& partConfig) const;
+
+    void Fix_KIKIMR_17222(NTable::TDatabase& db, ui32 tid) const;
 
 private:
     TString Schema;

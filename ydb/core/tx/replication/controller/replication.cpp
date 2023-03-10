@@ -1,6 +1,8 @@
-#include "discoverer.h"
+#include "private_events.h"
 #include "replication.h"
+#include "target_discoverer.h"
 #include "target_table.h"
+#include "tenant_resolver.h"
 #include "util.h"
 
 #include <ydb/core/protos/replication.pb.h>
@@ -12,9 +14,7 @@
 #include <util/generic/hash.h>
 #include <util/generic/ptr.h>
 
-namespace NKikimr {
-namespace NReplication {
-namespace NController {
+namespace NKikimr::NReplication::NController {
 
 class TReplication::TImpl {
     friend class TReplication;
@@ -38,7 +38,7 @@ class TReplication::TImpl {
                     paths.emplace_back(target.GetSrcPath(), target.GetDstPath());
                 }
 
-                Discoverer = ctx.Register(CreateDiscoverer(ctx.SelfID, ReplicationId, YdbProxy, std::move(paths)));
+                TargetDiscoverer = ctx.Register(CreateTargetDiscoverer(ctx.SelfID, ReplicationId, YdbProxy, std::move(paths)));
                 break;
             }
 
@@ -81,6 +81,10 @@ public:
             : nullptr;
     }
 
+    void RemoveTarget(ui64 id) {
+        Targets.erase(id);
+    }
+
     void Progress(const TActorContext& ctx) {
         if (!YdbProxy) {
             THolder<IActor> ydbProxy;
@@ -98,6 +102,10 @@ public:
             }
         }
 
+        if (!Tenant && !TenantResolver) {
+            TenantResolver = ctx.Register(CreateTenantResolver(ctx.SelfID, ReplicationId, PathId));
+        }
+
         switch (State) {
         case EState::Ready:
             if (!Targets) {
@@ -106,7 +114,11 @@ public:
                 return ProgressTargets(ctx);
             }
         case EState::Removing:
-            return; // TODO
+            if (!Targets) {
+                return (void)ctx.Send(ctx.SelfID, new TEvPrivate::TEvDropReplication(ReplicationId));
+            } else {
+                return ProgressTargets(ctx);
+            }
         case EState::Error:
             return;
         }
@@ -117,7 +129,7 @@ public:
             target->Shutdown(ctx);
         }
 
-        for (auto& x : TVector<TActorId>{Discoverer, YdbProxy}) {
+        for (auto& x : TVector<TActorId>{TargetDiscoverer, TenantResolver, YdbProxy}) {
             if (auto actorId = std::exchange(x, {})) {
                 ctx.Send(actorId, new TEvents::TEvPoison());
             }
@@ -136,6 +148,7 @@ public:
 private:
     const ui64 ReplicationId;
     const TPathId PathId;
+    TString Tenant;
 
     NKikimrReplication::TReplicationConfig Config;
     EState State = EState::Ready;
@@ -143,7 +156,8 @@ private:
     ui64 NextTargetId = 1;
     THashMap<ui64, THolder<ITarget>> Targets;
     TActorId YdbProxy;
-    TActorId Discoverer;
+    TActorId TenantResolver;
+    TActorId TargetDiscoverer;
 
 }; // TImpl
 
@@ -185,6 +199,10 @@ TReplication::ITarget* TReplication::FindTarget(ui64 id) {
     return Impl->FindTarget(id);
 }
 
+void TReplication::RemoveTarget(ui64 id) {
+    return Impl->RemoveTarget(id);
+}
+
 void TReplication::Progress(const TActorContext& ctx) {
     Impl->Progress(ctx);
 }
@@ -195,6 +213,10 @@ void TReplication::Shutdown(const TActorContext& ctx) {
 
 ui64 TReplication::GetId() const {
     return Impl->ReplicationId;
+}
+
+const TPathId& TReplication::GetPathId() const {
+    return Impl->PathId;
 }
 
 void TReplication::SetState(EState state, TString issue) {
@@ -217,9 +239,24 @@ ui64 TReplication::GetNextTargetId() const {
     return Impl->NextTargetId;
 }
 
-} // NController
-} // NReplication
-} // NKikimr
+void TReplication::SetTenant(const TString& value) {
+    Impl->Tenant = value;
+    Impl->TenantResolver = {};
+}
+
+const TString& TReplication::GetTenant() const {
+    return Impl->Tenant;
+}
+
+void TReplication::SetDropOp(const TActorId& sender, const std::pair<ui64, ui32>& opId) {
+    DropOp = {sender, opId};
+}
+
+const std::optional<TReplication::TDropOp>& TReplication::GetDropOp() const {
+    return DropOp;
+}
+
+}
 
 Y_DECLARE_OUT_SPEC(, NKikimrReplication::TReplicationConfig::TargetCase, stream, value) {
     stream << static_cast<int>(value);

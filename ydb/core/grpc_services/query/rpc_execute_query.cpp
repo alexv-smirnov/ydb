@@ -1,4 +1,5 @@
 #include "service_query.h"
+#include "query_helpers.h"
 
 #include <ydb/core/actorlib_impl/long_timer.h>
 #include <ydb/core/base/appdata.h>
@@ -18,49 +19,6 @@ using namespace NActors;
 
 using TEvExecuteQueryRequest = TGrpcRequestNoOperationCall<Ydb::Query::ExecuteQueryRequest,
     Ydb::Query::ExecuteQueryResponsePart>;
-
-std::tuple<Ydb::StatusIds::StatusCode, NYql::TIssues> FillKqpRequest(
-    const Ydb::Query::ExecuteQueryRequest& req, NKikimrKqp::TEvQueryRequest& kqpRequest)
-{
-    kqpRequest.MutableRequest()->MutableYdbParameters()->insert(req.parameters().begin(), req.parameters().end());
-    switch (req.exec_mode()) {
-        case Ydb::Query::EXEC_MODE_EXECUTE:
-            kqpRequest.MutableRequest()->SetAction(NKikimrKqp::QUERY_ACTION_EXECUTE);
-            break;
-        default: {
-            NYql::TIssues issues;
-            issues.AddIssue(MakeIssue(NKikimrIssues::TIssuesIds::DEFAULT_ERROR, "Unexpected query mode"));
-            return {Ydb::StatusIds::BAD_REQUEST, issues};
-        }
-    }
-
-    kqpRequest.MutableRequest()->SetType(NKikimrKqp::QUERY_TYPE_SQL_QUERY);
-    kqpRequest.MutableRequest()->SetKeepSession(false);
-
-    // TODO: Use tx control from request.
-    kqpRequest.MutableRequest()->MutableTxControl()->mutable_begin_tx()->mutable_serializable_read_write();
-    kqpRequest.MutableRequest()->MutableTxControl()->set_commit_tx(true);
-
-    switch (req.query_case()) {
-        case Ydb::Query::ExecuteQueryRequest::kQueryContent: {
-            NYql::TIssues issues;
-            if (!CheckQuery(req.query_content().text(), issues)) {
-                return {Ydb::StatusIds::BAD_REQUEST, issues};
-            }
-
-            kqpRequest.MutableRequest()->SetQuery(req.query_content().text());
-            break;
-        }
-
-        default: {
-            NYql::TIssues issues;
-            issues.AddIssue(MakeIssue(NKikimrIssues::TIssuesIds::DEFAULT_ERROR, "Unexpected query option"));
-            return {Ydb::StatusIds::BAD_REQUEST, issues};
-        }
-    }
-
-    return {Ydb::StatusIds::SUCCESS, {}};
-}
 
 class RpcFlowControlState {
 public:
@@ -305,7 +263,7 @@ private:
 
     void UnexpectedEvent(const TString& state, TAutoPtr<NActors::IEventHandle>& ev, const TActorContext& ctx) {
         InternalError(TStringBuilder() << "TExecuteQueryRPC in state " << state << " received unexpected event " <<
-            TypeName(*ev.Get()->GetBase()) << Sprintf("(0x%08" PRIx32 ")", ev->GetTypeRewrite()), ctx);
+            ev->GetTypeName() << Sprintf("(0x%08" PRIx32 ")", ev->GetTypeRewrite()), ctx);
     }
 
 private:
@@ -326,11 +284,11 @@ private:
 
 void DoExecuteQueryRequest(std::unique_ptr<IRequestNoOpCtx> p, const IFacilityProvider& f) {
     // Use default channel buffer size as inflight limit
-    ui64 inflightLimitBytes = f.GetAppConfig().GetTableServiceConfig().GetResourceManager().GetChannelBufferSize();
+    ui64 inflightLimitBytes = f.GetAppConfig()->GetTableServiceConfig().GetResourceManager().GetChannelBufferSize();
 
     auto* req = dynamic_cast<TEvExecuteQueryRequest*>(p.release());
     Y_VERIFY(req != nullptr, "Wrong using of TGRpcRequestWrapper");
-    TActivationContext::AsActorContext().Register(new TExecuteQueryRPC(req, inflightLimitBytes));
+    f.RegisterActor(new TExecuteQueryRPC(req, inflightLimitBytes));
 }
 
 } // namespace NKikimr::NGRpcService

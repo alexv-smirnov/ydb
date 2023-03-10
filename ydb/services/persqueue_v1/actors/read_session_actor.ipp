@@ -677,7 +677,7 @@ void TReadSessionActor<UseMigrationProtocol>::Handle(typename TEvReadInit::TPtr&
         TopicsToResolve.insert(path);
     }
 
-    if (Request->GetInternalToken().empty()) {
+    if (Request->GetSerializedToken().empty()) {
         if (AppData(ctx)->PQConfig.GetRequireCredentialsInNewProtocol()) {
             return CloseSession(PersQueue::ErrorCode::ACCESS_DENIED,
                 "unauthenticated access is forbidden, please provide credentials", ctx);
@@ -685,7 +685,7 @@ void TReadSessionActor<UseMigrationProtocol>::Handle(typename TEvReadInit::TPtr&
     } else {
         Y_VERIFY(Request->GetYdbToken());
         Auth = *(Request->GetYdbToken());
-        Token = new NACLib::TUserToken(Request->GetInternalToken());
+        Token = new NACLib::TUserToken(Request->GetSerializedToken());
     }
 
     TopicsList = TopicsHandler.GetReadTopicsList(TopicsToResolve, ReadOnlyLocal,
@@ -947,7 +947,7 @@ void TReadSessionActor<UseMigrationProtocol>::InitSession(const TActorContext& c
         NumPartitionsFromTopic[holder.FullConverter->GetInternalName()] = 0;
     }
 
-    ctx.Schedule(CHECK_ACL_DELAY, new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
+    ctx.Schedule(TDuration::Seconds(AppData(ctx)->PQConfig.GetACLRetryTimeoutSec()), new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
 }
 
 template <bool UseMigrationProtocol>
@@ -1402,8 +1402,8 @@ void TReadSessionActor<UseMigrationProtocol>::ProcessBalancerDead(ui64 tabletId,
 
 template <bool UseMigrationProtocol>
 void TReadSessionActor<UseMigrationProtocol>::Handle(NGRpcService::TGRpcRequestProxy::TEvRefreshTokenResponse::TPtr& ev , const TActorContext& ctx) {
-    if (ev->Get()->Authenticated && !ev->Get()->InternalToken.empty()) {
-        Token = new NACLib::TUserToken(ev->Get()->InternalToken);
+    if (ev->Get()->Authenticated && ev->Get()->InternalToken && !ev->Get()->InternalToken->GetSerializedToken().empty()) {
+        Token = ev->Get()->InternalToken;
         ForceACLCheck = true;
 
         if constexpr (!UseMigrationProtocol) {
@@ -1841,9 +1841,10 @@ void TReadSessionActor<UseMigrationProtocol>::Handle(TEvents::TEvWakeup::TPtr& e
 
 template <bool UseMigrationProtocol>
 void TReadSessionActor<UseMigrationProtocol>::RecheckACL(const TActorContext& ctx) {
-    ctx.Schedule(CHECK_ACL_DELAY, new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
-
     const auto timeout = TDuration::Seconds(AppData(ctx)->PQConfig.GetACLRetryTimeoutSec());
+
+    ctx.Schedule(timeout, new TEvents::TEvWakeup(EWakeupTag::RecheckAcl));
+
     const bool authTimedOut = (ctx.Now() - LastACLCheckTimestamp) > timeout;
 
     if (Token && !AuthInitActor && (ForceACLCheck || (authTimedOut && RequestNotChecked))) {

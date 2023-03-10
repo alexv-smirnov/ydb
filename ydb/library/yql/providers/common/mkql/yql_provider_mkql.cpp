@@ -25,6 +25,33 @@ using namespace NKikimr::NMiniKQL;
 namespace NYql {
 namespace NCommon {
 
+TRuntimeNode WideTopImpl(const TExprNode& node, TMkqlBuildContext& ctx,
+    TRuntimeNode(TProgramBuilder::*func)(TRuntimeNode, TRuntimeNode, const std::vector<std::pair<ui32, TRuntimeNode>>&)) {
+    const auto flow = MkqlBuildExpr(node.Head(), ctx);
+    const auto count = MkqlBuildExpr(*node.Child(1U), ctx);
+
+    std::vector<std::pair<ui32, TRuntimeNode>> directions;
+    directions.reserve(node.Tail().ChildrenSize());
+    node.Tail().ForEachChild([&](const TExprNode& dir) {
+        directions.emplace_back(std::make_pair(::FromString<ui32>(dir.Head().Content()), MkqlBuildExpr(dir.Tail(), ctx)));
+    });
+
+    return (ctx.ProgramBuilder.*func)(flow, count, directions);
+}
+
+TRuntimeNode WideSortImpl(const TExprNode& node, TMkqlBuildContext& ctx,
+    TRuntimeNode(TProgramBuilder::*func)(TRuntimeNode, const std::vector<std::pair<ui32, TRuntimeNode>>&)) {
+    const auto flow = MkqlBuildExpr(node.Head(), ctx);
+
+    std::vector<std::pair<ui32, TRuntimeNode>> directions;
+    directions.reserve(node.Tail().ChildrenSize());
+    node.Tail().ForEachChild([&](const TExprNode& dir) {
+        directions.emplace_back(std::make_pair(::FromString<ui32>(dir.Head().Content()), MkqlBuildExpr(dir.Tail(), ctx)));
+    });
+
+    return (ctx.ProgramBuilder.*func)(flow, directions);
+}
+
 TRuntimeNode CombineByKeyImpl(const TExprNode& node, TMkqlBuildContext& ctx) {
     NNodes::TCoCombineByKey combine(&node);
     const bool isStreamOrFlow = combine.Ref().GetTypeAnn()->GetKind() == ETypeAnnotationKind::Stream ||
@@ -745,29 +772,27 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
     });
 
     AddCallable("WideTop", [](const TExprNode& node, TMkqlBuildContext& ctx) {
-        const auto flow = MkqlBuildExpr(node.Head(), ctx);
-        const auto count = MkqlBuildExpr(*node.Child(1U), ctx);
-
-        std::vector<std::pair<ui32, TRuntimeNode>> directions;
-        directions.reserve(node.Tail().ChildrenSize());
-        node.Tail().ForEachChild([&](const TExprNode& dir) {
-            directions.emplace_back(std::make_pair(::FromString<ui32>(dir.Head().Content()), MkqlBuildExpr(dir.Tail(), ctx)));
-        });
-
-        return ctx.ProgramBuilder.WideTop(flow, count, directions);
+        return WideTopImpl(node, ctx, &TProgramBuilder::WideTop);
     });
 
     AddCallable("WideTopSort", [](const TExprNode& node, TMkqlBuildContext& ctx) {
-        const auto flow = MkqlBuildExpr(node.Head(), ctx);
-        const auto count = MkqlBuildExpr(*node.Child(1U), ctx);
+        return WideTopImpl(node, ctx, &TProgramBuilder::WideTopSort);
+    });
 
-        std::vector<std::pair<ui32, TRuntimeNode>> directions;
-        directions.reserve(node.Tail().ChildrenSize());
-        node.Tail().ForEachChild([&](const TExprNode& dir) {
-            directions.emplace_back(std::make_pair(::FromString<ui32>(dir.Head().Content()), MkqlBuildExpr(dir.Tail(), ctx)));
-        });
+    AddCallable("WideSort", [](const TExprNode& node, TMkqlBuildContext& ctx) {
+        return WideSortImpl(node, ctx, &TProgramBuilder::WideSort);
+    });
 
-        return ctx.ProgramBuilder.WideTopSort(flow, count, directions);
+    AddCallable("WideTopBlocks", [](const TExprNode& node, TMkqlBuildContext& ctx) {
+        return WideTopImpl(node, ctx, &TProgramBuilder::WideTopBlocks);
+    });
+
+    AddCallable("WideTopSortBlocks", [](const TExprNode& node, TMkqlBuildContext& ctx) {
+        return WideTopImpl(node, ctx, &TProgramBuilder::WideTopSortBlocks);
+    });
+
+    AddCallable("WideSortBlocks", [](const TExprNode& node, TMkqlBuildContext& ctx) {
+        return WideSortImpl(node, ctx, &TProgramBuilder::WideSortBlocks);
     });
 
     AddCallable("Iterable", [](const TExprNode& node, TMkqlBuildContext& ctx) {
@@ -2152,7 +2177,13 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
         return ctx.ProgramBuilder.NewNull();
     });
 
-    AddCallable({"AsTagged","Untag","WithWorld"}, [](const TExprNode& node, TMkqlBuildContext& ctx) {
+    AddCallable({ "AsTagged","Untag" }, [](const TExprNode& node, TMkqlBuildContext& ctx) {
+        auto input = MkqlBuildExpr(node.Head(), ctx);
+        auto returnType = BuildType(node, *node.GetTypeAnn(), ctx.ProgramBuilder);
+        return ctx.ProgramBuilder.Nop(input, returnType);
+    });
+
+    AddCallable({"WithWorld"}, [](const TExprNode& node, TMkqlBuildContext& ctx) {
         return MkqlBuildExpr(node.Head(), ctx);
     });
 
@@ -2221,7 +2252,7 @@ TMkqlCommonCallableCompiler::TShared::TShared() {
         YQL_ENSURE(node.ChildrenSize() == 8);
         std::string_view function = node.Head().Content();
         const auto runConfig = MkqlBuildExpr(*node.Child(1), ctx);
-        const auto userType = BuildType(*node.Child(2), *node.Child(2)->GetTypeAnn(), ctx.ProgramBuilder, true);
+        const auto userType = BuildType(*node.Child(2), *node.Child(2)->GetTypeAnn(), ctx.ProgramBuilder);
         const auto typeConfig = node.Child(3)->Content();
         const auto callableType = BuildType(node, *node.GetTypeAnn(), ctx.ProgramBuilder);
         const auto pos = ctx.ExprCtx.GetPosition(node.Pos());

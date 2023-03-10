@@ -10,6 +10,8 @@
 #include <ydb/core/tx/schemeshard/schemeshard_identificators.h>
 #include <ydb/core/tx/schemeshard/schemeshard_import.h>
 
+#include <ydb/public/sdk/cpp/client/ydb_driver/driver.h>
+
 #include <functional>
 
 namespace NSchemeShardUT_Private {
@@ -33,6 +35,7 @@ namespace NSchemeShardUT_Private {
         OPTION(ui32, NChannels, 4);
         OPTION(bool, EnablePipeRetries, true);
         OPTION(bool, RunFakeConfigDispatcher, false);
+        OPTION(bool, InitYdbDriver, false);
         OPTION(std::optional<bool>, EnableSystemViews, std::nullopt);
         OPTION(std::optional<bool>, EnablePersistentQueryStats, std::nullopt);
         OPTION(std::optional<bool>, EnablePersistentPartitionStats, std::nullopt);
@@ -49,6 +52,7 @@ namespace NSchemeShardUT_Private {
         OPTION(std::optional<bool>, EnableChangefeedInitialScan, std::nullopt);
         OPTION(std::optional<bool>, EnableNotNullDataColumns, std::nullopt);
         OPTION(std::optional<bool>, EnableAlterDatabaseCreateHiveFirst, std::nullopt);
+        OPTION(std::optional<bool>, EnableTopicDiskSubDomainQuota, std::nullopt);
 
         #undef OPTION
     };
@@ -66,6 +70,7 @@ namespace NSchemeShardUT_Private {
         TActorId TxReliablePropose;
         ui32 ChannelsCount;
         TActorId MeteringFake;
+        THolder<NYdb::TDriver> YdbDriver;
 
     public:
         TTestEnv(TTestActorRuntime& runtime, ui32 nchannels = 4, bool enablePipeRetries = true,

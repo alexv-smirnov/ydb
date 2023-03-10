@@ -1,11 +1,12 @@
 #include "kqp_yql.h"
 
 #include <ydb/library/yql/core/yql_expr_type_annotation.h>
+#include <ydb/library/yql/core/expr_nodes/yql_expr_nodes.h>
 
 namespace NYql {
 
 using namespace NKikimr;
-using namespace NKikimr::NKqp;
+//using namespace NKikimr::NKqp;
 using namespace NNodes;
 
 static EPhysicalQueryType GetPhysicalQueryType(const TStringBuf& value) {
@@ -15,6 +16,8 @@ static EPhysicalQueryType GetPhysicalQueryType(const TStringBuf& value) {
         return EPhysicalQueryType::Scan;
     } else if (value == "query") {
         return EPhysicalQueryType::Query;
+    } else if (value == "federated_query") {
+        return EPhysicalQueryType::FederatedQuery;
     } else {
         YQL_ENSURE(false, "Unknown physical query type: " << value);
     }
@@ -30,6 +33,8 @@ static TStringBuf PhysicalQueryTypeToString(EPhysicalQueryType type) {
             return "scan_query";
         case EPhysicalQueryType::Query:
             return "query";
+        case EPhysicalQueryType::FederatedQuery:
+            return "federated_query";
     }
 
     YQL_ENSURE(false, "Unexpected physical query type: " << type);

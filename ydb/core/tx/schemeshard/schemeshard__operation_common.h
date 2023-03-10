@@ -18,6 +18,8 @@ NKikimrSchemeOp::TModifyScheme MoveTableIndexTask(NKikimr::NSchemeShard::TPath& 
 
 THolder<TEvHive::TEvCreateTablet> CreateEvCreateTablet(TPathElement::TPtr targetPath, TShardIdx shardIdx, TOperationContext& context);
 
+void AbortUnsafeDropOperation(const TOperationId& operationId, const TTxId& txId, TOperationContext& context);
+
 namespace NTableState {
 
 bool CollectProposeTransactionResults(const TOperationId& operationId, const TEvDataShard::TEvProposeTransactionResult::TPtr& ev, TOperationContext& context);
@@ -130,17 +132,15 @@ public:
 } // namespace NTableState
 
 class TCreateParts: public TSubOperationState {
-private:
-    TOperationId OperationId;
+    const TOperationId OperationId;
 
     TString DebugHint() const override {
-        return TStringBuilder()
-                << "TCreateParts"
-                << " operationId: " << OperationId;
+        return TStringBuilder() << "TCreateParts"
+            << " opId# " << OperationId;
     }
 
 public:
-    TCreateParts(TOperationId id)
+    explicit TCreateParts(const TOperationId& id)
         : OperationId(id)
     {
         IgnoreMessages(DebugHint(), {});
@@ -414,40 +414,91 @@ public:
     }
 };
 
-
-class TDone: public TSubOperationState {
+class TDeleteParts: public TSubOperationState {
 protected:
-    TOperationId OperationId;
+    const TOperationId OperationId;
+    const TTxState::ETxState NextState;
 
     TString DebugHint() const override {
-        return TStringBuilder()
-                << "TDone operationId#" << OperationId;
+        return TStringBuilder() << "TDeleteParts"
+            << " opId# " << OperationId << " ";
+    }
+
+    void DeleteShards(TOperationContext& context) {
+        const auto* txState = context.SS->FindTx(OperationId);
+
+        // Initiate asynchronous deletion of all shards
+        for (const auto& shard : txState->Shards) {
+            context.OnComplete.DeleteShard(shard.Idx);
+        }
     }
 
 public:
-    TDone(TOperationId id)
+    explicit TDeleteParts(const TOperationId& id, TTxState::ETxState nextState = TTxState::Propose)
+        : OperationId(id)
+        , NextState(nextState)
+    {
+        IgnoreMessages(DebugHint(), {});
+    }
+
+    bool ProgressState(TOperationContext& context) override {
+        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+            "[" << context.SS->TabletID() << "] " << DebugHint() << "ProgressState");
+        DeleteShards(context);
+
+        NIceDb::TNiceDb db(context.GetDB());
+        context.SS->ChangeTxState(db, OperationId, NextState);
+        return true;
+    }
+};
+
+class TDeletePartsAndDone: public TDeleteParts {
+public:
+    explicit TDeletePartsAndDone(const TOperationId& id)
+        : TDeleteParts(id)
+    {
+        Y_UNUSED(NextState);
+    }
+
+    bool ProgressState(TOperationContext& context) override {
+        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
+            "[" << context.SS->TabletID() << "] " << DebugHint() << "ProgressState");
+        DeleteShards(context);
+
+        context.OnComplete.DoneOperation(OperationId);
+        return true;
+    }
+};
+
+class TDone: public TSubOperationState {
+protected:
+    const TOperationId OperationId;
+
+    TString DebugHint() const override {
+        return TStringBuilder() << "TDone"
+            << " opId# " << OperationId;
+    }
+
+public:
+    explicit TDone(const TOperationId& id)
         : OperationId(id)
     {
         IgnoreMessages(DebugHint(), AllIncomingEvents());
     }
 
     bool ProgressState(TOperationContext& context) override {
-        TTabletId ssId = context.SS->SelfTabletId();
-
         LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                   DebugHint() << " ProgressState"
-                               << ", at schemeshard" << ssId);
+            "[" << context.SS->TabletID() << "] " << DebugHint() << "ProgressState");
 
-        TTxState* txState = context.SS->FindTx(OperationId);
+        const auto* txState = context.SS->FindTx(OperationId);
 
-        TPathId pathId = txState->TargetPathId;
+        const auto& pathId = txState->TargetPathId;
         Y_VERIFY(context.SS->PathsById.contains(pathId));
         TPathElement::TPtr path = context.SS->PathsById.at(pathId);
-        Y_VERIFY_S(path->PathState != TPathElement::EPathState::EPathStateNoChanges,
-                   "with context"
-                       << ", PathState: " << NKikimrSchemeOp::EPathState_Name(path->PathState)
-                       << ", PathId: " << path->PathId
-                       << ", PathName: " << path->Name);
+        Y_VERIFY_S(path->PathState != TPathElement::EPathState::EPathStateNoChanges, "with context"
+            << ", PathState: " << NKikimrSchemeOp::EPathState_Name(path->PathState)
+            << ", PathId: " << path->PathId
+            << ", PathName: " << path->Name);
 
         if (path->IsPQGroup() && txState->IsCreate()) {
             TPathElement::TPtr parentDir = context.SS->PathsById.at(path->ParentPathId);
@@ -487,7 +538,6 @@ public:
         return true;
     }
 };
-
 
 namespace NPQState {
 
@@ -584,7 +634,7 @@ public:
                    "topicName is empty"
                        <<", pathId: " << txState->TargetPathId);
 
-        TPersQueueGroupInfo::TPtr pqGroup = context.SS->PersQueueGroups[txState->TargetPathId];
+        TTopicInfo::TPtr pqGroup = context.SS->Topics[txState->TargetPathId];
         Y_VERIFY_S(pqGroup,
                    "pqGroup is null"
                        << ", pathId " << txState->TargetPathId);
@@ -616,14 +666,14 @@ public:
             TTabletId tabletId = context.SS->ShardInfos.at(idx).TabletID;
 
             if (shard.TabletType == ETabletType::PersQueue) {
-                TPQShardInfo::TPtr pqShard = pqGroup->Shards.at(idx);
+                TTopicTabletInfo::TPtr pqShard = pqGroup->Shards.at(idx);
                 Y_VERIFY_S(pqShard, "pqShard is null, idx is " << idx << " has was "<< THash<TShardIdx>()(idx));
 
                 LOG_DEBUG_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
                             "Propose configure PersQueue"
                                 << ", opId: " << OperationId
                                 << ", tabletId: " << tabletId
-                                << ", PQInfos size: " << pqShard->PQInfos.size()
+                                << ", Partitions size: " << pqShard->Partitions.size()
                                 << ", at schemeshard: " << ssId);
 
                 TAutoPtr<TEvPersQueue::TEvUpdateConfig> event(new TEvPersQueue::TEvUpdateConfig());
@@ -643,7 +693,7 @@ public:
 
                 event->Record.MutableTabletConfig()->SetVersion(pqGroup->AlterData->AlterVersion);
 
-                for (const auto& pq : pqShard->PQInfos) {
+                for (const auto& pq : pqShard->Partitions) {
                     event->Record.MutableTabletConfig()->AddPartitionIds(pq.PqId);
 
                     auto& partition = *event->Record.MutableTabletConfig()->AddPartitions();
@@ -713,7 +763,7 @@ public:
                     tablet->SetTabletId(ui64(tabletId));
                     tablet->SetOwner(context.SS->TabletID());
                     tablet->SetIdx(ui64(p.first.GetLocalId()));
-                    for (const auto& pq : pqShard->PQInfos) {
+                    for (const auto& pq : pqShard->Partitions) {
                         auto info = event->Record.AddPartitions();
                         info->SetPartition(pq.PqId);
                         info->SetTabletId(ui64(tabletId));
@@ -791,7 +841,7 @@ public:
         context.SS->ClearDescribePathCaches(path);
         context.OnComplete.PublishToSchemeBoard(OperationId, pathId);
 
-        TPersQueueGroupInfo::TPtr pqGroup = context.SS->PersQueueGroups[pathId];
+        TTopicInfo::TPtr pqGroup = context.SS->Topics[pathId];
         pqGroup->FinishAlter();
         context.SS->PersistPersQueueGroup(db, pathId, pqGroup);
         context.SS->PersistRemovePersQueueGroupAlter(db, pathId);
@@ -817,7 +867,7 @@ public:
     }
 };
 
-}
+} // NPQState
 
 namespace NBSVState {
 
@@ -1034,7 +1084,7 @@ public:
     }
 };
 
-}
+} // NBSVState
 
 namespace NCdcStreamState {
 

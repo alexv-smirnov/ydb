@@ -62,17 +62,20 @@ public:
 
     ui64 Partition(const TDqSettings&, size_t maxPartitions, const TExprNode& node, TVector<TString>& partitions, TString*, TExprContext&, bool) override {
         TString cluster;
-        std::vector<std::vector<std::pair<TString, ui64>>> parts;
+        std::vector<std::vector<TPath>> parts;
         if (const TMaybeNode<TDqSource> source = &node) {
             cluster = source.Cast().DataSource().Cast<TS3DataSource>().Cluster().Value();
             const auto settings = source.Cast().Settings().Cast<TS3SourceSettingsBase>();
             for (auto i = 0u; i < settings.Paths().Size(); ++i) {
-                const auto& path = settings.Paths().Item(i);
+                const auto& packed = settings.Paths().Item(i);
                 TPathList paths;
-                UnpackPathsList(path.Data().Literal().Value(), FromString<bool>(path.IsText().Literal().Value()), paths);
+                UnpackPathsList(
+                    packed.Data().Literal().Value(),
+                    FromString<bool>(packed.IsText().Literal().Value()),
+                    paths);
                 parts.reserve(parts.size() + paths.size());
-                for (auto& p : paths) {
-                    parts.emplace_back(1U, std::pair(std::get<0>(p), std::get<1>(p)));
+                for (const auto& path : paths) {
+                    parts.emplace_back(1U, path);
                 }
             }
         }
@@ -104,7 +107,10 @@ public:
             NS3::TRange range;
             range.SetStartPathIndex(startIdx);
             TFileTreeBuilder builder;
-            std::for_each(part.cbegin(), part.cend(), [&builder, &startIdx](const std::pair<TString, ui64>& f) { builder.AddPath(f.first, f.second); ++startIdx; });
+            std::for_each(part.cbegin(), part.cend(), [&builder, &startIdx](const TPath& f) {
+                builder.AddPath(f.Path, f.Size, f.IsDirectory);
+                ++startIdx;
+            });
             builder.Save(&range);
 
             partitions.emplace_back();
@@ -186,10 +192,9 @@ public:
                     YQL_ENSURE(resolveStatus != IArrowResolver::ERROR);
                     supportedArrowTypes = resolveStatus == IArrowResolver::OK;
                 }
-
                 return Build<TDqSourceWrap>(ctx, read->Pos())
                     .Input<TS3ParseSettingsBase>()
-                        .CallableName((supportedArrowTypes && format == "parquet") ? TS3ArrowSettings::CallableName() :
+                        .CallableName((supportedArrowTypes && format == "parquet") ? TS3ArrowSettings::CallableName():
                                                                                      TS3ParseSettings::CallableName())
                         .Paths(s3ReadObject.Object().Paths())
                         .Token<TCoSecureParam>()
@@ -216,38 +221,42 @@ public:
                 auto readSettings = s3ReadObject.Object().Settings().Cast().Ptr();
 
                 int sizeLimitIndex = -1;
-                for (size_t childInd = 0; childInd < readSettings->ChildrenSize(); ++childInd) {
-                    if (readSettings->Child(childInd)->Head().Content() == "readmaxbytes") {
+                int pathPatternIndex = -1;
+                int pathPatternVariantIndex = -1;
+                for (size_t childInd = 0; childInd < readSettings->ChildrenSize();
+                     ++childInd) {
+                    auto keyName = readSettings->Child(childInd)->Head().Content();
+                    if (sizeLimitIndex == -1 && keyName == "readmaxbytes") {
                         sizeLimitIndex = childInd;
-                        break;
+                    } else if (pathPatternIndex == -1 && keyName == "pathpattern") {
+                        pathPatternIndex = childInd;
+                    } else if (pathPatternVariantIndex == -1 && keyName == "pathpatternvariant") {
+                        pathPatternVariantIndex = childInd;
                     }
                 }
 
-                if (sizeLimitIndex != -1) {
-                    return Build<TDqSourceWrap>(ctx, read->Pos())
+                auto emptyNode = Build<TCoVoid>(ctx, read->Pos()).Done().Ptr();
+                return Build<TDqSourceWrap>(ctx, read->Pos())
                     .Input<TS3SourceSettings>()
                         .Paths(s3ReadObject.Object().Paths())
                         .Token<TCoSecureParam>()
                             .Name().Build(token)
                             .Build()
-                        .SizeLimit(readSettings->Child(sizeLimitIndex)->TailPtr())
+                        .SizeLimit(
+                            sizeLimitIndex != -1 ? readSettings->Child(sizeLimitIndex)->TailPtr()
+                                                 : emptyNode)
+                        .PathPattern(
+                            pathPatternIndex != -1
+                                ? readSettings->Child(pathPatternIndex)->TailPtr()
+                                : emptyNode)
+                        .PathPatternVariant(
+                            pathPatternVariantIndex != -1 ? readSettings->Child(pathPatternVariantIndex)->TailPtr()
+                                               : emptyNode)
                         .Build()
                     .RowType(ExpandType(s3ReadObject.Pos(), *rowType, ctx))
                     .DataSource(s3ReadObject.DataSource().Cast<TCoDataSource>())
                     .Settings(ctx.NewList(s3ReadObject.Object().Pos(), std::move(settings)))
                     .Done().Ptr();
-                }
-                return Build<TDqSourceWrap>(ctx, read->Pos())
-                .Input<TS3SourceSettings>()
-                    .Paths(s3ReadObject.Object().Paths())
-                    .Token<TCoSecureParam>()
-                        .Name().Build(token)
-                        .Build()
-                    .Build()
-                .RowType(ExpandType(s3ReadObject.Pos(), *rowType, ctx))
-                .DataSource(s3ReadObject.DataSource().Cast<TCoDataSource>())
-                .Settings(ctx.NewList(s3ReadObject.Object().Pos(), std::move(settings)))
-                .Done().Ptr();
             }
         }
         return read;
@@ -272,6 +281,9 @@ public:
                 const auto parseSettings = mayParseSettings.Cast();
                 srcDesc.SetFormat(parseSettings.Format().StringValue().c_str());
                 srcDesc.SetArrow(bool(parseSettings.Maybe<TS3ArrowSettings>()));
+                srcDesc.SetThreadPool(State_->Configuration->ArrowThreadPool.Get().GetOrElse(true));
+                srcDesc.SetParallelRowGroupCount(State_->Configuration->ArrowParallelRowGroupCount.Get().GetOrElse(1));
+                srcDesc.SetRowGroupReordering(State_->Configuration->ArrowRowGroupReordering.Get().GetOrElse(false));
 
                 const TStructExprType* fullRowType = parseSettings.RowType().Ref().GetTypeAnn()->Cast<TTypeExprType>()->GetType()->Cast<TStructExprType>();
                 // exclude extra columns to get actual row type we need to read from input
@@ -286,14 +298,31 @@ public:
                 if (const auto maySettings = parseSettings.Settings()) {
                     const auto& settings = maySettings.Cast();
                     for (auto i = 0U; i < settings.Ref().ChildrenSize(); ++i) {
-                        srcDesc.MutableSettings()->insert({ TString(settings.Ref().Child(i)->Head().Content()), TString(settings.Ref().Child(i)->Tail().IsAtom() ? settings.Ref().Child(i)->Tail().Content() : settings.Ref().Child(i)->Tail().Head().Content()) });
+                        srcDesc.MutableSettings()->insert(
+                            {TString(settings.Ref().Child(i)->Head().Content()),
+                             TString(
+                                 settings.Ref().Child(i)->Tail().IsAtom()
+                                     ? settings.Ref().Child(i)->Tail().Content()
+                                     : settings.Ref().Child(i)->Tail().Head().Content())});
                     }
                 }
             } else if (const auto maySourceSettings = source.Settings().Maybe<TS3SourceSettings>()){
                 const auto sourceSettings = maySourceSettings.Cast();
-                auto sizeLimit = sourceSettings.SizeLimit();
+                auto sizeLimit = sourceSettings.SizeLimit().Maybe<TCoAtom>();
                 if (sizeLimit.IsValid()) {
-                    srcDesc.MutableSettings()->insert({"sizeLimit", sizeLimit.Cast().StringValue()});
+                    srcDesc.MutableSettings()->insert(
+                        {"sizeLimit", sizeLimit.Cast().StringValue()});
+                }
+                auto pathPattern = sourceSettings.PathPattern().Maybe<TCoAtom>();
+                if (pathPattern.IsValid()) {
+                    srcDesc.MutableSettings()->insert(
+                        {"pathpattern", pathPattern.Cast().StringValue()});
+                }
+                auto pathPatternVariant =
+                    sourceSettings.PathPatternVariant().Maybe<TCoAtom>();
+                if (pathPatternVariant.IsValid()) {
+                    srcDesc.MutableSettings()->insert(
+                        {"pathpatternvariant", pathPatternVariant.Cast().StringValue()});
                 }
             }
 

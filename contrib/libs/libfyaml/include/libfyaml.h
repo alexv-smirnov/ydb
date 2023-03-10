@@ -1011,6 +1011,22 @@ fy_token_scalar_style(struct fy_token *fyt)
 	FY_EXPORT;
 
 /**
+ * fy_token_scalar_is_null() - Test whether the scalar is null (content)
+ *
+ * @fyt: The scalar token to check for NULLity.
+ *  
+ * Note that this is different than null of the YAML type system.
+ * It is null as in null content. It is also different than an
+ * empty scalar.
+ *
+ * Returns:
+ * true if is a null scalar, false otherwise
+ */
+bool
+fy_token_scalar_is_null(struct fy_token *fyt)
+	FY_EXPORT;
+
+/**
  * fy_token_get_text() - Get text (and length of it) of a token
  *
  * This method will return a pointer to the text of a token
@@ -1586,6 +1602,7 @@ enum fy_emitter_write_type {
  * @FYECF_MODE_JSON_ONELINE: Emit using JSON mode (non type preserving, one line)
  * @FYECF_MODE_DEJSON: Emit YAML trying to pretify JSON
  * @FYECF_MODE_PRETTY: Emit YAML that tries to look good
+ * @FYECF_MODE_MANUAL: Emit YAML respecting all manual style hints (reformats if needed)
  * @FYECF_DOC_START_MARK_AUTO: Automatically generate document start markers if required
  * @FYECF_DOC_START_MARK_OFF: Do not generate document start markers
  * @FYECF_DOC_START_MARK_ON: Always generate document start markers
@@ -1631,6 +1648,7 @@ enum fy_emitter_cfg_flags {
 	FYECF_MODE_JSON_ONELINE 	= FYECF_MODE(6),
 	FYECF_MODE_DEJSON 		= FYECF_MODE(7),
 	FYECF_MODE_PRETTY 		= FYECF_MODE(8),
+	FYECF_MODE_MANUAL 		= FYECF_MODE(9),
 	FYECF_DOC_START_MARK_AUTO	= FYECF_DOC_START_MARK(0),
 	FYECF_DOC_START_MARK_OFF	= FYECF_DOC_START_MARK(1),
 	FYECF_DOC_START_MARK_ON		= FYECF_DOC_START_MARK(2),
@@ -4776,6 +4794,76 @@ fy_document_register_meta(struct fy_document *fyd,
 void
 fy_document_unregister_meta(struct fy_document *fyd)
 	FY_EXPORT;
+
+/**
+ * fy_document_get_userdata() - Get the userdata pointer of a document
+ *
+ * Return the userdata pointer of a document.
+ *
+ * @fyn: The document to get userdata from
+ *
+ * Returns:
+ * The stored userdata pointer
+ */
+void *
+fy_document_get_userdata(struct fy_document *fyd)
+	FY_EXPORT;
+
+/**
+ * fy_document_set_userdata() - Set the userdata pointer of a document
+ *
+ * Set the userdata pointer of a document. If @userdata is NULL
+ * then clear the userdata.
+ *
+ * @fyd: The document to set userdata
+ * @userdata: The userdata pointer
+ *
+ * Returns:
+ * 0 on success, -1 on error
+ */
+int
+fy_document_set_userdata(struct fy_document *fyd, void *userdata)
+	FY_EXPORT;
+
+/**
+ * typedef fy_document_on_destroy_fn - Userdata clear method
+ *
+ * This is the callback called just before document is destroyed.
+ *
+ * @fyd: The document which will be destroyed
+ * @userdata: The userdata pointer of a document
+ *
+ */
+typedef void (*fy_document_on_destroy_fn)(struct fy_document *fyd, void *userdata);
+
+/**
+ * fy_document_register_on_destroy() - Register an on_destroy hook
+ *
+ * Register an on_destroy hook, to be called when
+ * the document is freed via a final call to fy_document_destroy().
+ *
+ * @fyd: The document which the hook is registered to
+ * @on_destroy_fn: The on_destroy hook method
+ *
+ * Returns:
+ * 0 on success, -1 if another hook is already registered.
+ */
+int
+fy_document_register_on_destroy(struct fy_document *fyd,
+				fy_document_on_destroy_fn on_destroy_fn)
+	FY_EXPORT;
+
+/**
+ * fy_document_unregister_on_destroy() - Unregister an on_destroy hook
+ *
+ * Unregister the currently active on_destroy hook.
+ *
+ * @fyd: The document to unregister it's on_destroy hook.
+ */
+void
+fy_document_unregister_on_destroy(struct fy_document *fyd)
+	FY_EXPORT;
+
 
 /**
  * fy_node_set_marker() - Set a marker of a node

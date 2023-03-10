@@ -116,7 +116,7 @@ bool FillKqpRequest(const Ydb::Table::ExecuteScanQueryRequest& req, NKikimrKqp::
 
     auto& query = req.query();
     switch (query.query_case()) {
-        case Query::kYqlText: {
+        case Ydb::Table::Query::kYqlText: {
             NYql::TIssues issues;
             if (!CheckQuery(query.yql_text(), issues)) {
                 error = TParseRequestError(Ydb::StatusIds::BAD_REQUEST, issues);
@@ -127,7 +127,7 @@ bool FillKqpRequest(const Ydb::Table::ExecuteScanQueryRequest& req, NKikimrKqp::
             break;
         }
 
-        case Query::kId: {
+        case Ydb::Table::Query::kId: {
             NYql::TIssues issues;
             issues.AddIssue(MakeIssue(NKikimrIssues::TIssuesIds::DEFAULT_ERROR,
                 "Specifying query by ID not supported in scan execution."));
@@ -398,7 +398,7 @@ private:
     void SetTimeoutTimer(TDuration timeout, const TActorContext& ctx) {
         LOG_DEBUG_S(ctx, NKikimrServices::RPC_REQUEST, this->SelfId() << " Set stream timeout timer for " << timeout);
 
-        auto *ev = new IEventHandle(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup(EWakeupTag::TimeoutTag));
+        auto *ev = new IEventHandleFat(this->SelfId(), this->SelfId(), new TEvents::TEvWakeup(EWakeupTag::TimeoutTag));
         TimeoutTimerCookieHolder_.Reset(ISchedulerCookie::Make2Way());
         CreateLongTimer(ctx, timeout, ev, 0, TimeoutTimerCookieHolder_.Get());
     }
@@ -505,10 +505,10 @@ private:
 } // namespace
 
 void DoExecuteScanQueryRequest(std::unique_ptr<IRequestNoOpCtx> p, const IFacilityProvider& f) {
-    ui64 rpcBufferSize = f.GetAppConfig().GetTableServiceConfig().GetResourceManager().GetChannelBufferSize();
+    ui64 rpcBufferSize = f.GetAppConfig()->GetTableServiceConfig().GetResourceManager().GetChannelBufferSize();
     auto* req = dynamic_cast<TEvStreamExecuteScanQueryRequest*>(p.release());
     Y_VERIFY(req != nullptr, "Wrong using of TGRpcRequestWrapper");
-    TActivationContext::AsActorContext().Register(new TStreamExecuteScanQueryRPC(req, rpcBufferSize));
+    f.RegisterActor(new TStreamExecuteScanQueryRPC(req, rpcBufferSize));
 }
 
 } // namespace NGRpcService

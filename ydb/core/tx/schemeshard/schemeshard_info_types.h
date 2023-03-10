@@ -315,8 +315,8 @@ struct TTableInfo : public TSimpleRefCount<TTableInfo> {
         TString DefaultValue;
         bool NotNull = false;
 
-        TColumn(const TString& name, ui32 id, NScheme::TTypeInfo type)
-            : NTable::TScheme::TColumn(name, id, type)
+        TColumn(const TString& name, ui32 id, NScheme::TTypeInfo type, const TString& typeMod)
+            : NTable::TScheme::TColumn(name, id, type, typeMod)
             , CreateVersion(0)
             , DeleteVersion(Max<ui64>())
         {}
@@ -985,8 +985,22 @@ struct TColumnTableInfo : TSimpleRefCount<TColumnTableInfo> {
     }
 };
 
-struct TPQShardInfo : TSimpleRefCount<TPQShardInfo> {
-    using TPtr = TIntrusivePtr<TPQShardInfo>;
+struct TTopicStats {
+    TMessageSeqNo SeqNo;
+
+    ui64 DataSize = 0;
+    ui64 UsedReserveSize = 0;
+
+    TString ToString() const {
+        return TStringBuilder() << "TTopicStats {"
+                                << " DataSize: " << DataSize
+                                << " UsedReserveSize: " << UsedReserveSize
+                                << " }";
+    }
+};
+
+struct TTopicTabletInfo : TSimpleRefCount<TTopicTabletInfo> {
+    using TPtr = TIntrusivePtr<TTopicTabletInfo>;
     using TKeySchema = TVector<NScheme::TTypeInfo>;
 
     struct TKeyRange {
@@ -996,17 +1010,17 @@ struct TPQShardInfo : TSimpleRefCount<TPQShardInfo> {
         void SerializeToProto(NKikimrPQ::TPartitionKeyRange& proto) const;
     };
 
-    struct TPersQueueInfo {
+    struct TTopicPartitionInfo {
         ui32 PqId = 0;
         ui32 GroupId = 0;
         ui64 AlterVersion = 0;
         TMaybe<TKeyRange> KeyRange;
     };
 
-    TVector<TPersQueueInfo> PQInfos;
+    TVector<TTopicPartitionInfo> Partitions;
 
     size_t PartsCount() const {
-        return PQInfos.size();
+        return Partitions.size();
     }
 };
 
@@ -1122,12 +1136,18 @@ struct TShardInfo {
     }
 };
 
-struct TPersQueueGroupInfo : TSimpleRefCount<TPersQueueGroupInfo> {
-    using TPtr = TIntrusivePtr<TPersQueueGroupInfo>;
-    using TKeySchema = TPQShardInfo::TKeySchema;
+/**
+ * TTopicInfo -> TTopicTabletInfo -> TTopicPartitionInfo
+ *
+ * Each topic may contains many tablets.
+ * Each tablet may serve many partitions.
+ */
+struct TTopicInfo : TSimpleRefCount<TTopicInfo> {
+    using TPtr = TIntrusivePtr<TTopicInfo>;
+    using TKeySchema = TTopicTabletInfo::TKeySchema;
 
     struct TPartitionToAdd {
-        using TKeyRange = TPQShardInfo::TKeyRange;
+        using TKeyRange = TTopicTabletInfo::TKeyRange;
 
         ui32 PartitionId;
         ui32 GroupId;
@@ -1162,14 +1182,16 @@ struct TPersQueueGroupInfo : TSimpleRefCount<TPersQueueGroupInfo> {
     ui64 AlterVersion = 0;
     TString TabletConfig;
     TString BootstrapConfig;
-    THashMap<TShardIdx, TPQShardInfo::TPtr> Shards; // key - shardIdx
+    THashMap<TShardIdx, TTopicTabletInfo::TPtr> Shards; // key - shardIdx
     TKeySchema KeySchema;
-    TPersQueueGroupInfo::TPtr AlterData; // changes to be applied
+    TTopicInfo::TPtr AlterData; // changes to be applied
     TTabletId BalancerTabletID = InvalidTabletId;
     TShardIdx BalancerShardIdx = InvalidShardIdx;
 
     TString PreSerializedPathDescription; // Cached path description
     TString PreSerializedPartitionsDescription; // Cached partition description
+
+    TTopicStats Stats;
 
     bool FillKeySchema(const NKikimrPQ::TPQTabletConfig& tabletConfig, TString& error);
     bool FillKeySchema(const TString& tabletConfig);
@@ -1201,7 +1223,7 @@ struct TPersQueueGroupInfo : TSimpleRefCount<TPersQueueGroupInfo> {
         return Shards.size();
     }
 
-    void PrepareAlter(TPersQueueGroupInfo::TPtr alterData) {
+    void PrepareAlter(TTopicInfo::TPtr alterData) {
         Y_VERIFY(alterData, "No alter data at Alter prepare");
         alterData->AlterVersion = AlterVersion + 1;
         Y_VERIFY(alterData->TotalGroupCount);
@@ -1316,6 +1338,11 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
             ui64 DataSize = 0;
             ui64 IndexSize = 0;
         } Tables;
+
+        struct TTopics {
+            ui64 DataSize = 0;
+            ui64 UsedReserveSize = 0;
+        } Topics;
     };
 
     struct TDiskSpaceQuotas {
@@ -1505,6 +1532,12 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         return PQReservedStorage;
     }
 
+    ui64 GetPQAccountStorage() const {
+        const auto& topics = DiskSpaceUsage.Topics;
+        return topics.DataSize - std::min(topics.UsedReserveSize, PQReservedStorage) + PQReservedStorage;
+
+    }
+
     void SetPQReservedStorage(ui64 val) {
         PQReservedStorage = val;
     }
@@ -1659,7 +1692,8 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
             return false;
         }
 
-        if (DiskSpaceUsage.Tables.TotalSize > quotas.HardQuota) {
+        ui64 totalUsage = DiskSpaceUsage.Tables.TotalSize + (AppData()->FeatureFlags.GetEnableTopicDiskSubDomainQuota() ? GetPQAccountStorage() : 0);
+        if (totalUsage > quotas.HardQuota) {
             if (!DiskQuotaExceeded) {
                 counters->ChangeDiskSpaceQuotaExceeded(+1);
                 DiskQuotaExceeded = true;
@@ -1669,7 +1703,7 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
             return false;
         }
 
-        if (DiskSpaceUsage.Tables.TotalSize < quotas.SoftQuota) {
+        if (totalUsage < quotas.SoftQuota) {
             if (DiskQuotaExceeded) {
                 counters->ChangeDiskSpaceQuotaExceeded(-1);
                 DiskQuotaExceeded = false;
@@ -1747,20 +1781,6 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         auto it = SequenceShards.find(shardIdx);
         Y_VERIFY_S(it != SequenceShards.end(), "shardIdx: " << shardIdx);
         SequenceShards.erase(it);
-    }
-
-    const THashSet<TShardIdx>& GetReplicationControllers() const {
-        return ReplicationControllers;
-    }
-
-    void AddReplicationController(const TShardIdx& shardIdx) {
-        ReplicationControllers.insert(shardIdx);
-    }
-
-    void RemoveReplicationController(const TShardIdx& shardIdx) {
-        auto it = ReplicationControllers.find(shardIdx);
-        Y_VERIFY_S(it != ReplicationControllers.end(), "shardIdx: " << shardIdx);
-        ReplicationControllers.erase(it);
     }
 
     const NKikimrSubDomains::TProcessingParams& GetProcessingParams() const {
@@ -1841,6 +1861,16 @@ struct TSubDomainInfo: TSimpleRefCount<TSubDomainInfo> {
         DiskSpaceUsage.Tables.TotalSize = DiskSpaceUsage.Tables.DataSize + DiskSpaceUsage.Tables.IndexSize;
         i64 newTotalBytes = DiskSpaceUsage.Tables.TotalSize;
         counters->ChangeDiskSpaceTablesTotalBytes(newTotalBytes - oldTotalBytes);
+    }
+
+    void AggrDiskSpaceUsage(const TTopicStats& newAggr, const TTopicStats& oldAggr = {}) {
+        auto& topics = DiskSpaceUsage.Topics;
+        topics.DataSize += (newAggr.DataSize - oldAggr.DataSize);
+        topics.UsedReserveSize += (newAggr.UsedReserveSize - oldAggr.UsedReserveSize);
+
+        Y_VERIFY_S(topics.DataSize >= 0, "TDiskSpaceUsage.Topic.AccountSize: DataSize: " << topics.DataSize);
+        Y_VERIFY_S(topics.UsedReserveSize >= 0, "TDiskSpaceUsage.Topic.AccountSize: UsedReserveSize: " << topics.UsedReserveSize);
+        Y_VERIFY_S(topics.DataSize >= topics.UsedReserveSize, "TDiskSpaceUsage.Topic.AccountSize: DataSize: " << topics.DataSize << ", UsedReserveSize: " << topics.UsedReserveSize);
     }
 
     const TDiskSpaceUsage& GetDiskSpaceUsage() const {
@@ -2001,7 +2031,6 @@ private:
     THashSet<TShardIdx> InternalShards;
     THashSet<TShardIdx> BackupShards;
     THashSet<TShardIdx> SequenceShards;
-    THashSet<TShardIdx> ReplicationControllers;
 
     ui64 PQPartitionsInsideCount = 0;
     ui64 PQReservedStorage = 0;
@@ -2436,6 +2465,7 @@ struct TReplicationInfo : public TSimpleRefCount<TReplicationInfo> {
     ui64 AlterVersion = 0;
     TReplicationInfo::TPtr AlterData = nullptr;
     NKikimrSchemeOp::TReplicationDescription Description;
+    TShardIdx ControllerShardIdx = InvalidShardIdx;
 };
 
 struct TBlobDepotInfo : TSimpleRefCount<TBlobDepotInfo> {
@@ -2895,6 +2925,28 @@ struct TIndexBuildInfo: public TSimpleRefCount<TIndexBuildInfo> {
     }
 
     NKikimrSchemeOp::TIndexBuildConfig SerializeToProto(TSchemeShard* ss) const;
+};
+
+struct TExternalTableInfo: TSimpleRefCount<TExternalTableInfo> {
+    using TPtr = TIntrusivePtr<TExternalTableInfo>;
+
+    TString SourceType;
+    TString DataSourcePath;
+    TString Location;
+    ui64 AlterVersion = 0;
+    THashMap<ui32, TTableInfo::TColumn> Columns;
+    TString Content;
+};
+
+struct TExternalDataSourceInfo: TSimpleRefCount<TExternalDataSourceInfo> {
+    using TPtr = TIntrusivePtr<TExternalDataSourceInfo>;
+
+    ui64 AlterVersion = 0;
+    TString SourceType;
+    TString Location;
+    TString Installation;
+    NKikimrSchemeOp::TAuth Auth;
+    NKikimrSchemeOp::TExternalTableReferences ExternalTableReferences;
 };
 
 bool ValidateTtlSettings(const NKikimrSchemeOp::TTTLSettings& ttl,

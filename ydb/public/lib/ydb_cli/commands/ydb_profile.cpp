@@ -13,10 +13,6 @@
 #include <cstdio>
 
 #if defined(_win32_)
-#include <util/system/env.h>
-#endif
-
-#if defined(_win32_)
 #include <io.h>
 #elif defined(_unix_)
 #include <unistd.h>
@@ -26,13 +22,6 @@
 namespace NYdb::NConsoleClient {
 
 namespace {
-#if defined(_darwin_)
-    const TString HomeDir = GetHomeDir();
-#elif defined(_win32_)
-    const TString HomeDir = GetEnv("USERPROFILE");
-#else
-    const TString HomeDir = GetHomeDir();
-#endif
 
     bool IsStdinInteractive() {
 #if defined(_win32_)
@@ -45,10 +34,6 @@ namespace {
 }
 
 const TString AuthNode = "authentication";
-
-std::shared_ptr<IProfileManager> CreateYdbProfileManager(const TString& ydbDir) {
-    return CreateProfileManager(TStringBuilder() << HomeDir << '/' << ydbDir << "/config/config.yaml");
-}
 
 TCommandConfig::TCommandConfig()
     : TClientCommandTree("config", {}, "Manage YDB CLI configuration")
@@ -263,6 +248,9 @@ namespace {
         if (profile->Has("iam-endpoint")) {
             Cout << "  iam-endpoint: " << profile->GetValue("iam-endpoint").as<TString>() << Endl;
         }
+        if (profile->Has("ca-file")) {
+            Cout << "  ca-file: " << profile->GetValue("ca-file").as<TString>() << Endl;
+        }
     }
 }
 
@@ -281,7 +269,7 @@ void TCommandInit::Config(TConfig& config) {
 int TCommandInit::Run(TConfig& config) {
     //Y_UNUSED(config);
     Cout << "Welcome! This command will take you through the configuration process." << Endl;
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     TString profileName;
     SetupProfileName(profileName, profileManager);
     ConfigureProfile(profileName, profileManager, config, true, false);
@@ -323,7 +311,8 @@ void TCommandProfileCommon::GetOptionsFromStdin() {
         {"sa-key-file", SaKeyFile},
         {"user", User},
         {"password-file", PasswordFile},
-        {"iam-endpoint", IamEndpoint}
+        {"iam-endpoint", IamEndpoint},
+        {"ca-file", CaCertsFile}
     };
     while (Cin.ReadLine(line)) {
         Strip(line, trimmedLine);
@@ -332,11 +321,18 @@ void TCommandProfileCommon::GetOptionsFromStdin() {
             continue;
         }
 
-        if (line.StartsWith("use-metadata-credentials")) {
+        if (trimmedLine.StartsWith("use-metadata-credentials")) {
             if (UseMetadataCredentials) {
                 throw TMisuseException() << "You entered too many \"use-metadata-credentials\" options.";
             }
             UseMetadataCredentials = true;
+            continue;
+        }
+        if (trimmedLine.StartsWith("anonymous-auth")) {
+            if (AnonymousAuth) {
+                throw TMisuseException() << "You entered too many \"anonymous-auth\" options.";
+            }
+            AnonymousAuth = true;
             continue;
         }
 
@@ -363,6 +359,9 @@ void TCommandProfileCommon::ConfigureProfile(const TString& profileName, std::sh
     SetupProfileSetting("endpoint", Endpoint, existingProfile, profileName, profile, interactive, cmdLine);
     SetupProfileSetting("database", Database, existingProfile, profileName, profile, interactive, cmdLine);
     SetupProfileAuthentication(existingProfile, profileName, profile, config, interactive, cmdLine);
+    if (cmdLine && CaCertsFile) {
+        profile->SetValue("ca-file", CaCertsFile);
+    }
 
     if (interactive) {
         TString activeProfileName = profileManager->GetActiveProfileName();
@@ -592,7 +591,7 @@ bool TCommandProfileCommon::AnyProfileOptionInCommandLine() {
     return Endpoint || Database || TokenFile ||
            IamTokenFile || YcTokenFile ||
            SaKeyFile || UseMetadataCredentials || User ||
-           PasswordFile || IamEndpoint || AnonymousAuth;
+           PasswordFile || IamEndpoint || AnonymousAuth || CaCertsFile;
 }
 
 TCommandCreateProfile::TCommandCreateProfile()
@@ -626,6 +625,9 @@ void TCommandProfileCommon::Config(TConfig& config) {
         opts.AddLongOption("iam-endpoint", "Endpoint of IAM service to refresh token in YC OAuth or YC Service account authentication modes")
         .RequiredArgument("STR").StoreResult(&IamEndpoint);
     }
+    opts.AddLongOption("ca-file",
+        "Path to a file containing the PEM encoding of the server root certificates for tls connections.")
+        .RequiredArgument("PATH").StoreResult(&CaCertsFile);
     if (!IsStdinInteractive()) {
         GetOptionsFromStdin();
     }
@@ -655,7 +657,7 @@ int TCommandCreateProfile::Run(TConfig& config) {
 //    Y_UNUSED(config);
     TString profileName = ProfileName;
     Interactive = (!AnyProfileOptionInCommandLine() || !profileName) && IsStdinInteractive();
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     if (Interactive) {
         Cout << "Welcome! This command will take you through configuration profile creation process." << Endl;
     }
@@ -700,7 +702,7 @@ void TCommandDeleteProfile::Parse(TConfig& config) {
 
 int TCommandDeleteProfile::Run(TConfig& config) {
     Y_UNUSED(config);
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     const auto profileNames = profileManager->ListProfiles();
     if (ProfileName) {
         if (find(profileNames.begin(), profileNames.end(), ProfileName) == profileNames.end()) {
@@ -781,7 +783,7 @@ void TCommandActivateProfile::Parse(TConfig& config) {
 }
 
 int TCommandActivateProfile::Run(TConfig& config) {
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     const auto profileNames = profileManager->ListProfiles();
     if (ProfileName) {
         if (find(profileNames.begin(), profileNames.end(), ProfileName) == profileNames.end()) {
@@ -857,7 +859,7 @@ void TCommandDeactivateProfile::Config(TConfig& config) {
 }
 
 int TCommandDeactivateProfile::Run(TConfig& config) {
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     TString currentActiveProfileName = profileManager->GetActiveProfileName();
     if (currentActiveProfileName) {
         profileManager->DeactivateProfile();
@@ -883,7 +885,7 @@ void TCommandListProfiles::Config(TConfig& config) {
 
 int TCommandListProfiles::Run(TConfig& config) {
     Y_UNUSED(config);
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     const auto profileNames = profileManager->ListProfiles();
     TString activeProfileName = profileManager->GetActiveProfileName();
     for (const auto& profileName : profileNames) {
@@ -922,7 +924,7 @@ void TCommandGetProfile::Parse(TConfig& config) {
 
 int TCommandGetProfile::Run(TConfig& config) {
     Y_UNUSED(config);
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     const auto profileNames = profileManager->ListProfiles();
     if (ProfileName) {
         if (find(profileNames.begin(), profileNames.end(), ProfileName) == profileNames.end()) {
@@ -977,6 +979,8 @@ void TCommandUpdateProfile::Config(TConfig& config) {
     if (config.UseIamAuth) {
         opts.AddLongOption("no-iam-endpoint", "Delete endpoint of IAM service from the profile").StoreTrue(&NoIamEndpoint);
     }
+    opts.AddLongOption("no-ca-file", "Delete path to file containing the PEM encoding of the "
+        "server root certificates for tls connections from the profile").StoreTrue(&NoCaCertsFile);
 }
 
 void TCommandUpdateProfile::ValidateNoOptions() {
@@ -998,6 +1002,10 @@ void TCommandUpdateProfile::ValidateNoOptions() {
         } else {
             if (IamEndpoint && NoIamEndpoint) {
                 str << "\"--iam-endpoint\" and \"--no-iam-endpoint\"";
+            } else {
+                if (CaCertsFile && NoCaCertsFile) {
+                    str << "\"--ca-file\" and \"--no-ca-file\"";
+                }
             }
         }
     }
@@ -1019,6 +1027,9 @@ void TCommandUpdateProfile::DropNoOptions(std::shared_ptr<IProfile> profile) {
     if (NoAuth) {
         profile->RemoveValue("authentication");
     }
+    if (NoCaCertsFile) {
+        profile->RemoveValue("ca-file");
+    }
 }
 
 void TCommandUpdateProfile::Parse(TConfig& config) {
@@ -1028,7 +1039,7 @@ void TCommandUpdateProfile::Parse(TConfig& config) {
 }
 
 int TCommandUpdateProfile::Run(TConfig& config) {
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     if (!profileManager->HasProfile(ProfileName)) {
         Cerr << "No existing profile \"" << ProfileName << "\". "
              << "Run \"ydb config profile list\" without arguments to see existing profiles" << Endl;
@@ -1058,7 +1069,7 @@ void TCommandReplaceProfile::Parse(TConfig& config) {
 }
 
 int TCommandReplaceProfile::Run(TConfig& config) {
-    auto profileManager = CreateYdbProfileManager(config.YdbDir);
+    auto profileManager = CreateProfileManager(config.ProfileFile);
     profileManager->RemoveProfile(ProfileName);
     profileManager->CreateProfile(ProfileName);
     ConfigureProfile(ProfileName, profileManager, config, false, true);

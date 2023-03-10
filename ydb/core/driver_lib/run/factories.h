@@ -1,5 +1,4 @@
 #pragma once
-#include "log_backend.h"
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_util_devicemode.h>
 #include <ydb/core/kqp/common/kqp.h>
 #include <ydb/core/tx/datashard/export_iface.h>
@@ -20,8 +19,6 @@
 
 #include <library/cpp/actors/core/actorsystem.h>
 
-#include <ydb/library/security/ydb_credentials_provider_factory.h>
-
 #include <functional>
 #include <unordered_map>
 #include <unordered_set>
@@ -31,10 +28,6 @@ namespace NKikimr {
 
 // A way to parameterize YDB binary, we do it via a set of factories
 struct TModuleFactories {
-    // A way to parameterize log backend
-    std::shared_ptr<ILogBackendFactory> LogBackendFactory;
-    //
-    std::shared_ptr<ILogBackendFactory> AuditLogBackendFactory;
     // A backend factory for Query Replay
     std::shared_ptr<NKqp::IQueryReplayBackendFactory> QueryReplayBackendFactory;
     //
@@ -49,8 +42,6 @@ struct TModuleFactories {
     IActor*(*CreateTicketParser)(const NKikimrProto::TAuthConfig&);
     IActor*(*FolderServiceFactory)(const NKikimrProto::NFolderService::TFolderServiceConfig&);
 
-    std::function<IActor*(const NYq::NConfig::TAuditConfig& auditConfig, const ::NMonitoring::TDynamicCounterPtr& counters)> YqAuditServiceFactory;
-    NKikimr::TYdbCredentialsProviderFactory YdbCredentialProviderFactory;
     // Factory for grpc services
     TGrpcServiceFactory GrpcServiceFactory;
 

@@ -77,10 +77,10 @@ void TPathDescriber::FillChildDescr(NKikimrSchemeOp::TDirEntry* descr, TPathElem
     }
 
     if (pathEl->PathType == NKikimrSchemeOp::EPathTypePersQueueGroup) {
-        auto it = Self->PersQueueGroups.FindPtr(pathEl->PathId);
+        auto it = Self->Topics.FindPtr(pathEl->PathId);
         Y_VERIFY(it, "PersQueueGroup is not found");
 
-        TPersQueueGroupInfo::TPtr pqGroupInfo = *it;
+        TTopicInfo::TPtr pqGroupInfo = *it;
         if (pqGroupInfo->HasBalancer()) {
             descr->SetBalancerTabletID(ui64(pqGroupInfo->BalancerTabletID));
         }
@@ -411,9 +411,9 @@ void TPathDescriber::DescribeColumnTable(TPathId pathId, TPathElement::TPtr path
 }
 
 void TPathDescriber::DescribePersQueueGroup(TPathId pathId, TPathElement::TPtr pathEl) {
-    auto it = Self->PersQueueGroups.FindPtr(pathId);
+    auto it = Self->Topics.FindPtr(pathId);
     Y_VERIFY(it, "PersQueueGroup is not found");
-    TPersQueueGroupInfo::TPtr pqGroupInfo = *it;
+    TTopicInfo::TPtr pqGroupInfo = *it;
 
     if (pqGroupInfo->PreSerializedPathDescription.empty()) {
         NKikimrScheme::TEvDescribeSchemeResult preSerializedResult;
@@ -444,7 +444,7 @@ void TPathDescriber::DescribePersQueueGroup(TPathId pathId, TPathElement::TPtr p
 
             struct TPartitionDesc {
                 TTabletId TabletId = InvalidTabletId;
-                const TPQShardInfo::TPersQueueInfo* Info = nullptr;
+                const TTopicTabletInfo::TTopicPartitionInfo* Info = nullptr;
             };
 
             TVector<TPartitionDesc> descriptions; // index is pqId
@@ -454,7 +454,7 @@ void TPathDescriber::DescribePersQueueGroup(TPathId pathId, TPathElement::TPtr p
                 auto it = Self->ShardInfos.find(shardIdx);
                 Y_VERIFY_S(it != Self->ShardInfos.end(), "No shard with shardIdx: " << shardIdx);
 
-                for (const auto& pq : pqShard->PQInfos) {
+                for (const auto& pq : pqShard->Partitions) {
                     if (pq.AlterVersion <= pqGroupInfo->AlterVersion) {
                         Y_VERIFY_S(pq.PqId < pqGroupInfo->NextPartitionId,
                             "Wrong pqId: " << pq.PqId << ", nextPqId: " << pqGroupInfo->NextPartitionId);
@@ -498,7 +498,7 @@ void TPathDescriber::DescribePersQueueGroup(TPathId pathId, TPathElement::TPtr p
 
         for (const auto& [shardIdx, pqShard] : pqGroupInfo->Shards) {
             const auto& shardInfo = Self->ShardInfos.at(shardIdx);
-            for (const auto& pq : pqShard->PQInfos) {
+            for (const auto& pq : pqShard->Partitions) {
                 if (pq.AlterVersion <= pqGroupInfo->AlterVersion) {
                     auto partition = allocate->MutablePartitions()->Add();
                     partition->SetPartitionId(pq.PqId);
@@ -673,6 +673,10 @@ void TPathDescriber::DescribeDomainRoot(TPathElement::TPtr pathEl) {
     diskSpaceUsage->MutableTables()->SetTotalSize(subDomainInfo->GetDiskSpaceUsage().Tables.TotalSize);
     diskSpaceUsage->MutableTables()->SetDataSize(subDomainInfo->GetDiskSpaceUsage().Tables.DataSize);
     diskSpaceUsage->MutableTables()->SetIndexSize(subDomainInfo->GetDiskSpaceUsage().Tables.IndexSize);
+    diskSpaceUsage->MutableTopics()->SetReserveSize(subDomainInfo->GetPQReservedStorage());
+    diskSpaceUsage->MutableTopics()->SetAccountSize(subDomainInfo->GetPQAccountStorage());
+    diskSpaceUsage->MutableTopics()->SetDataSize(subDomainInfo->GetDiskSpaceUsage().Topics.DataSize);
+    diskSpaceUsage->MutableTopics()->SetUsedReserveSize(subDomainInfo->GetDiskSpaceUsage().Topics.UsedReserveSize);
 
     if (subDomainInfo->GetDeclaredSchemeQuotas()) {
         entry->MutableDeclaredSchemeQuotas()->CopyFrom(*subDomainInfo->GetDeclaredSchemeQuotas());
@@ -775,6 +779,56 @@ void TPathDescriber::DescribeReplication(TPathId pathId, TPathElement::TPtr path
 void TPathDescriber::DescribeBlobDepot(const TPath& path) {
     Y_VERIFY(path->IsBlobDepot());
     Self->DescribeBlobDepot(path->PathId, path->Name, *Result->Record.MutablePathDescription()->MutableBlobDepotDescription());
+}
+
+void TPathDescriber::DescribeExternalTable(const TActorContext& ctx, TPathId pathId, TPathElement::TPtr pathEl) {
+    Y_UNUSED(ctx);
+
+    auto it = Self->ExternalTables.FindPtr(pathId);
+    Y_VERIFY(it, "ExternalTable is not found");
+    TExternalTableInfo::TPtr externalTableInfo = *it;
+
+    auto entry = Result->Record.MutablePathDescription()->MutableExternalTableDescription();
+    entry->SetName(pathEl->Name);
+    PathIdFromPathId(pathId, entry->MutablePathId());
+    entry->SetSourceType(externalTableInfo->SourceType);
+    entry->SetDataSourcePath(externalTableInfo->DataSourcePath);
+    entry->SetLocation(externalTableInfo->Location);
+    entry->SetVersion(externalTableInfo->AlterVersion);
+
+    entry->MutableColumns()->Reserve(externalTableInfo->Columns.size());
+    for (auto col : externalTableInfo->Columns) {
+        const auto& cinfo = col.second;
+        if (cinfo.IsDropped())
+            continue;
+
+        auto colDescr = entry->AddColumns();
+        colDescr->SetName(cinfo.Name);
+        colDescr->SetType(NScheme::TypeName(cinfo.PType, cinfo.PTypeMod));
+        auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(cinfo.PType, cinfo.PTypeMod);
+        colDescr->SetTypeId(columnType.TypeId);
+        if (columnType.TypeInfo) {
+            *colDescr->MutableTypeInfo() = *columnType.TypeInfo;
+        }
+        colDescr->SetId(cinfo.Id);
+        colDescr->SetNotNull(cinfo.NotNull);
+    }
+    entry->SetContent(externalTableInfo->Content);
+}
+
+void TPathDescriber::DescribeExternalDataSource(const TActorContext&, TPathId pathId, TPathElement::TPtr pathEl) {
+    auto it = Self->ExternalDataSources.FindPtr(pathId);
+    Y_VERIFY(it, "ExternalDataSource is not found");
+    TExternalDataSourceInfo::TPtr externalDataSourceInfo = *it;
+
+    auto entry = Result->Record.MutablePathDescription()->MutableExternalDataSourceDescription();
+    entry->SetName(pathEl->Name);
+    PathIdFromPathId(pathId, entry->MutablePathId());
+    entry->SetVersion(externalDataSourceInfo->AlterVersion);
+    entry->SetSourceType(externalDataSourceInfo->SourceType);
+    entry->SetLocation(externalDataSourceInfo->Location);
+    entry->SetInstallation(externalDataSourceInfo->Installation);
+    entry->MutableAuth()->CopyFrom(externalDataSourceInfo->Auth);
 }
 
 THolder<TEvSchemeShard::TEvDescribeSchemeResultBuilder> TPathDescriber::Describe(const TActorContext& ctx) {
@@ -904,6 +958,12 @@ THolder<TEvSchemeShard::TEvDescribeSchemeResultBuilder> TPathDescriber::Describe
         case NKikimrSchemeOp::EPathTypeBlobDepot:
             DescribeBlobDepot(path);
             break;
+        case NKikimrSchemeOp::EPathTypeExternalTable:
+            DescribeExternalTable(ctx, base->PathId, base);
+            break;
+        case NKikimrSchemeOp::EPathTypeExternalDataSource:
+            DescribeExternalDataSource(ctx, base->PathId, base);
+            break;
         case NKikimrSchemeOp::EPathTypeInvalid:
             Y_UNREACHABLE();
         }
@@ -944,6 +1004,7 @@ THolder<TEvSchemeShard::TEvDescribeSchemeResultBuilder> DescribePath(
 void TSchemeShard::DescribeTable(const TTableInfo::TPtr tableInfo, const NScheme::TTypeRegistry* typeRegistry,
                                      bool fillConfig, bool fillBoundaries, NKikimrSchemeOp::TTableDescription* entry) const
 {
+    Y_UNUSED(typeRegistry);
     THashMap<ui32, TString> familyNames;
     bool familyNamesBuilt = false;
 
@@ -956,8 +1017,8 @@ void TSchemeShard::DescribeTable(const TTableInfo::TPtr tableInfo, const NScheme
 
         auto colDescr = entry->AddColumns();
         colDescr->SetName(cinfo.Name);
-        colDescr->SetType(typeRegistry->GetTypeName(cinfo.PType.GetTypeId())); // TODO: no pg type details in string type
-        auto columnType = NScheme::ProtoColumnTypeFromTypeInfo(cinfo.PType);
+        colDescr->SetType(NScheme::TypeName(cinfo.PType, cinfo.PTypeMod));
+        auto columnType = NScheme::ProtoColumnTypeFromTypeInfoMod(cinfo.PType, cinfo.PTypeMod);
         colDescr->SetTypeId(columnType.TypeId);
         if (columnType.TypeInfo) {
             *colDescr->MutableTypeInfo() = *columnType.TypeInfo;
@@ -1132,7 +1193,7 @@ void TSchemeShard::DescribeReplication(const TPathId& pathId, const TString& nam
 void TSchemeShard::DescribeReplication(const TPathId& pathId, const TString& name, TReplicationInfo::TPtr info,
         NKikimrSchemeOp::TReplicationDescription& desc)
 {
-    Y_VERIFY_S(info, "Empty sequence info"
+    Y_VERIFY_S(info, "Empty replication info"
         << " pathId# " << pathId
         << " name# " << name);
 
@@ -1142,10 +1203,7 @@ void TSchemeShard::DescribeReplication(const TPathId& pathId, const TString& nam
     PathIdFromPathId(pathId, desc.MutablePathId());
     desc.SetVersion(info->AlterVersion);
 
-    const auto& controllers = ResolveDomainInfo(pathId)->GetReplicationControllers();
-    if (!controllers.empty()) {
-        const auto shardIdx = *controllers.begin();
-
+    if (const auto& shardIdx = info->ControllerShardIdx; shardIdx != InvalidShardIdx) {
         Y_VERIFY(ShardInfos.contains(shardIdx));
         const auto& shardInfo = ShardInfos.at(shardIdx);
 

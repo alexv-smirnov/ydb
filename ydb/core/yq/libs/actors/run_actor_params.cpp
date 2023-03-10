@@ -14,12 +14,7 @@ TRunActorParams::TRunActorParams(
     ui64 nextUniqueId,
     NKikimr::NMiniKQL::TComputationNodeFactory dqCompFactory,
     ::NPq::NConfigurationManager::IConnections::TPtr pqCmConnections,
-    const ::NYq::NConfig::TCommonConfig& commonConfig,
-    const ::NYq::NConfig::TCheckpointCoordinatorConfig& checkpointCoordinatorConfig,
-    const ::NYq::NConfig::TPrivateApiConfig& privateApiConfig,
-    const ::NYq::NConfig::TGatewaysConfig& gatewaysConfig,
-    const ::NYq::NConfig::TPingerConfig& pingerConfig,
-    const ::NYq::NConfig::TRateLimiterConfig& rateLimiterConfig,
+    const ::NYq::NConfig::TConfig& config,
     const TString& sql,
     const NYdb::NFq::TScope& scope,
     const TString& authToken,
@@ -43,7 +38,6 @@ TRunActorParams::TRunActorParams(
     TVector<YandexQuery::ResultSetMeta> resultSetMetas,
     TVector<TString> dqGraphs,
     int32_t dqGraphIndex,
-    TVector<Fq::Private::TopicConsumer> createdTopicConsumers,
     bool automatic,
     const TString& queryName,
     const TInstant& deadline,
@@ -66,12 +60,7 @@ TRunActorParams::TRunActorParams(
     , NextUniqueId(nextUniqueId)
     , DqCompFactory(dqCompFactory)
     , PqCmConnections(std::move(pqCmConnections))
-    , CommonConfig(commonConfig)
-    , CheckpointCoordinatorConfig(checkpointCoordinatorConfig)
-    , PrivateApiConfig(privateApiConfig)
-    , GatewaysConfig(gatewaysConfig)
-    , PingerConfig(pingerConfig)
-    , RateLimiterConfig(rateLimiterConfig)
+    , Config(config)
     , Sql(sql)
     , Scope(scope)
     , AuthToken(authToken)
@@ -95,7 +84,6 @@ TRunActorParams::TRunActorParams(
     , ResultSetMetas(std::move(resultSetMetas))
     , DqGraphs(std::move(dqGraphs))
     , DqGraphIndex(dqGraphIndex)
-    , CreatedTopicConsumers(std::move(createdTopicConsumers))
     , Automatic(automatic)
     , QueryName(queryName)
     , Deadline(deadline)

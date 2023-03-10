@@ -141,7 +141,7 @@ private:
         auto path = ::NKikimr::SplitPath(table);
         TMaybe<ui64> tabletId = TryParseLocalDbPath(path);
         if (tabletId) {
-            if (Request->GetInternalToken().empty() || !IsSuperUser(Request->GetInternalToken(), *AppData(ctx))) {
+            if (Request->GetSerializedToken().empty() || !IsSuperUser(NACLib::TUserToken(Request->GetSerializedToken()), *AppData(ctx))) {
                 return ReplyWithError(Ydb::StatusIds::NOT_FOUND, "Invalid table path specified", ctx);
             }
 
@@ -163,7 +163,7 @@ private:
             ctx.Send(SchemeCache, new TEvTxProxySchemeCache::TEvNavigateKeySet(request));
 
             TimeoutTimerActorId = CreateLongTimer(ctx, Timeout,
-                new IEventHandle(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
+                new IEventHandleFat(ctx.SelfID, ctx.SelfID, new TEvents::TEvWakeup()));
 
             TBase::Become(&TThis::StateWaitResolveTable);
             WaitingResolveReply = true;
@@ -270,7 +270,7 @@ private:
                     KeyColumnTypes[ci.second.KeyOrder] = ci.second.PType;
 
                     columns.resize(Max<size_t>(columns.size(), ci.second.KeyOrder + 1));
-                    columns[ci.second.KeyOrder] = {ci.second.Id, ci.second.PType};
+                    columns[ci.second.KeyOrder] = {ci.second.Id, ci.second.PType, ci.second.PTypeMod};
                 }
             }
 
@@ -283,7 +283,7 @@ private:
                 }
 
                 auto ci = entry.Columns.find(id->second);
-                columns.push_back({ci->second.Id, ci->second.PType});
+                columns.push_back({ci->second.Id, ci->second.PType, ci->second.PTypeMod});
 
                 valueColumnNamesAndTypes.push_back({ci->second.Name, ci->second.PType});
                 ValueColumnTypes.push_back(ci->second.PType);
@@ -459,10 +459,10 @@ private:
     }
 
     bool CheckAccess(TString& errorMessage) {
-        if (Request->GetInternalToken().empty())
+        if (Request->GetSerializedToken().empty())
             return true;
 
-        NACLib::TUserToken userToken(Request->GetInternalToken());
+        NACLib::TUserToken userToken(Request->GetSerializedToken());
 
         const ui32 access = NACLib::EAccessRights::SelectRow;
         for (const NSchemeCache::TSchemeCacheNavigate::TEntry& entry : ResolveNamesResult->ResultSet) {
@@ -788,8 +788,8 @@ private:
     }
 };
 
-void DoReadColumnsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider&) {
-    TActivationContext::AsActorContext().Register(new TReadColumnsRPC(std::move(p)));
+void DoReadColumnsRequest(std::unique_ptr<IRequestOpCtx> p, const IFacilityProvider& f) {
+    f.RegisterActor(new TReadColumnsRPC(std::move(p)));
 }
 
 } // namespace NKikimr

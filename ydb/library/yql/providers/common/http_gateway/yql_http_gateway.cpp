@@ -27,34 +27,34 @@ int curlTrace(CURL *handle, curl_infotype type,
     Y_UNUSED(data);
 
     TStringBuf buf(data, size);
+    TStringBuilder sb;
     switch (type) {
     case CURLINFO_TEXT:
-        Cerr << "== Info: " << buf;
+        sb << "== Info: " << buf;
         break;
     case CURLINFO_HEADER_OUT:
-        Cerr << "=> Send header (" << size << " bytes):" << Endl << buf;
+        sb << "=> Send header (" << size << " bytes):" << Endl << buf;
         break;
     case CURLINFO_HEADER_IN:
-        Cerr << "<= Recv header (" << size << " bytes):" << buf;
+        sb << "<= Recv header (" << size << " bytes):" << buf;
         break;
-    default:
-        return 0;
-
-/*
-    case CURLINFO_DATA_OUT:
-        Cerr << "=> Send data (" << size << " bytes)" << Endl;
+    /*case CURLINFO_DATA_OUT:
+        sb << "=> Send data (" << size << " bytes)" << Endl;
         break;
     case CURLINFO_SSL_DATA_OUT:
-        Cerr << "=> Send SSL data (" << size << " bytes)" << Endl;
+        sb << "=> Send SSL data (" << size << " bytes)" << Endl;
         break;
     case CURLINFO_DATA_IN:
-        Cerr << "<= Recv data (" << size << " bytes)" << Endl;
+        sb << "<= Recv data (" << size << " bytes)" << Endl;
         break;
     case CURLINFO_SSL_DATA_IN:
-        Cerr << "<= Recv SSL data (" << size << " bytes)" << Endl;
-        break;
-*/
+        sb << "<= Recv SSL data (" << size << " bytes)" << Endl;
+        break;*/
+    default:
+        return 0;
     }
+    
+    Cerr << sb;
 
     return 0;
 }
@@ -64,10 +64,10 @@ namespace NYql {
 namespace {
 
 struct TCurlInitConfig {
-    ui64 RequestTimeout = 0;
+    ui64 RequestTimeout = 150;
     ui64 LowSpeedTime = 0;
     ui64 LowSpeedLimit = 0;
-    ui64 ConnectionTimeout = 0;
+    ui64 ConnectionTimeout = 15;
     ui64 BytesPerSecondLimit = 0;
     ui64 BufferSize = CURL_MAX_WRITE_SIZE;
 };
@@ -411,20 +411,27 @@ private:
             OnFinish(TIssues{error});
     }
 
-    void Done(CURLcode result, long) final {
-        if (CURLE_OK != result)
-            return Fail(TIssue(TStringBuilder{} << "error: " << curl_easy_strerror(result) << " detailed: " << GetDetailedErrorText()));
+    void MaybeStart(long httpResponseCode = 0) {
+        if (!HttpResponseCode) {
+            if (!httpResponseCode) {
+                curl_easy_getinfo(GetHandle(), CURLINFO_RESPONSE_CODE, &httpResponseCode);
+            }
+            HttpResponseCode = httpResponseCode;
+            OnStart(HttpResponseCode);
+        }
+    }
 
+    void Done(CURLcode result, long httpResponseCode) final {
+        MaybeStart(httpResponseCode);
+        if (CURLE_OK != result) {
+            return Fail(TIssue(TStringBuilder{} << "error: " << curl_easy_strerror(result) << " detailed: " << GetDetailedErrorText()));
+        }
         if (!Cancelled)
             OnFinish(TIssues());
     }
 
     size_t Write(void* contents, size_t size, size_t nmemb) final {
-        if (!HttpResponseCode) {
-            curl_easy_getinfo(GetHandle(), CURLINFO_RESPONSE_CODE, &HttpResponseCode);
-            OnStart(HttpResponseCode);
-        }
-
+        MaybeStart();
         const auto realsize = size * nmemb;
         if (!Cancelled)
             OnNewData(IHTTPGateway::TCountedContent(TString(static_cast<char*>(contents), realsize), Counter, InflightCounter));
@@ -473,7 +480,7 @@ public:
     explicit THTTPMultiGateway(
         const THttpGatewayConfig* httpGatewaysCfg,
         ::NMonitoring::TDynamicCounterPtr counters)
-        : DnsGateway(httpGatewaysCfg ? httpGatewaysCfg->GetDnsResolverConfig(): TDnsResolverConfig{}, counters)
+        : DnsGateway(httpGatewaysCfg ? httpGatewaysCfg->GetDnsResolverConfig(): TDnsResolverConfig{}, counters->GetSubgroup("subsystem", "dns_gateway"))
         , Counters(std::move(counters))
         , Rps(Counters->GetCounter("Requests", true))
         , InFlight(Counters->GetCounter("InFlight"))
@@ -698,8 +705,6 @@ private:
                 Allocated.erase(it);
             }
 
-            if (Await.empty() && Allocated.empty())
-                Requests.clear();
         }
         if (easy) {
             easy->Done(result, httpResponseCode);
@@ -717,8 +722,6 @@ private:
 
             AllocatedSize = 0ULL;
             Allocated.clear();
-            if (Await.empty())
-                Requests.clear();
         }
 
         const TIssue error(curl_multi_strerror(result));
@@ -754,13 +757,7 @@ private:
             return;
         }
         const std::unique_lock lock(Sync);
-        auto& entry = Requests[TKeyType(url, 0U, headers, data, retryPolicy)];
-        if (const auto& easy = entry.lock())
-            if (easy->AddCallback(callback))
-                return;
-
         auto easy = TEasyCurlBuffer::Make(InFlight, DownloadedBytes, UploadedBytes, std::move(url),  TEasyCurl::EMethod::GET, std::move(data), std::move(headers), offset, sizeLimit, std::move(callback), retryPolicy ? retryPolicy->CreateRetryState() : nullptr, InitConfig, DnsGateway.GetDNSCurlList());
-        entry = easy;
         Await.emplace(std::move(easy));
         Wakeup(sizeLimit);
     }
@@ -818,7 +815,6 @@ private:
 
 
     std::unordered_map<CURL*, TEasyCurl::TPtr> Allocated;
-    std::unordered_map<TKeyType, TEasyCurlBuffer::TWeakPtr, TKeyHash> Requests;
     std::priority_queue<std::pair<TInstant, TEasyCurlBuffer::TPtr>> Delayed;
 
     std::mutex Sync;

@@ -69,7 +69,6 @@ void TClientCommandRootCommon::ValidateSettings() {
 }
 
 void TClientCommandRootCommon::FillConfig(TConfig& config) {
-    config.YdbDir = Settings.YdbDir;
     config.UseOAuthToken = Settings.UseOAuthToken.GetRef();
     config.UseIamAuth = Settings.UseIamAuth.GetRef();
     config.UseStaticCredentials = Settings.UseStaticCredentials.GetRef();
@@ -121,7 +120,8 @@ void TClientCommandRootCommon::Config(TConfig& config) {
         .Optional().NoArgument().Handler0([&](){
             VerbosityLevel++;
         });
-
+    opts.AddLongOption('p', "profile", "Profile name to use configuration parameters from.")
+        .RequiredArgument("NAME").StoreResult(&ProfileName);
     TClientCommandRootBase::Config(config);
 
     if (config.UseIamAuth) {
@@ -217,8 +217,8 @@ void TClientCommandRootCommon::Config(TConfig& config) {
             .StoreResult(&IamEndpoint);
     }
 
-    opts.AddLongOption('p', "profile", "Profile name to use configuration parameters from.")
-        .RequiredArgument("NAME").StoreResult(&ProfileName);
+    opts.AddLongOption("profile-file", "Path to config file with profile data in yaml format")
+        .RequiredArgument("PATH").StoreResult(&ProfileFile);
 
     TStringStream stream;
     NColorizer::TColors colors = NColorizer::AutoColors(Cout);
@@ -232,7 +232,15 @@ void TClientCommandRootCommon::Config(TConfig& config) {
 }
 
 void TClientCommandRootCommon::Parse(TConfig& config) {
-    ProfileManager = CreateYdbProfileManager(Settings.YdbDir);
+    if (ProfileFile.empty()) {
+        config.ProfileFile = TStringBuilder() << HomeDir << '/' << Settings.YdbDir << "/config/config.yaml";
+    } else {
+        config.ProfileFile = TFsPath(ProfileFile).RealLocation().GetPath();
+    }
+    if (TFsPath(config.ProfileFile).Exists() && !TFsPath(config.ProfileFile).IsFile()) {
+        throw TMisuseException() << "\'" << config.ProfileFile << "\' is not a file";
+    }
+    ProfileManager = CreateProfileManager(config.ProfileFile);
     ParseProfile();
 
     TClientCommandRootBase::Parse(config);
@@ -241,6 +249,25 @@ void TClientCommandRootCommon::Parse(TConfig& config) {
     ParseIamEndpoint(config);
 
     config.VerbosityLevel = std::min(static_cast<TConfig::EVerbosityLevel>(VerbosityLevel), TConfig::EVerbosityLevel::DEBUG);
+}
+
+void TClientCommandRootCommon::ParseCaCerts(TConfig& config) {
+    if (CaCertsFile.empty()) {
+        auto profile = Profile;
+        if (!profile) {
+            profile = ProfileManager->GetActiveProfile();
+        }
+        if (profile && profile->Has("ca-file")) {
+            CaCertsFile = profile->GetValue("ca-file").as<TString>();
+        }
+    }
+    if (!config.EnableSsl && !CaCertsFile.empty()) {
+        throw TMisuseException()
+            << "\"ca-file\" option provided for a non-ssl connection. Use grpcs:// prefix for host to connect using SSL.";
+    }
+    if (!CaCertsFile.empty()) {
+        config.CaCerts = ReadFromFile(CaCertsFile, "CA certificates");
+    }
 }
 
 void TClientCommandRootCommon::ParseAddress(TConfig& config) {
@@ -448,7 +475,11 @@ bool TClientCommandRootCommon::GetCredentialsFromProfile(std::shared_ptr<IProfil
         if (IsVerbose()) {
             PrintSettingFromProfile("service account key file (sa-key-file)", profile, explicitOption);
         }
-        config.SaKeyFile = authData.as<TString>();
+        TString filePath = authData.as<TString>();
+        if (filePath.StartsWith("~")) {
+            filePath = HomeDir + filePath.substr(1);
+        }
+        config.SaKeyFile = filePath;
     } else if (authMethod == "ydb-token") {
         if (IsVerbose()) {
             PrintSettingFromProfile("OAuth token (ydb-token)", profile, explicitOption);
@@ -650,7 +681,7 @@ void TClientCommandRootCommon::ParseCredentials(TConfig& config) {
     if (config.UseStaticCredentials) {
         if (config.StaticCredentials.User) {
             if (!config.StaticCredentials.Password && !DoNotAskForPassword) {
-                Cout << "Enter password for user " << config.StaticCredentials.User << ": ";
+                Cerr << "Enter password for user " << config.StaticCredentials.User << ": ";
                 config.StaticCredentials.Password = InputPassword();
             }
         } else {

@@ -1,5 +1,7 @@
 #pragma once
 
+#include "utils.h"
+
 #include <util/system/hp_timer.h>
 
 #include <ydb/core/tablet_flat/tablet_flat_executed.h>
@@ -9,6 +11,7 @@
 #include <ydb/core/persqueue/events/global.h>
 #include <ydb/core/tablet_flat/flat_dbase_scheme.h>
 #include <ydb/core/tablet_flat/flat_cxx_database.h>
+#include <ydb/core/tx/scheme_cache/scheme_cache.h>
 #include <ydb/core/tx/schemeshard/schemeshard.h>
 #include <ydb/core/engine/minikql/flat_local_tx_factory.h>
 #include <ydb/library/persqueue/topic_parser/topic_parser.h>
@@ -178,9 +181,11 @@ class TPersQueueReadBalancer : public TActor<TPersQueueReadBalancer>, public TTa
     }
 
     void HandleWakeup(TEvents::TEvWakeup::TPtr&, const TActorContext &ctx) {
+        LOG_DEBUG(ctx, NKikimrServices::PERSQUEUE_READ_BALANCER, TStringBuilder() << "TPersQueueReadBalancer::HandleWakeup");
+
         GetStat(ctx); //TODO: do it only on signals from outerspace right now
 
-        ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup()); //TODO: remove it
+        ctx.Schedule(TDuration::Seconds(AppData(ctx)->PQConfig.GetBalancerWakeupIntervalSec()), new TEvents::TEvWakeup()); //TODO: remove it
     }
 
     void HandleUpdateACL(TEvPersQueue::TEvUpdateACL::TPtr&, const TActorContext &ctx) {
@@ -188,6 +193,9 @@ class TPersQueueReadBalancer : public TActor<TPersQueueReadBalancer>, public TTa
     }
 
     void Die(const TActorContext& ctx) override {
+        StopFindSubDomainPathId();
+        StopWatchingSubDomainPathId();
+        
         for (auto& pipe : TabletPipes) {
             NTabletPipe::CloseClient(ctx, pipe.second);
         }
@@ -217,6 +225,7 @@ class TPersQueueReadBalancer : public TActor<TPersQueueReadBalancer>, public TTa
     }
 
     void InitDone(const TActorContext &ctx) {
+        StartFindSubDomainPathId(false);
 
         StartPartitionIdForWrite = NextPartitionIdForWrite = rand() % TotalGroups;
 
@@ -242,7 +251,7 @@ class TPersQueueReadBalancer : public TActor<TPersQueueReadBalancer>, public TTa
         }
         RegisterEvents.clear();
 
-        ctx.Schedule(TDuration::Seconds(30), new TEvents::TEvWakeup()); //TODO: remove it
+        ctx.Schedule(TDuration::Seconds(AppData(ctx)->PQConfig.GetBalancerWakeupIntervalSec()), new TEvents::TEvWakeup()); //TODO: remove it
         ctx.Send(ctx.SelfID, new TEvPersQueue::TEvUpdateACL());
     }
 
@@ -268,8 +277,12 @@ class TPersQueueReadBalancer : public TActor<TPersQueueReadBalancer>, public TTa
     void Handle(TEvTabletPipe::TEvClientConnected::TPtr& ev, const TActorContext&);
     void Handle(TEvTabletPipe::TEvClientDestroyed::TPtr& ev, const TActorContext&);
 
+    void Handle(NSchemeShard::TEvSchemeShard::TEvSubDomainPathIdFound::TPtr& ev, const TActorContext& ctx);
+    void Handle(TEvTxProxySchemeCache::TEvWatchNotifyUpdated::TPtr& ev, const TActorContext& ctx);
+
     TStringBuilder GetPrefix() const;
 
+    TActorId GetPipeClient(const ui64 tabletId, const TActorContext&);
     void RequestTabletIfNeeded(const ui64 tabletId, const TActorContext&);
     void RestartPipe(const ui64 tabletId, const TActorContext&);
     void CheckStat(const TActorContext&);
@@ -293,6 +306,15 @@ class TPersQueueReadBalancer : public TActor<TPersQueueReadBalancer>, public TTa
     struct TPipeInfo;
     void UnregisterSession(const TActorId& pipe, const TActorContext& ctx);
     void RebuildStructs();
+    ui64 PartitionReserveSize() {
+        return TopicPartitionReserveSize(TabletConfig);
+    }
+
+    void StopFindSubDomainPathId();
+    void StartFindSubDomainPathId(bool delayFirstRequest = true);
+
+    void StopWatchingSubDomainPathId();
+    void StartWatchingSubDomainPathId();
 
     bool Inited;
     ui64 PathId;
@@ -431,9 +453,21 @@ class TPersQueueReadBalancer : public TActor<TPersQueueReadBalancer>, public TTa
     ui64 MaxAvgSpeedHour;
     ui64 TotalAvgSpeedDay;
     ui64 MaxAvgSpeedDay;
+    ui64 TotalDataSize;
+    ui64 TotalUsedReserveSize;
+
+    ui64 StatsReportRound;
 
     std::deque<TAutoPtr<TEvPersQueue::TEvRegisterReadSession>> RegisterEvents;
     std::deque<TAutoPtr<TEvPersQueue::TEvPersQueue::TEvUpdateBalancerConfig>> UpdateEvents;
+
+    TActorId FindSubDomainPathIdActor;
+
+    std::optional<TPathId> SubDomainPathId;
+    std::optional<TPathId> WatchingSubDomainPathId;
+
+    bool SubDomainOutOfSpace = false;
+
 public:
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
         return NKikimrServices::TActivity::PERSQUEUE_READ_BALANCER_ACTOR;
@@ -467,6 +501,9 @@ public:
         , MaxAvgSpeedHour(0)
         , TotalAvgSpeedDay(0)
         , MaxAvgSpeedDay(0)
+        , TotalDataSize(0)
+        , TotalUsedReserveSize(0)
+        , StatsReportRound(0)
     {}
 
     STFUNC(StateInit) {
@@ -483,6 +520,8 @@ public:
             HFunc(TEvTabletPipe::TEvServerDisconnected, Handle);
             HFunc(TEvPersQueue::TEvCheckACL, Handle);
             HFunc(TEvPersQueue::TEvGetPartitionIdForWrite, Handle);
+            HFunc(NSchemeShard::TEvSchemeShard::TEvSubDomainPathIdFound, Handle);
+            HFunc(TEvTxProxySchemeCache::TEvWatchNotifyUpdated, Handle);
             default:
                 StateInitImpl(ev, ctx);
                 break;
@@ -510,6 +549,8 @@ public:
             HFunc(TEvTabletPipe::TEvClientDestroyed, Handle);
             HFunc(TEvPersQueue::TEvStatusResponse, Handle);
             HFunc(NSchemeShard::TEvSchemeShard::TEvDescribeSchemeResult, Handle);
+            HFunc(NSchemeShard::TEvSchemeShard::TEvSubDomainPathIdFound, Handle);
+            HFunc(TEvTxProxySchemeCache::TEvWatchNotifyUpdated, Handle);
 
             default:
                 HandleDefaultEvents(ev, ctx);

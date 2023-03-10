@@ -1610,6 +1610,14 @@
             "Match": {"Type": "Callable", "Name": "WideTopSort"}
         },
         {
+            "Name": "TCoWideSort",
+            "Base": "TCoInputBase",
+            "Match": {"Type": "Callable", "Name": "WideSort"},
+            "Children": [
+                {"Index": 1, "Name": "Keys", "Type": "TCoSortKeys"}
+            ]
+        },
+        {
             "Name": "TCoAddMember",
             "Base": "TCallable",
             "Match": {"Type": "Callable", "Name": "AddMember"},
@@ -1680,6 +1688,14 @@
             "Name": "TCoAssumeUnique",
             "Base": "TFreeArgCallable",
             "Match": {"Type": "Callable", "Name": "AssumeUnique"},
+            "Children": [
+                {"Index": 0, "Name": "Input", "Type": "TExprBase"}
+            ]
+        },
+        {
+            "Name": "TCoAssumeDistinct",
+            "Base": "TFreeArgCallable",
+            "Match": {"Type": "Callable", "Name": "AssumeDistinct"},
             "Children": [
                 {"Index": 0, "Name": "Input", "Type": "TExprBase"}
             ]
@@ -2323,6 +2339,11 @@
                 {"Index": 1, "Name": "KeySelectorLambda", "Type": "TCoLambda"},
                 {"Index": 2, "Name": "ListHandlerLambda", "Type": "TCoLambda"}
             ]
+        },
+        {
+            "Name": "TCoWideFromBlocks",
+            "Base": "TCoInputBase",
+            "Match": {"Type": "Callable", "Name": "WideFromBlocks"}
         }
     ]
 }

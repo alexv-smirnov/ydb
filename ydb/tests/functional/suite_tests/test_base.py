@@ -31,8 +31,8 @@ def mute_sdk_loggers():
         'ydb.resolver.DiscoveryEndpointsResolver'
     )
 
-    for l in loggers:
-        li = logging.getLogger(l)
+    for logger_name in loggers:
+        li = logging.getLogger(logger_name)
         li.setLevel(logging.CRITICAL)
 
 
@@ -198,7 +198,7 @@ def wrap_rows(rows):
 def write_canonical_response(response, file):
     output_path = os.path.join(yatest_common.output_path(), file)
     with open(output_path, 'w') as w:
-        w.write(json.dumps(response, indent=4))
+        w.write(json.dumps(response, indent=4, sort_keys=True))
     return yatest_common.canonical_file(
         local=True,
         universal_lines=True,
@@ -245,6 +245,7 @@ class BaseSuiteRunner(object):
                 load_udfs=True,
                 use_in_memory_pdisks=True,
                 disable_iterator_reads=True,
+                disable_iterator_lookups=True,
                 # additional_log_configs={'KQP_YQL': 7}
             )
         )
@@ -348,7 +349,7 @@ class BaseSuiteRunner(object):
         query_id = next(self.query_id)
         query_name = "query_%d" % query_id
         if self.plan:
-            query_plan = self.explain(statement.text)
+            query_plan = json.loads(self.explain(statement.text))
             self.files[query_name + '.plan'] = write_canonical_response(
                 query_plan,
                 query_name + '.plan',

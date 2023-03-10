@@ -1,6 +1,7 @@
 #include "kqp_query_compiler.h"
 
 #include <ydb/core/kqp/common/kqp_yql.h>
+#include <ydb/core/kqp/query_data/kqp_predictor.h>
 #include <ydb/core/kqp/query_compiler/kqp_mkql_compiler.h>
 #include <ydb/core/kqp/query_compiler/kqp_olap_compiler.h>
 #include <ydb/core/kqp/opt/kqp_opt.h>
@@ -43,6 +44,7 @@ NKqpProto::TKqpPhyQuery::EType GetPhyQueryType(const EPhysicalQueryType& type) {
         case EPhysicalQueryType::Data: return NKqpProto::TKqpPhyQuery::TYPE_DATA;
         case EPhysicalQueryType::Scan: return NKqpProto::TKqpPhyQuery::TYPE_SCAN;
         case EPhysicalQueryType::Query: return NKqpProto::TKqpPhyQuery::TYPE_QUERY;
+        case EPhysicalQueryType::FederatedQuery: return NKqpProto::TKqpPhyQuery::TYPE_FEDERATED_QUERY;
 
         case EPhysicalQueryType::Unspecified:
             break;
@@ -523,7 +525,7 @@ public:
                 [](const TItemExprType* first, const TItemExprType* second) {
                     return first->GetName() < second->GetName();
                 });
-            inputsParams.erase(std::unique(inputsParams.begin(), inputsParams.end(), 
+            inputsParams.erase(std::unique(inputsParams.begin(), inputsParams.end(),
                 [](const TItemExprType* first, const TItemExprType* second) {
                     return first->GetName() == second->GetName();
                 }),
@@ -536,16 +538,18 @@ public:
 private:
     NKikimr::NMiniKQL::TType* CompileType(TProgramBuilder& pgmBuilder, const TTypeAnnotationNode& inputType) {
         TStringStream errorStream;
-        const bool withTagged = true;
-        auto type = NCommon::BuildType(inputType, pgmBuilder, errorStream, withTagged);
+        auto type = NCommon::BuildType(inputType, pgmBuilder, errorStream);
         Y_ENSURE(type, "Failed to compile type: " << errorStream.Str());
         return type;
     }
 
     void CompileStage(const TDqPhyStage& stage, NKqpProto::TKqpPhyStage& stageProto, TExprContext& ctx,
-        const TMap<ui64, ui32>& stagesMap, THashMap<TStringBuf, THashSet<TStringBuf>>& tablesMap)
+        const TMap<ui64, ui32>& stagesMap, TRequestPredictor& rPredictor, THashMap<TStringBuf, THashSet<TStringBuf>>& tablesMap)
     {
         stageProto.SetIsEffectsStage(NOpt::IsKqpEffectsStage(stage));
+
+        TStagePredictor& stagePredictor = rPredictor.BuildForStage(stage, ctx);
+        stagePredictor.Scan(stage.Program().Ptr());
 
         for (ui32 inputIndex = 0; inputIndex < stage.Inputs().Size(); ++inputIndex) {
             const auto& input = stage.Inputs().Item(inputIndex);
@@ -564,9 +568,6 @@ private:
             }
         }
 
-        bool hasSort = false;
-        bool hasMapJoin = false;
-        bool hasUdf = false;
         VisitExpr(stage.Program().Ptr(), [&](const TExprNode::TPtr& exprNode) {
             TExprBase node(exprNode);
             if (auto maybeReadTable = node.Maybe<TKqpWideReadTable>()) {
@@ -636,16 +637,23 @@ private:
                 auto miniKqlResultType = GetMKqlResultType(readTableRanges.Process().Ref().GetTypeAnn());
                 FillOlapProgram(readTableRanges.Process(), miniKqlResultType, *tableMeta, *tableOp.MutableReadOlapRange());
                 FillResultType(miniKqlResultType, *tableOp.MutableReadOlapRange());
-            } else if (node.Maybe<TCoSort>()) {
-                hasSort = true;
-            } else if (node.Maybe<TCoMapJoinCore>()) {
-                hasMapJoin = true;
-            } else if (node.Maybe<TCoUdf>()) {
-                hasUdf = true;
+            } else if (auto maybeReadBlockTableRanges = node.Maybe<TKqpBlockReadOlapTableRanges>()) {
+                auto readTableRanges = maybeReadBlockTableRanges.Cast();
+                auto tableMeta = TablesData->ExistingTable(Cluster, readTableRanges.Table().Path()).Metadata;
+                YQL_ENSURE(tableMeta);
+
+                auto& tableOp = *stageProto.AddTableOps();
+                FillTablesMap(readTableRanges.Table(), readTableRanges.Columns(), tablesMap);
+                FillTableId(readTableRanges.Table(), *tableOp.MutableTable());
+                FillColumns(readTableRanges.Columns(), *tableMeta, tableOp, true);
+                FillReadRanges(readTableRanges, *tableMeta, *tableOp.MutableReadOlapRange());
+                auto miniKqlResultType = GetMKqlResultType(readTableRanges.Process().Ref().GetTypeAnn());
+                FillOlapProgram(readTableRanges.Process(), miniKqlResultType, *tableMeta, *tableOp.MutableReadOlapRange());
+                FillResultType(miniKqlResultType, *tableOp.MutableReadOlapRange());
+                tableOp.MutableReadOlapRange()->SetReadType(NKqpProto::TKqpPhyOpReadOlapRanges::BLOCKS);
             } else {
                 YQL_ENSURE(!node.Maybe<TKqpReadTable>());
             }
-
             return true;
         });
 
@@ -675,9 +683,8 @@ private:
         auto& programProto = *stageProto.MutableProgram();
         programProto.SetRuntimeVersion(NYql::NDqProto::ERuntimeVersion::RUNTIME_VERSION_YQL_1_0);
         programProto.SetRaw(programBytecode);
-        programProto.MutableSettings()->SetHasMapJoin(hasMapJoin);
-        programProto.MutableSettings()->SetHasSort(hasSort);
-        programProto.MutableSettings()->SetHasUdf(hasUdf);
+
+        stagePredictor.SerializeToKqpSettings(*programProto.MutableSettings());
 
         for (auto member : paramsType->GetItems()) {
             auto paramName = TString(member->GetName());
@@ -698,12 +705,17 @@ private:
         TMap<ui64, ui32> stagesMap;
         THashMap<TStringBuf, THashSet<TStringBuf>> tablesMap;
 
+        TRequestPredictor rPredictor;
         for (const auto& stage : tx.Stages()) {
             auto* protoStage = txProto.AddStages();
-            CompileStage(stage, *protoStage, ctx, stagesMap, tablesMap);
+            CompileStage(stage, *protoStage, ctx, stagesMap, rPredictor, tablesMap);
             hasEffectStage |= protoStage->GetIsEffectsStage();
             stagesMap[stage.Ref().UniqueId()] = txProto.StagesSize() - 1;
         }
+        for (auto&& i : *txProto.MutableStages()) {
+            i.MutableProgram()->MutableSettings()->SetLevelDataPrediction(rPredictor.GetLevelDataVolume(i.GetProgram().GetSettings().GetStageLevel()));
+        }
+
 
         YQL_ENSURE(hasEffectStage == txSettings.WithEffects);
 
@@ -942,16 +954,20 @@ private:
                 streamLookupProto.AddKeyColumns(TString(keyColumn->GetName()));
             }
 
-            for (const auto& column : streamLookup.Columns()) {
-                YQL_ENSURE(tableMeta->Columns.FindPtr(column), "Unknown column: " << TString(column));
-                streamLookupProto.AddColumns(TString(column));
-            }
-
             const auto resultType = streamLookup.Ref().GetTypeAnn();
             YQL_ENSURE(resultType, "Empty stream lookup result type");
             YQL_ENSURE(resultType->GetKind() == ETypeAnnotationKind::Stream, "Unexpected stream lookup result type");
             const auto resultItemType = resultType->Cast<TStreamExprType>()->GetItemType();
             streamLookupProto.SetResultType(NMiniKQL::SerializeNode(CompileType(pgmBuilder, *resultItemType), TypeEnv));
+
+            YQL_ENSURE(resultItemType->GetKind() == ETypeAnnotationKind::Struct);
+            const auto& resultColumns = resultItemType->Cast<TStructExprType>()->GetItems();
+            for (const auto column : resultColumns) {
+                const auto& systemColumns = GetSystemColumns();
+                YQL_ENSURE(tableMeta->Columns.FindPtr(column->GetName()) || systemColumns.find(column->GetName()) != systemColumns.end(),
+                    "Unknown column: " << column->GetName());
+                streamLookupProto.AddColumns(TString(column->GetName()));
+            }
 
             return;
         }

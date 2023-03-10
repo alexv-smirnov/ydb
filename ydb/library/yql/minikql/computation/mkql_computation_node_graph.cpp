@@ -148,6 +148,10 @@ public:
 
     ~TPatternNodes()
     {
+        for (auto it = ComputationNodesList.rbegin(); it != ComputationNodesList.rend(); ++it) {
+            *it = nullptr;
+        }
+
         ComputationNodesList.clear();
         if (!UncaughtException()) {
 #ifndef NDEBUG
@@ -453,6 +457,7 @@ private:
         if (name == "Switch" || // KIKIMR-16457
             name == "KqpWideReadTable" ||
             name == "KqpWideReadTableRanges" ||
+            name == "KqpBlockReadTableRanges" ||
             name == "KqpLookupTable" ||
             name == "KqpReadTable" ||
             name == "RangeMultiply" ||

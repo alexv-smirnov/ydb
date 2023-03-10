@@ -85,7 +85,7 @@ public:
         TString topicName = context.SS->PathsById.at(txState->TargetPathId)->Name;
         Y_VERIFY_S(topicName.size(), "topicName is empty. PathId: " << txState->TargetPathId);
 
-        TPersQueueGroupInfo::TPtr pqGroup = context.SS->PersQueueGroups.at(txState->TargetPathId);
+        TTopicInfo::TPtr pqGroup = context.SS->Topics.at(txState->TargetPathId);
         Y_VERIFY_S(pqGroup, "pqGroup is null. PathId: " << txState->TargetPathId);
 
         bool haveWork = false;
@@ -118,43 +118,15 @@ public:
     }
 };
 
-class TDeleteParts: public TSubOperationState {
-private:
-    TOperationId OperationId;
-
-    TString DebugHint() const override {
-        return TStringBuilder()
-                << "TDropPQ TProposedDeletePart"
-                << ", operationId: " << OperationId;
-    }
-
+class TDeleteParts: public ::NKikimr::NSchemeShard::TDeleteParts {
 public:
-    TDeleteParts(TOperationId id)
-        : OperationId(id)
+    explicit TDeleteParts(const TOperationId& id)
+        : ::NKikimr::NSchemeShard::TDeleteParts(id)
     {
-        IgnoreMessages(DebugHint(), {TEvPersQueue::TEvDropTabletReply::EventType});
+        IgnoreMessages(DebugHint(), {
+            TEvPersQueue::TEvDropTabletReply::EventType,
+        });
     }
-
-    bool ProgressState(TOperationContext& context) override {
-        auto ssId = context.SS->SelfTabletId();
-
-        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                   DebugHint() << " ProgressState"
-                               << ", at schemeshard: " << ssId);
-
-        TTxState* txState = context.SS->FindTx(OperationId);
-
-        // Initiate asynchronous deletion of all shards
-        for (auto shard : txState->Shards) {
-            context.OnComplete.DeleteShard(shard.Idx);
-        }
-
-        NIceDb::TNiceDb db(context.GetDB());
-        context.SS->ChangeTxState(db, OperationId, TTxState::Propose);
-        context.OnComplete.ActivateTx(OperationId);
-        return true;
-    }
-
 };
 
 class TPropose: public TSubOperationState {
@@ -195,7 +167,7 @@ public:
         Y_VERIFY(!path->Dropped());
         path->SetDropped(step, OperationId.GetTxId());
         context.SS->PersistDropStep(db, pathId, step, OperationId);
-        TPersQueueGroupInfo::TPtr pqGroup = context.SS->PersQueueGroups.at(pathId);
+        TTopicInfo::TPtr pqGroup = context.SS->Topics.at(pathId);
         Y_VERIFY(pqGroup);
 
         // KIKIMR-13173
@@ -211,22 +183,21 @@ public:
         bool parseOk = ParseFromStringNoSizeLimit(config, tabletConfig);
         Y_VERIFY(parseOk);
 
-        ui64 throughput = ((ui64)pqGroup->TotalPartitionCount) * config.GetPartitionConfig().GetWriteSpeedInBytesPerSecond();
-        const ui64 storage = [&config, &throughput]() {
-                        if (config.GetPartitionConfig().HasStorageLimitBytes()) {
-                            return config.GetPartitionConfig().GetStorageLimitBytes();
-                        } else {
-                            return throughput * config.GetPartitionConfig().GetLifetimeSeconds();
-                        }
-                    }();
+        const PQGroupReserve reserve(config, pqGroup->TotalPartitionCount);
 
         auto domainInfo = context.SS->ResolveDomainInfo(pathId);
         domainInfo->DecPathsInside();
         domainInfo->DecPQPartitionsInside(pqGroup->TotalPartitionCount);
-        domainInfo->DecPQReservedStorage(storage);
+        domainInfo->DecPQReservedStorage(reserve.Storage);
+        domainInfo->AggrDiskSpaceUsage({}, pqGroup->Stats);
+        if (domainInfo->CheckDiskSpaceQuotas(context.SS)) {
+            auto subDomainId = context.SS->ResolvePathIdForDomain(pathId);
+            context.SS->PersistSubDomainState(db, subDomainId, *domainInfo);
+            context.OnComplete.PublishToSchemeBoard(OperationId, subDomainId);
+        }
 
-        context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_THROUGHPUT].Sub(throughput);
-        context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_STORAGE].Sub(storage);
+        context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_THROUGHPUT].Sub(reserve.Throughput);
+        context.SS->TabletCounters->Simple()[COUNTER_STREAM_RESERVED_STORAGE].Sub(reserve.Storage);
 
         context.SS->TabletCounters->Simple()[COUNTER_STREAM_SHARDS_COUNT].Sub(pqGroup->TotalPartitionCount);
 
@@ -309,7 +280,7 @@ class TDropPQ: public TSubOperation {
 public:
     using TSubOperation::TSubOperation;
 
-    void SetPQBalancer(TPersQueueGroupInfo::TPtr pqGroup, TTxState& txState, TOperationContext& context) {
+    void SetPQBalancer(TTopicInfo::TPtr pqGroup, TTxState& txState, TOperationContext& context) {
         auto shardId = pqGroup->BalancerShardIdx;
         auto tabletId = pqGroup->BalancerTabletID;
 
@@ -325,11 +296,11 @@ public:
         }
     }
 
-    void SetPQShards(TPersQueueGroupInfo::TPtr pqGroup, TTxState& txState, TOperationContext& context) {
+    void SetPQShards(TTopicInfo::TPtr pqGroup, TTxState& txState, TOperationContext& context) {
         ui32 drops = 0;
         for (auto shard : pqGroup->Shards) {
             auto shardIdx = shard.first;
-            TPQShardInfo::TPtr info = shard.second;
+            TTopicTabletInfo::TPtr info = shard.second;
 
             auto tabletId = context.SS->ShardInfos[shardIdx].TabletID;
 
@@ -434,7 +405,7 @@ public:
             return result;
         }
 
-        TPersQueueGroupInfo::TPtr pqGroup = context.SS->PersQueueGroups.at(path.Base()->PathId);
+        TTopicInfo::TPtr pqGroup = context.SS->Topics.at(path.Base()->PathId);
         Y_VERIFY(pqGroup);
 
         if (pqGroup->AlterData) {
@@ -481,27 +452,7 @@ public:
     }
 
     void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {
-        LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                     "TDropPQ AbortUnsafe"
-                         << ", opId: " << OperationId
-                         << ", forceDropId: " << forceDropTxId
-                         << ", at schemeshard: " << context.SS->TabletID());
-
-        TTxState* txState = context.SS->FindTx(OperationId);
-        Y_VERIFY(txState);
-
-        TPathId pathId = txState->TargetPathId;
-        Y_VERIFY(context.SS->PathsById.contains(pathId));
-        TPathElement::TPtr path = context.SS->PathsById.at(pathId);
-        Y_VERIFY(path);
-
-        if (path->Dropped()) {
-            for (auto shard : txState->Shards) {
-                context.OnComplete.DeleteShard(shard.Idx);
-            }
-        }
-
-        context.OnComplete.DoneOperation(OperationId);
+        AbortUnsafeDropOperation(OperationId, forceDropTxId, context);
     }
 };
 
@@ -509,11 +460,11 @@ public:
 
 namespace NKikimr::NSchemeShard {
 
-ISubOperationBase::TPtr CreateDropPQ(TOperationId id, const TTxTransaction& tx) {
+ISubOperation::TPtr CreateDropPQ(TOperationId id, const TTxTransaction& tx) {
     return MakeSubOperation<TDropPQ>(id, tx);
 }
 
-ISubOperationBase::TPtr CreateDropPQ(TOperationId id, TTxState::ETxState state) {
+ISubOperation::TPtr CreateDropPQ(TOperationId id, TTxState::ETxState state) {
     Y_VERIFY(state != TTxState::Invalid);
     return MakeSubOperation<TDropPQ>(id, state);
 }

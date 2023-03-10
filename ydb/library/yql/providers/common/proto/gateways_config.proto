@@ -82,6 +82,7 @@ message THttpGatewayConfig {
     optional uint64 LowSpeedTimeSeconds = 8;
     optional uint64 LowSpeedBytesLimit = 9;
     optional TDnsResolverConfig DnsResolverConfig = 10;
+    optional uint64 MaxRetries = 11;
 }
 
 /////////////////////////////// YT ///////////////////////////////
@@ -381,6 +382,8 @@ message TS3GatewayConfig {
     optional uint64 MaxReadSizePerQuery = 4;
     optional uint64 MaxDiscoveryFilesPerQuery = 5;
     optional uint64 MaxInflightListsPerQuery = 7;
+    optional uint64 MaxDirectoriesAndFilesPerQuery = 8;
+    optional uint64 MinDesiredDirectoriesOfFilesPerQuery = 9;
 
     repeated TAttr DefaultSettings = 100;
 }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ydb/core/persqueue/pq.h>
+#include <ydb/core/persqueue/events/internal.h>
 #include <ydb/core/persqueue/user_info.h>
 #include <ydb/core/testlib/actors/test_runtime.h>
 #include <ydb/core/testlib/basics/runtime.h>
@@ -20,7 +21,7 @@ inline constexpr static T PlainOrSoSlow(T plain, T slow) noexcept {
     );
 }
 
-constexpr ui32 NUM_WRITES = PlainOrSoSlow(100, 1);
+constexpr ui32 NUM_WRITES = PlainOrSoSlow(50, 1);
 
 void FillPQConfig(NKikimrPQ::TPQConfig& pqConfig, const TString& dbRoot, bool isFirstClass);
 
@@ -71,6 +72,7 @@ struct TTestContext {
         NActors::NLog::EPriority otherPriority = NLog::PRI_INFO;
 
         runtime.SetLogPriority(NKikimrServices::PERSQUEUE, pqPriority);
+
         runtime.SetLogPriority(NKikimrServices::SYSTEM_VIEWS, pqPriority);
         runtime.SetLogPriority(NKikimrServices::KEYVALUE, priority);
         runtime.SetLogPriority(NKikimrServices::BOOTSTRAPPER, priority);
@@ -99,9 +101,10 @@ struct TTestContext {
             }
         }
 
-        Y_UNUSED(deadline);
-        Y_UNUSED(duration);
-
+        if (event->GetTypeRewrite() == TEvPQ::EvUpdateAvailableSize) {
+            deadline = runtime.GetTimeProvider()->Now() + duration;
+            runtime.UpdateCurrentTime(deadline);
+        }
         return false;
     }
 
@@ -119,10 +122,11 @@ struct TTestContext {
                  bool enableMonitoring = false, bool enableDbCounters = false) {
         Y_UNUSED(dispatchName);
         outActiveZone = false;
-        TTestBasicRuntime* runtime = new TTestBasicRuntime;
+        TTestBasicRuntime* runtime = new TTestBasicRuntime();
         if (enableMonitoring) {
             runtime->SetupMonitoring();
         }
+
         Runtime.Reset(runtime);
         Runtime->SetScheduledLimit(200);
 
@@ -132,6 +136,8 @@ struct TTestContext {
         SetupLogging(*Runtime);
         SetupTabletServices(*Runtime, &appData);
         setup(*Runtime);
+
+
         CreateTestBootstrapper(*Runtime,
             CreateTestTabletInfo(TabletId, PQTabletType, TErasureType::ErasureNone),
             &CreatePersQueue);
@@ -215,6 +221,7 @@ struct TTabletPreparationParameters {
     ui64 readFromTimestampsMs{0};
     ui64 sidMaxCount{0};
     ui32 specVersion{0};
+    ui32 speed{0};
     i32 storageLimitBytes{0};
     TString folderId{"somefolder"};
     TString cloudId{"somecloud"};
@@ -274,6 +281,14 @@ TActorId SetOwner(
     const TString& owner,
     bool force);
 
+TActorId SetOwner(
+    TTestActorRuntime* runtime,
+    ui64 tabletId, 
+    const TActorId& sender,
+    const ui32 partition,
+    const TString& owner,
+    bool force);
+
 void FillDeprecatedUserInfo(
     NKikimrClient::TKeyValueRequest_TCmdWrite* write,
     const TString& client,
@@ -319,6 +334,18 @@ void WriteData(
     i64 offset,
     bool disableDeduplication = false);
 
+void WriteData(
+    TTestActorRuntime* runtime,
+    ui64 tabletId, 
+    const TActorId& sender,
+    const ui32 partition,
+    const TString& sourceId,
+    const TVector<std::pair<ui64, TString>> data,
+    const TString& cookie,
+    i32 msgSeqNo,
+    i64 offset,
+    bool disableDeduplication = false);
+
 void WritePartData(
     const ui32 partition,
     const TString& sourceId,
@@ -353,6 +380,14 @@ TVector<TString> CmdSourceIdRead(TTestContext& tc);
 std::pair<TString, TActorId> CmdSetOwner(
     const ui32 partition,
     TTestContext& tc,
+    const TString& owner = "default",
+    bool force = true);
+
+std::pair<TString, TActorId> CmdSetOwner(
+    TTestActorRuntime* runtime,
+    ui64 tabletId, 
+    const TActorId& sender,
+    const ui32 partition,
     const TString& owner = "default",
     bool force = true);
 
@@ -419,6 +454,24 @@ void CmdWrite(
     const TString& sourceId,
     const TVector<std::pair<ui64, TString>> data,
     TTestContext& tc,
+    bool error = false,
+    const THashSet<ui32>& alreadyWrittenSeqNo = {},
+    bool isFirst = false,
+    const TString& ownerCookie = "",
+    i32 msn = -1,
+    i64 offset = -1,
+    bool treatWrongCookieAsError = false,
+    bool treatBadOffsetAsError = true,
+    bool disableDeduplication = false);
+
+void CmdWrite(
+    TTestActorRuntime* runtime,
+    ui64 tabletId, 
+    const TActorId& sender,
+    const ui32 partition,
+    const TString& sourceId,
+    ui32& msgSeqNo,
+    const TVector<std::pair<ui64, TString>> data,
     bool error = false,
     const THashSet<ui32>& alreadyWrittenSeqNo = {},
     bool isFirst = false,

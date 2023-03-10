@@ -6,46 +6,11 @@
 
 namespace {
 
+constexpr char RateLimiterRateAttrName[] = "drop_blockstore_volume_rate_limiter_rate";
+constexpr char RateLimiterCapacityAttrName[] = "drop_blockstore_volume_rate_limiter_capacity";
+
 using namespace NKikimr;
 using namespace NSchemeShard;
-
-class TDeleteParts: public TSubOperationState {
-private:
-    TOperationId OperationId;
-
-    TString DebugHint() const override {
-        return TStringBuilder()
-                << "TDropBlockStoreVolume TDeleteParts"
-                << ", operationId: " << OperationId;
-    }
-
-public:
-    TDeleteParts(TOperationId id)
-        : OperationId(id)
-    {
-        IgnoreMessages(DebugHint(), {});
-    }
-
-    bool ProgressState(TOperationContext& context) override {
-        TTabletId ssId = context.SS->SelfTabletId();
-
-        LOG_INFO_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                   DebugHint() << " ProgressState"
-                               << ", at schemeshard: " << ssId);
-
-        TTxState* txState = context.SS->FindTx(OperationId);
-        Y_VERIFY(txState->TxType == TTxState::TxDropBlockStoreVolume);
-
-        // Initiate asynchronous deletion of all shards
-        for (auto shard : txState->Shards) {
-            context.OnComplete.DeleteShard(shard.Idx);
-        }
-
-        NIceDb::TNiceDb db(context.GetDB());
-        context.SS->ChangeTxState(db, OperationId, TTxState::Propose);
-        return true;
-    }
-};
 
 class TPropose: public TSubOperationState {
 private:
@@ -220,6 +185,36 @@ public:
             return result;
         }
 
+        {
+            auto& rateLimiter = context.SS->DropBlockStoreVolumeRateLimiter;
+
+            // update rate limiter params
+            auto domainDir = context.SS->PathsById.at(path.GetPathIdForDomain());
+            double rate = 0;
+            double capacity = 0;
+            auto& attrs = domainDir->UserAttrs->Attrs;
+            if (TryFromString(attrs[RateLimiterRateAttrName], rate) && 
+                TryFromString(attrs[RateLimiterCapacityAttrName], capacity))
+            {
+                rateLimiter.SetRate(rate);
+                rateLimiter.SetCapacity(capacity);
+            }
+
+            if (rate > 0.0 && capacity > 0.0) {
+                rateLimiter.Fill(AppData()->TimeProvider->Now());
+
+                if (rateLimiter.Available() >= 1.0) {
+                    rateLimiter.Take(1.0);
+                } else {
+                    // TODO: should use separate status?
+                    result->SetError(
+                        NKikimrScheme::StatusNotAvailable,
+                        "Too many requests");
+                    return result;
+                }
+            }
+        }
+
         TTxState& txState = context.SS->CreateTx(OperationId, TTxState::TxDropBlockStoreVolume, path.Base()->PathId);
         // Dirty hack: drop step must not be zero because 0 is treated as "hasn't been dropped"
         txState.MinStep = TStepId(1);
@@ -274,27 +269,7 @@ public:
     }
 
     void AbortUnsafe(TTxId forceDropTxId, TOperationContext& context) override {
-        LOG_NOTICE_S(context.Ctx, NKikimrServices::FLAT_TX_SCHEMESHARD,
-                     "TDropBlockStorageVolume AbortUnsafe"
-                         << ", opId: " << OperationId
-                         << ", forceDropId: " << forceDropTxId
-                         << ", at schemeshard: " << context.SS->TabletID());
-
-        TTxState* txState = context.SS->FindTx(OperationId);
-        Y_VERIFY(txState);
-
-        TPathId pathId = txState->TargetPathId;
-        Y_VERIFY(context.SS->PathsById.contains(pathId));
-        TPathElement::TPtr path = context.SS->PathsById.at(pathId);
-        Y_VERIFY(path);
-
-        if (path->Dropped()) {
-            for (auto shard : txState->Shards) {
-                context.OnComplete.DeleteShard(shard.Idx);
-            }
-        }
-
-        context.OnComplete.DoneOperation(OperationId);
+        AbortUnsafeDropOperation(OperationId, forceDropTxId, context);
     }
 };
 
@@ -302,11 +277,11 @@ public:
 
 namespace NKikimr::NSchemeShard {
 
-ISubOperationBase::TPtr CreateDropBSV(TOperationId id, const TTxTransaction& tx) {
+ISubOperation::TPtr CreateDropBSV(TOperationId id, const TTxTransaction& tx) {
     return MakeSubOperation<TDropBlockStoreVolume>(id, tx);
 }
 
-ISubOperationBase::TPtr CreateDropBSV(TOperationId id, TTxState::ETxState state) {
+ISubOperation::TPtr CreateDropBSV(TOperationId id, TTxState::ETxState state) {
     Y_VERIFY(state != TTxState::Invalid);
     return MakeSubOperation<TDropBlockStoreVolume>(id, state);
 }

@@ -5,6 +5,7 @@
 #include <ydb/core/tx/schemeshard/schemeshard.h>
 #include <ydb/core/tx/tx_proxy/proxy.h>
 #include <ydb/core/persqueue/events/global.h>
+#include <ydb/core/persqueue/ut/common/pq_ut_common.h>
 
 #include <ydb/core/blockstore/core/blockstore.h>
 
@@ -42,7 +43,7 @@ namespace NSchemeShardUT_Private {
     {
         TActorId sender = runtime.AllocateEdgeActor();
         ui64 txId = evRequest->Record.GetTxId();
-        runtime.Send(new IEventHandle(proposer, sender, evRequest));
+        runtime.Send(new IEventHandleFat(proposer, sender, evRequest));
 
         auto evResponse = runtime.GrabEdgeEvent<TEvResponse>(sender);
         UNIT_ASSERT(evResponse);
@@ -342,7 +343,7 @@ namespace NSchemeShardUT_Private {
         entry.RequestType = TNavigate::TEntry::ERequestType::ByPath;
         entry.Operation = op;
         entry.ShowPrivatePath = true;
-        runtime.Send(new IEventHandle(MakeSchemeCacheID(), sender, new TEvRequest(request.Release())));
+        runtime.Send(MakeSchemeCacheID(), sender, new TEvRequest(request.Release()));
 
         auto ev = runtime.GrabEdgeEventRethrow<TEvResponse>(sender);
         UNIT_ASSERT(ev);
@@ -887,6 +888,16 @@ namespace NSchemeShardUT_Private {
     GENERIC_HELPERS(AlterBlockStoreVolume, NKikimrSchemeOp::EOperationType::ESchemeOpAlterBlockStoreVolume, &NKikimrSchemeOp::TModifyScheme::MutableAlterBlockStoreVolume)
     GENERIC_HELPERS(DropBlockStoreVolume, NKikimrSchemeOp::EOperationType::ESchemeOpDropBlockStoreVolume, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
     DROP_BY_PATH_ID_HELPERS(DropBlockStoreVolume, NKikimrSchemeOp::EOperationType::ESchemeOpDropBlockStoreVolume)
+
+    // external table
+    GENERIC_HELPERS(CreateExternalTable, NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalTable, &NKikimrSchemeOp::TModifyScheme::MutableCreateExternalTable)
+    GENERIC_HELPERS(DropExternalTable, NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalTable, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+    DROP_BY_PATH_ID_HELPERS(DropExternalTable, NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalTable)
+
+    // external data source
+    GENERIC_HELPERS(CreateExternalDataSource, NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalDataSource, &NKikimrSchemeOp::TModifyScheme::MutableCreateExternalDataSource)
+    GENERIC_HELPERS(DropExternalDataSource, NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalDataSource, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+    DROP_BY_PATH_ID_HELPERS(DropExternalDataSource, NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalDataSource)
 
     #undef DROP_BY_PATH_ID_HELPERS
     #undef GENERIC_WITH_ATTRS_HELPERS
@@ -1613,7 +1624,7 @@ namespace NSchemeShardUT_Private {
                 tx->AddTables()->SetTablePath(path);
             }
             tx->SetTimeoutMs(timeout.MilliSeconds());
-            runtime.Send(new IEventHandle(MakeTxProxyID(), sender, request.Release()));
+            runtime.Send(new IEventHandleFat(MakeTxProxyID(), sender, request.Release()));
         }
 
         auto ev = runtime.GrabEdgeEventRethrow<TEvTxUserProxy::TEvProposeTransactionStatus>(sender);
@@ -2186,4 +2197,31 @@ namespace NSchemeShardUT_Private {
        auto& rec = result->Record;
        return rec;
    }
+
+    void SendTEvPeriodicTopicStats(TTestActorRuntime& runtime, ui64 topicId, ui64 generation, ui64 round, ui64 dataSize, ui64 usedReserveSize) {
+        TActorId sender = runtime.AllocateEdgeActor();
+
+        TEvPersQueue::TEvPeriodicTopicStats* ev = new TEvPersQueue::TEvPeriodicTopicStats();
+        auto& rec = ev->Record;
+        rec.SetPathId(topicId);
+        rec.SetGeneration(generation);
+        rec.SetRound(round);
+        rec.SetDataSize(dataSize);
+        rec.SetUsedReserveSize(usedReserveSize);
+
+        ForwardToTablet(runtime, TTestTxConfig::SchemeShard, sender, ev);
+    }
+
+    void WriteToTopic(TTestActorRuntime& runtime, const TString& path, ui32& msgSeqNo, const TString& message) {
+        auto topicDescr = DescribePath(runtime, path).GetPathDescription().GetPersQueueGroup();
+        auto partitionId = topicDescr.GetPartitions()[0].GetPartitionId();
+        auto tabletId = topicDescr.GetPartitions()[0].GetTabletId();
+
+        const auto edge = runtime.AllocateEdgeActor();
+        TString cookie = NKikimr::NPQ::CmdSetOwner(&runtime, tabletId, edge, partitionId, "default", true).first;
+
+        TVector<std::pair<ui64, TString>> data;
+        data.push_back({1, message});
+        NKikimr::NPQ::CmdWrite(&runtime, tabletId, edge, partitionId, "sourceid0", msgSeqNo, data, false, {}, true, cookie, 0);
+    }
 }

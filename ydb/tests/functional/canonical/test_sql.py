@@ -9,7 +9,7 @@ import uuid
 from ydb.tests.library.common import yatest_common
 from ydb.tests.library.harness.kikimr_cluster import kikimr_cluster_factory
 from ydb.tests.library.harness.kikimr_config import KikimrConfigGenerator
-from ydb.tests.oss_canonical import set_canondata_root, is_oss
+from ydb.tests.oss.canonical import set_canondata_root, is_oss
 import ydb
 import ydb.issues
 from ydb.public.api.protos import ydb_table_pb2
@@ -109,7 +109,15 @@ class BaseCanonicalTest(object):
         set_canondata_root('ydb/tests/functional/canonical/canondata')
 
         cls.database = '/local'
-        cls.cluster = kikimr_cluster_factory(KikimrConfigGenerator(load_udfs=True, domain_name='local', use_in_memory_pdisks=True, disable_iterator_reads=True))
+        cls.cluster = kikimr_cluster_factory(
+            KikimrConfigGenerator(
+                load_udfs=True,
+                domain_name='local',
+                use_in_memory_pdisks=True,
+                disable_iterator_reads=True,
+                disable_iterator_lookups=True
+            )
+        )
         cls.cluster.start()
         cls.driver = ydb.Driver(
             ydb.DriverConfig("%s:%s" % (cls.cluster.nodes[1].host, cls.cluster.nodes[1].port), cls.database))

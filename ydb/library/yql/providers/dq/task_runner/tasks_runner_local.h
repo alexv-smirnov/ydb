@@ -2,12 +2,13 @@
 
 #include "tasks_runner_proxy.h"
 
-#include <ydb/library/yql/providers/dq/interface/yql_dq_task_transform.h>
+#include <ydb/library/yql/dq/integration/transform/yql_dq_task_transform.h>
 
 namespace NYql::NTaskRunnerProxy {
 
 IProxyFactory::TPtr CreateFactory(const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
     NKikimr::NMiniKQL::TComputationNodeFactory compFactory, TTaskTransformFactory taskTransformFactory,
+    std::shared_ptr<NKikimr::NMiniKQL::TComputationPatternLRUCache> patternCache,
     bool terminateOnError
 );
 

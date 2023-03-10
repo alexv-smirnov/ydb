@@ -256,11 +256,9 @@ private:
 
 struct TAlterConsumerSettings;
 struct TAlterTopicSettings;
-struct TCreateTopicSettings;
 
-typedef TAlterAttributesBuilderImpl<TAlterConsumerSettings> TAlterConsumerAttributesBuilder;
-
-typedef TAlterAttributesBuilderImpl<TAlterTopicSettings> TAlterTopicAttributesBuilder;
+using TAlterConsumerAttributesBuilder = TAlterAttributesBuilderImpl<TAlterConsumerSettings>;
+using TAlterTopicAttributesBuilder = TAlterAttributesBuilderImpl<TAlterTopicSettings>;
 
 template<class TSettings>
 struct TConsumerSettings {
@@ -478,17 +476,26 @@ struct TAlterTopicSettings : public TOperationRequestSettings<TAlterTopicSetting
 
 
 // Settings for drop resource request.
-struct TDropTopicSettings : public TOperationRequestSettings<TDropTopicSettings> {};
+struct TDropTopicSettings : public TOperationRequestSettings<TDropTopicSettings> {
+    using TOperationRequestSettings<TDropTopicSettings>::TOperationRequestSettings;
+};
 
 // Settings for describe resource request.
 struct TDescribeTopicSettings : public TOperationRequestSettings<TDescribeTopicSettings> {
+    using TSelf = TDescribeTopicSettings;
+
     FLUENT_SETTING_DEFAULT(bool, IncludeStats, false);
 };
 
 // Settings for describe resource request.
 struct TDescribeConsumerSettings : public TOperationRequestSettings<TDescribeConsumerSettings> {
+    using TSelf = TDescribeConsumerSettings;
+
     FLUENT_SETTING_DEFAULT(bool, IncludeStats, false);
 };
+
+// Settings for commit offset request.
+struct TCommitOffsetSettings : public TOperationRequestSettings<TCommitOffsetSettings> {};
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -517,7 +524,7 @@ struct TWriteStat : public TThrRefBase {
 };
 
 class TContinuationToken : public TMoveOnly {
-    friend class TWriteSession;
+    friend class TWriteSessionImpl;
 private:
     TContinuationToken() = default;
 };
@@ -1228,8 +1235,12 @@ struct TWriteSessionSettings : public TRequestSettings<TWriteSessionSettings> {
         //! Function to handle all event types.
         //! If event with current type has no handler for this type of event,
         //! this handler (if specified) will be used.
-        //! If this handler is not specified, event can be received with TReadSession::GetEvent() method.
-        FLUENT_SETTING(std::function<void(TReadSessionEvent::TEvent&)>, CommonHandler);
+        //! If this handler is not specified, event can be received with TWriteSession::GetEvent() method.
+        std::function<void(TWriteSessionEvent::TEvent&)> CommonHandler_;
+        TSelf& CommonHandler(std::function<void(TWriteSessionEvent::TEvent&)>&& handler) {
+            CommonHandler_ = std::move(handler);
+            return static_cast<TSelf&>(*this);
+        }
 
         //! Executor for handlers.
         //! If not set, default single threaded executor will be used.
@@ -1527,16 +1538,17 @@ public:
     TAsyncStatus CreateTopic(const TString& path, const TCreateTopicSettings& settings = {});
 
     // Update a topic.
-    TAsyncStatus AlterTopic(const TString& path, const TAlterTopicSettings& = {});
+    TAsyncStatus AlterTopic(const TString& path, const TAlterTopicSettings& settings = {});
 
     // Delete a topic.
-    TAsyncStatus DropTopic(const TString& path, const TDropTopicSettings& = {});
+    TAsyncStatus DropTopic(const TString& path, const TDropTopicSettings& settings = {});
 
     // Describe settings of topic.
-    TAsyncDescribeTopicResult DescribeTopic(const TString& path, const TDescribeTopicSettings& = {});
+    TAsyncDescribeTopicResult DescribeTopic(const TString& path, const TDescribeTopicSettings& settings = {});
 
     // Describe settings of topic's consumer.
-    TAsyncDescribeConsumerResult DescribeConsumer(const TString& path, const TString& consumer, const TDescribeConsumerSettings& = {});
+    TAsyncDescribeConsumerResult DescribeConsumer(const TString& path, const TString& consumer,
+        const TDescribeConsumerSettings& settings = {});
 
     //! Create read session.
     std::shared_ptr<IReadSession> CreateReadSession(const TReadSessionSettings& settings);
@@ -1544,6 +1556,10 @@ public:
     //! Create write session.
     std::shared_ptr<ISimpleBlockingWriteSession> CreateSimpleBlockingWriteSession(const TWriteSessionSettings& settings);
     std::shared_ptr<IWriteSession> CreateWriteSession(const TWriteSessionSettings& settings);
+
+    // Commit offset
+    TAsyncStatus CommitOffset(const TString& path, ui64 partitionId, const TString& consumerName, ui64 offset,
+        const TCommitOffsetSettings& settings = {});
 
 private:
     std::shared_ptr<TImpl> Impl_;

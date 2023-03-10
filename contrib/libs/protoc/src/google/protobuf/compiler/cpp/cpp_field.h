@@ -181,10 +181,14 @@ class FieldGenerator {
   // are placed in the message's ByteSize() method.
   virtual void GenerateByteSize(io::Printer* printer) const = 0;
 
+  // Generates lines to call IsInitialized() for eligible message fields. Non
+  // message fields won't need to override this function.
+  virtual void GenerateIsInitialized(io::Printer* printer) const {}
+
   virtual bool IsInlined() const { return false; }
 
-  void SetHasBitIndex(i32 has_bit_index);
-  void SetInlinedStringIndex(i32 inlined_string_index);
+  void SetHasBitIndex(arc_i32 has_bit_index);
+  void SetInlinedStringIndex(arc_i32 inlined_string_index);
 
  protected:
   const FieldDescriptor* descriptor_;

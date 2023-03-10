@@ -87,7 +87,6 @@
 #include <ydb/core/keyvalue/keyvalue.h>
 #include <ydb/core/persqueue/pq.h>
 #include <ydb/core/persqueue/cluster_tracker.h>
-#include <ydb/core/yq/libs/audit/mock/yq_mock_audit_service.h>
 #include <ydb/library/security/ydb_credentials_provider_factory.h>
 #include <ydb/core/yq/libs/init/init.h>
 #include <ydb/core/yq/libs/mock/yql_mock.h>
@@ -212,27 +211,48 @@ namespace Tests {
         Runtime->SetupMonitoring();
         Runtime->SetLogBackend(Settings->LogBackend);
 
+        Runtime->AddAppDataInit([this](ui32 nodeIdx, NKikimr::TAppData& appData) {
+            Y_UNUSED(nodeIdx);
+
+            appData.AuthConfig.MergeFrom(Settings->AuthConfig);
+            appData.PQConfig.MergeFrom(Settings->PQConfig);
+            appData.PQClusterDiscoveryConfig.MergeFrom(Settings->PQClusterDiscoveryConfig);
+            appData.NetClassifierConfig.MergeFrom(Settings->NetClassifierConfig);
+            appData.StreamingConfig.MergeFrom(Settings->AppConfig.GetGRpcConfig().GetStreamingConfig());
+            appData.EnforceUserTokenRequirement = Settings->AppConfig.GetDomainsConfig().GetSecurityConfig().GetEnforceUserTokenRequirement();
+            appData.DomainsConfig.MergeFrom(Settings->AppConfig.GetDomainsConfig());
+            appData.PersQueueGetReadSessionsInfoWorkerFactory = Settings->PersQueueGetReadSessionsInfoWorkerFactory.get();
+            appData.DataStreamsAuthFactory = Settings->DataStreamsAuthFactory.get();
+            appData.PersQueueMirrorReaderFactory = Settings->PersQueueMirrorReaderFactory.get();
+
+            appData.DynamicNameserviceConfig = new TDynamicNameserviceConfig;
+            auto dnConfig = appData.DynamicNameserviceConfig;
+            dnConfig->MaxStaticNodeId = 1023;
+            dnConfig->MaxDynamicNodeId = 1024 + 100;
+        });
+
         const bool mockDisk = (StaticNodes() + DynamicNodes()) == 1 && Settings->EnableMockOnSingleNode;
         SetupTabletServices(*Runtime, &app, mockDisk, Settings->CustomDiskParams, Settings->CacheParams);
 
-        for (ui32 nodeIdx = 0; nodeIdx < StaticNodes() + DynamicNodes(); ++nodeIdx) {
+        // WARNING: must be careful about modifying app data after actor system starts
+
+        // NOTE: Setup of the static and dynamic nodes is mostly common except for the "local" service,
+        // which _must not_ be started up on dynamic nodes.
+        //
+        // This is because static nodes should be active and must serve root subdomain right from the start.
+        // Unlike static nodes, dynamic nodes are vacant. In this testing framework they are intended
+        // to serve tenant subdomains that will be created in tests. Dynamic node will be "activated" then
+        // by call to SetupDynamicLocalService() which will start "local" service exclusively to serve
+        // requested tenant subdomain.
+        //
+        // And while single "local" service is capable of serving more than one subdomain, there are never
+        // should be more than one "local" service on a node. Otherwise two "locals" will be competing
+        // and tests might have unexpected flaky behaviour.
+        //
+        for (ui32 nodeIdx = 0; nodeIdx < StaticNodes(); ++nodeIdx) {
             SetupDomainLocalService(nodeIdx);
-            Runtime->GetAppData(nodeIdx).AuthConfig.MergeFrom(Settings->AuthConfig);
-            Runtime->GetAppData(nodeIdx).PQConfig.MergeFrom(Settings->PQConfig);
-            Runtime->GetAppData(nodeIdx).PQClusterDiscoveryConfig.MergeFrom(Settings->PQClusterDiscoveryConfig);
-            Runtime->GetAppData(nodeIdx).NetClassifierConfig.MergeFrom(Settings->NetClassifierConfig);
-            Runtime->GetAppData(nodeIdx).StreamingConfig.MergeFrom(Settings->AppConfig.GetGRpcConfig().GetStreamingConfig());
-            Runtime->GetAppData(nodeIdx).EnforceUserTokenRequirement = Settings->AppConfig.GetDomainsConfig().GetSecurityConfig().GetEnforceUserTokenRequirement();
-            Runtime->GetAppData(nodeIdx).DomainsConfig.MergeFrom(Settings->AppConfig.GetDomainsConfig());
-            Runtime->GetAppData(nodeIdx).PersQueueGetReadSessionsInfoWorkerFactory = Settings->PersQueueGetReadSessionsInfoWorkerFactory.get();
-            Runtime->GetAppData(nodeIdx).DataStreamsAuthFactory = Settings->DataStreamsAuthFactory.get();
-            Runtime->GetAppData(nodeIdx).PersQueueMirrorReaderFactory = Settings->PersQueueMirrorReaderFactory.get();
-
-            Runtime->GetAppData(nodeIdx).DynamicNameserviceConfig = new TDynamicNameserviceConfig;
-            auto dnConfig = Runtime->GetAppData(nodeIdx).DynamicNameserviceConfig;
-            dnConfig->MaxStaticNodeId = 1023;
-            dnConfig->MaxDynamicNodeId = 1024 + 100;
-
+        }
+        for (ui32 nodeIdx = 0; nodeIdx < StaticNodes() + DynamicNodes(); ++nodeIdx) {
             SetupConfigurators(nodeIdx);
             SetupProxies(nodeIdx);
         }
@@ -266,9 +286,17 @@ namespace Tests {
         auto grpcService = new NGRpcProxy::TGRpcService();
 
         auto system(Runtime->GetAnyNodeActorSystem());
-        auto grpcRequestProxy = NGRpcService::CreateGRpcRequestProxy(Settings->AppConfig);
-        auto grpcRequestProxyId = system->Register(grpcRequestProxy, TMailboxType::ReadAsFilled);
-        system->RegisterLocalService(NGRpcService::CreateGRpcRequestProxyId(), grpcRequestProxyId);
+
+        const size_t proxyCount = Max(ui32{1}, Settings->AppConfig.GetGRpcConfig().GetGRpcProxyCount());
+        TVector<TActorId> grpcRequestProxies;
+        grpcRequestProxies.reserve(proxyCount);
+        for (size_t i = 0; i < proxyCount; ++i) {
+            auto grpcRequestProxy = NGRpcService::CreateGRpcRequestProxy(Settings->AppConfig);
+            auto grpcRequestProxyId = system->Register(grpcRequestProxy, TMailboxType::ReadAsFilled);
+            system->RegisterLocalService(NGRpcService::CreateGRpcRequestProxyId(), grpcRequestProxyId);
+            grpcRequestProxies.push_back(grpcRequestProxyId);
+        }
+
         auto grpcMon = system->Register(NGRpcService::CreateGrpcMonService(), TMailboxType::ReadAsFilled);
         system->RegisterLocalService(NGRpcService::GrpcMonServiceId(), grpcMon);
 
@@ -321,39 +349,38 @@ namespace Tests {
         future.Subscribe(startCb);
 
         GRpcServer->AddService(grpcService);
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbExportService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbImportService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbSchemeService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbTableService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbScriptingService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcOperationService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::V1::TGRpcPersQueueService(system, counters, NMsgBusProxy::CreatePersQueueMetaCacheV2Id(), grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::V1::TGRpcTopicService(system, counters, NMsgBusProxy::CreatePersQueueMetaCacheV2Id(), grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::V1::TGRpcTopicServiceTx(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcPQClusterDiscoveryService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NKesus::TKesusGRpcService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcCmsService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcDiscoveryService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbClickhouseInternalService(system, counters, appData.InFlightLimiterRegistry, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NQuoter::TRateLimiterGRpcService(system, counters, grpcRequestProxyId));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbLongTxService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcDataStreamsService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcMonitoringService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbQueryService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbExportService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbImportService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbSchemeService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbTableService(system, counters, grpcRequestProxies, true, 1));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbScriptingService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcOperationService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::V1::TGRpcPersQueueService(system, counters, NMsgBusProxy::CreatePersQueueMetaCacheV2Id(), grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::V1::TGRpcTopicService(system, counters, NMsgBusProxy::CreatePersQueueMetaCacheV2Id(), grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcPQClusterDiscoveryService(system, counters, grpcRequestProxies[0]));
+        GRpcServer->AddService(new NKesus::TKesusGRpcService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcCmsService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcDiscoveryService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbClickhouseInternalService(system, counters, appData.InFlightLimiterRegistry, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NQuoter::TRateLimiterGRpcService(system, counters, grpcRequestProxies[0]));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbLongTxService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcDataStreamsService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcMonitoringService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbQueryService(system, counters, grpcRequestProxies[0], true));
         if (Settings->EnableYq) {
-            GRpcServer->AddService(new NGRpcService::TGRpcYandexQueryService(system, counters, grpcRequestProxyId));
-            GRpcServer->AddService(new NGRpcService::TGRpcFederatedQueryService(system, counters, grpcRequestProxyId));
-            GRpcServer->AddService(new NGRpcService::TGRpcFqPrivateTaskService(system, counters, grpcRequestProxyId));
+            GRpcServer->AddService(new NGRpcService::TGRpcYandexQueryService(system, counters, grpcRequestProxies[0]));
+            GRpcServer->AddService(new NGRpcService::TGRpcFederatedQueryService(system, counters, grpcRequestProxies[0]));
+            GRpcServer->AddService(new NGRpcService::TGRpcFqPrivateTaskService(system, counters, grpcRequestProxies[0]));
         }
         if (const auto& factory = Settings->GrpcServiceFactory) {
             // All services enabled by default for ut
             static const std::unordered_set<TString> dummy;
-            for (const auto& service : factory->Create(dummy, dummy, system, counters, grpcRequestProxyId)) {
+            for (const auto& service : factory->Create(dummy, dummy, system, counters, grpcRequestProxies[0])) {
                 GRpcServer->AddService(service);
             }
         }
-        GRpcServer->AddService(new NGRpcService::TGRpcYdbLogStoreService(system, counters, grpcRequestProxyId, true));
-        GRpcServer->AddService(new NGRpcService::TGRpcAuthService(system, counters, grpcRequestProxyId, true));
+        GRpcServer->AddService(new NGRpcService::TGRpcYdbLogStoreService(system, counters, grpcRequestProxies[0], true));
+        GRpcServer->AddService(new NGRpcService::TGRpcAuthService(system, counters, grpcRequestProxies[0], true));
         GRpcServer->Start();
     }
 
@@ -500,7 +527,7 @@ namespace Tests {
         pipeConfig.RetryPolicy = NTabletPipe::TClientRetryPolicy::WithRetries();
 
         //get NodesInfo, nodes hostname and port are interested
-        Runtime->Send(new IEventHandle(GetNameserviceActorId(), sender, new TEvInterconnect::TEvListNodes));
+        Runtime->Send(new IEventHandleFat(GetNameserviceActorId(), sender, new TEvInterconnect::TEvListNodes));
         TAutoPtr<IEventHandle> handleNodesInfo;
         auto nodesInfo = Runtime->GrabEdgeEventRethrow<TEvInterconnect::TEvNodesInfo>(handleNodesInfo);
 
@@ -608,7 +635,7 @@ namespace Tests {
     void TServer::DestroyDynamicLocalService(ui32 nodeIdx) {
         Y_VERIFY(nodeIdx >= StaticNodes());
         TActorId local = MakeLocalID(Runtime->GetNodeId(nodeIdx)); // MakeTenantPoolRootID?
-        Runtime->Send(new IEventHandle(local, TActorId(), new TEvents::TEvPoisonPill()));
+        Runtime->Send(new IEventHandleFat(local, TActorId(), new TEvents::TEvPoisonPill()));
     }
 
     void TServer::SetupLocalConfig(TLocalConfig &localConfig, const NKikimr::TAppData &appData) {
@@ -726,18 +753,18 @@ namespace Tests {
             TActorId healthCheckId = Runtime->Register(healthCheck, nodeIdx);
             Runtime->RegisterService(NHealthCheck::MakeHealthCheckID(), healthCheckId, nodeIdx);
         }
-
         {
-            IActor* kqpRmService = NKqp::CreateKqpResourceManagerActor(Settings->AppConfig.GetTableServiceConfig().GetResourceManager(), nullptr);
+            auto kqpProxySharedResources = std::make_shared<NKqp::TKqpProxySharedResources>();
+
+            IActor* kqpRmService = NKqp::CreateKqpResourceManagerActor(
+                Settings->AppConfig.GetTableServiceConfig().GetResourceManager(), nullptr, {}, kqpProxySharedResources);
             TActorId kqpRmServiceId = Runtime->Register(kqpRmService, nodeIdx);
             Runtime->RegisterService(NKqp::MakeKqpRmServiceID(Runtime->GetNodeId(nodeIdx)), kqpRmServiceId, nodeIdx);
-        }
 
-        {
             IActor* kqpProxyService = NKqp::CreateKqpProxyService(Settings->AppConfig.GetLogConfig(),
                                                                   Settings->AppConfig.GetTableServiceConfig(),
                                                                   TVector<NKikimrKqp::TKqpSetting>(Settings->KqpSettings),
-                                                                  nullptr);
+                                                                  nullptr, std::move(kqpProxySharedResources));
             TActorId kqpProxyServiceId = Runtime->Register(kqpProxyService, nodeIdx);
             Runtime->RegisterService(NKqp::MakeKqpProxyID(Runtime->GetNodeId(nodeIdx)), kqpProxyServiceId, nodeIdx);
         }
@@ -947,8 +974,6 @@ namespace Tests {
                 nullptr, // MakeIntrusive<NPq::NConfigurationManager::TConnections>(),
                 YqSharedResources,
                 NKikimr::NFolderService::CreateMockFolderServiceActor,
-                NYq::CreateMockYqAuditServiceActor,
-                ydbCredFactory,
                 /*IcPort = */0,
                 {}
                 );
@@ -1827,10 +1852,9 @@ namespace Tests {
         entry.Path = SplitPath(path);
         entry.Operation = NSchemeCache::TSchemeCacheNavigate::OpPath;
         runtime->Send(
-            new IEventHandle(
-                MakeSchemeCacheID(),
-                sender,
-                new TEvTxProxySchemeCache::TEvNavigateKeySet(request.Release())),
+            MakeSchemeCacheID(),
+            sender,
+            new TEvTxProxySchemeCache::TEvNavigateKeySet(request.Release()),
             nodeIdx);
         auto ev = runtime->GrabEdgeEvent<TEvTxProxySchemeCache::TEvNavigateKeySetResult>(sender);
         Y_VERIFY(ev);
@@ -2239,7 +2263,7 @@ namespace Tests {
             }
         } catch (TEmptyEventQueueException &) {}
 
-        runtime->Send(new IEventHandle(pipeClient, TActorId(), new TEvents::TEvPoisonPill()));
+        runtime->Send(new IEventHandleFat(pipeClient, TActorId(), new TEvents::TEvPoisonPill()));
         return res;
     }
 
@@ -2284,7 +2308,7 @@ namespace Tests {
             }
         } catch (TEmptyEventQueueException &) {}
 
-        runtime->Send(new IEventHandle(pipeClient, edge, new TEvents::TEvPoisonPill()));
+        runtime->Send(new IEventHandleFat(pipeClient, edge, new TEvents::TEvPoisonPill()));
         return res;
     }
 
@@ -2405,7 +2429,7 @@ namespace Tests {
 
         TAutoPtr<IEventHandle> handle;
         runtime->GrabEdgeEvent<NKesus::TEvKesus::TEvGetConfigResult>(handle);
-        return handle->Release<NKesus::TEvKesus::TEvGetConfigResult>();
+        return THolder<NKesus::TEvKesus::TEvGetConfigResult>(IEventHandle::Release<NKesus::TEvKesus::TEvGetConfigResult>(handle));
     }
 
     bool IsServerRedirected() {

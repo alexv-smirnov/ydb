@@ -90,7 +90,7 @@ private:
     void AnswerFailed(TSqsEvents::TEvGetConfiguration::TPtr& ev);
     void AskQueueAttributes();
     void OnQueueAttributes(const TSqsEvents::TEvExecuted::TRecord& ev);
-    void MarkInflyReloading(ui64 shard, size_t invalidatedCount, const TString& invalidationReason);
+    void MarkInflyReloading(ui64 shard, i64 invalidatedCount, const TString& invalidationReason);
     void StartLoadingInfly();
     void StartLoadingInfly(ui64 shard, bool afterFailure = false);
     void OnInflyLoaded(ui64 shard, const TSqsEvents::TEvExecuted::TRecord& reply);
@@ -397,7 +397,7 @@ private:
             Failed, // waiting for scheduled retry
         };
         EInflyLoadState InflyLoadState = EInflyLoadState::New;
-        size_t LoadInflyRequests = 0;
+        bool LoadInflyRequestInProcess = false;
         size_t ActiveMessageRequests = 0;
         ui64 ReadOffset = 0;
         bool AddingMessagesToInfly = false;

@@ -56,7 +56,9 @@ user@host:~/github$ cd ydb
 user@host:~/github/ydb$ ydb_root=$(pwd)
 user@host:~/github/ydb$ ./ydb/apps/dstool/compile_protos.py --ydb-root ${ydb_root} 2>/dev/null
 user@host:~/github/ydb$ mv ydb/apps/dstool/setup.py .
+user@host:~/github/ydb$ python3 -m pip install --upgrade build
 user@host:~/github/ydb$ python3 -m build
+user@host:~/github/ydb$ python3 -m pip install --upgrade twine
 user@host:~/github/ydb$ python3 -m twine upload dist/*
 ```
 
@@ -211,7 +213,29 @@ or ```-H``` to command options:
 user@host:~$ ydb-dstool -e ydbd.endpoint pdisk list --show-pdisk-usage -H
 ```
 
+## Do things with storage devices
+
+A storage device is a hardware data storage device installed on a cluster's machine and prepared for cluster's use.
+Currently the following types of storage devices are supported:
+
+* HDD
+* SSD
+* NVME
+
+A storage device available on a cluster and preperated for use, may or may not be used by the cluster.
+
+### List devices
+
+```bash
+user@host:~$ ydb-dstool -e ydbd.endpoint device list
+```
+
+The above command lists all storage devices of a cluster available for use.
+
 ## Do things with pdisks
+
+Physical disk or pdisk is an abstraction of a storage device which is used by the cluster. As a result every pdisk
+has an associated storage device, but not every storage device has an associated pdisk.
 
 ### List pdisks
 

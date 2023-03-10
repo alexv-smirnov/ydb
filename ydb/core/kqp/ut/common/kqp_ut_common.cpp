@@ -256,6 +256,11 @@ void TKikimrRunner::CreateSampleTables() {
             PRIMARY KEY (Key)
         );
 
+        CREATE TABLE `KeyValueLargePartition` (
+            Key Uint64,
+            Value String,
+            PRIMARY KEY (Key)
+        );
 
         CREATE TABLE `Test` (
             Group Uint32,
@@ -289,6 +294,32 @@ void TKikimrRunner::CreateSampleTables() {
     )").GetValueSync());
 
     AssertSuccessResult(session.ExecuteDataQuery(R"(
+
+        REPLACE INTO `KeyValueLargePartition` (Key, Value) VALUES
+            (101u, "Value1"),
+            (102u, "Value2"),
+            (103u, "Value3"),
+            (201u, "Value1"),
+            (202u, "Value2"),
+            (203u, "Value3"),
+            (301u, "Value1"),
+            (302u, "Value2"),
+            (303u, "Value3"),
+            (401u, "Value1"),
+            (402u, "Value2"),
+            (403u, "Value3"),
+            (501u, "Value1"),
+            (502u, "Value2"),
+            (503u, "Value3"),
+            (601u, "Value1"),
+            (602u, "Value2"),
+            (603u, "Value3"),
+            (701u, "Value1"),
+            (702u, "Value2"),
+            (703u, "Value3"),
+            (801u, "Value1"),
+            (802u, "Value2"),
+            (803u, "Value3");
 
         REPLACE INTO `TwoShard` (Key, Value1, Value2) VALUES
             (1u, "One", -1),
@@ -509,7 +540,7 @@ TDataQueryResult ExecQueryAndTestResult(TSession& session, const TString& query,
     const TString& expectedYson)
 {
     NYdb::NTable::TExecDataQuerySettings settings;
-    settings.CollectQueryStats(ECollectQueryStatsMode::Basic);
+    settings.CollectQueryStats(ECollectQueryStatsMode::Profile);
 
     TDataQueryResult result = session.ExecuteDataQuery(query, TTxControl::BeginTx().CommitTx(), params, settings)
             .ExtractValueSync();
@@ -818,10 +849,38 @@ void FindPlanNodesImpl(const NJson::TJsonValue& node, const TString& key, std::v
     }
 }
 
+void FindPlanStagesImpl(const NJson::TJsonValue& node, std::vector<NJson::TJsonValue>& stages) {
+    if (node.IsArray()) {
+        for (const auto& item: node.GetArray()) {
+            FindPlanStagesImpl(item, stages);
+        }
+    }
+
+    if (!node.IsMap()) {
+        return;
+    }
+
+    auto map = node.GetMap();
+    // TODO: Use explicit PlanNodeType for stages
+    if (map.contains("Node Type") && !map.contains("PlanNodeType")) {
+        stages.push_back(node);
+    }
+
+    for (const auto& [_, value]: map) {
+        FindPlanStagesImpl(value, stages);
+    }
+}
+
 std::vector<NJson::TJsonValue> FindPlanNodes(const NJson::TJsonValue& plan, const TString& key) {
     std::vector<NJson::TJsonValue> results;
     FindPlanNodesImpl(plan, key, results);
     return results;
+}
+
+std::vector<NJson::TJsonValue> FindPlanStages(const NJson::TJsonValue& plan) {
+    std::vector<NJson::TJsonValue> stages;
+    FindPlanStagesImpl(plan, stages);
+    return stages;
 }
 
 void CreateSampleTablesWithIndex(TSession& session) {
@@ -915,6 +974,32 @@ void WaitForKqpProxyInit(const NYdb::TDriver& driver) {
 
 void InitRoot(Tests::TServer::TPtr server, TActorId sender) {
     server->SetupRootStoragePools(sender);
+}
+
+THolder<NSchemeCache::TSchemeCacheNavigate> Navigate(TTestActorRuntime& runtime, const TActorId& sender,
+                                                     const TString& path, NSchemeCache::TSchemeCacheNavigate::EOp op)
+{
+    using TNavigate = NSchemeCache::TSchemeCacheNavigate;
+    using TEvRequest = TEvTxProxySchemeCache::TEvNavigateKeySet;
+    using TEvResponse = TEvTxProxySchemeCache::TEvNavigateKeySetResult;
+
+    auto request = MakeHolder<TNavigate>();
+    auto& entry = request->ResultSet.emplace_back();
+    entry.Path = SplitPath(path);
+    entry.RequestType = TNavigate::TEntry::ERequestType::ByPath;
+    entry.Operation = op;
+    entry.ShowPrivatePath = true;
+    runtime.Send(MakeSchemeCacheID(), sender, new TEvRequest(request.Release()));
+
+    auto ev = runtime.GrabEdgeEventRethrow<TEvResponse>(sender);
+    UNIT_ASSERT(ev);
+    UNIT_ASSERT(ev->Get());
+
+    auto* response = ev->Get()->Request.Release();
+    UNIT_ASSERT(response);
+    UNIT_ASSERT_VALUES_EQUAL(response->ResultSet.size(), 1);
+
+    return THolder(response);
 }
 
 } // namspace NKqp

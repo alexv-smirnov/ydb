@@ -138,25 +138,33 @@ TExprNode::TPtr KeepSortedConstraint(TExprNode::TPtr node, const TSortedConstrai
         .Build();
 }
 
-TExprNode::TPtr KeepConstraints(TExprNode::TPtr node, const TExprNode& src, TExprContext& ctx) {
-    auto res = KeepSortedConstraint(node, src.GetConstraint<TSortedConstraintNode>(), ctx);
-    if (const auto uniq = src.GetConstraint<TUniqueConstraintNode>()) {
+template<bool Distinct>
+TExprNode::TPtr KeepUniqueConstraint(TExprNode::TPtr node, const TExprNode& src, TExprContext& ctx) {
+    if (const auto uniq = src.GetConstraint<TUniqueConstraintNodeBase<Distinct>>()) {
         TExprNode::TListType columns;
         for (const auto& set : uniq->GetAllSets())
             for (const auto& path : set)
                 if (!path.empty())
                     columns.emplace_back(ctx.NewAtom(node->Pos(), path.front()));
-        res = columns.empty() ?
-            ctx.NewCallable(node->Pos(), "AssumeUnique", {std::move(res)}):
+        const auto& name = std::conditional_t<Distinct, TCoAssumeDistinct, TCoAssumeUnique>::CallableName();
+        return columns.empty() ?
+            ctx.NewCallable(node->Pos(), name, {std::move(node)}):
             ctx.Builder(node->Pos())
-                .Callable("AssumeUnique")
-                    .Add(0, std::move(res))
+                .Callable(name)
+                    .Add(0, std::move(node))
                     .List(1)
                         .Add(std::move(columns))
                     .Seal()
                 .Seal()
                 .Build();
     }
+    return node;
+}
+
+TExprNode::TPtr KeepConstraints(TExprNode::TPtr node, const TExprNode& src, TExprContext& ctx) {
+    auto res = KeepSortedConstraint(node, src.GetConstraint<TSortedConstraintNode>(), ctx);
+    res = KeepUniqueConstraint<true>(std::move(res), src, ctx);
+    res = KeepUniqueConstraint<false>(std::move(res), src, ctx);
     return res;
 }
 
@@ -291,7 +299,7 @@ TExprNode::TPtr ExpandFlattenEquiJoin(const TExprNode::TPtr& node, TExprContext&
     return ctx.NewCallable(node->Pos(), "Map", { std::move(newJoin), std::move(mapLambda) });
 }
 
-void GatherEquiJoinKeyColumnsFromEquality(TExprNode::TPtr columns, TSet<TString>& keyColumns) {
+void GatherEquiJoinKeyColumnsFromEquality(TExprNode::TPtr columns, THashSet<TString>& keyColumns) {
     for (ui32 i = 0; i < columns->ChildrenSize(); i += 2) {
         auto table = columns->Child(i)->Content();
         auto column = columns->Child(i + 1)->Content();
@@ -299,82 +307,21 @@ void GatherEquiJoinKeyColumnsFromEquality(TExprNode::TPtr columns, TSet<TString>
     }
 }
 
-TExprNode::TPtr DoMarkUnusedKeyColumns(const TExprNode::TPtr& joinTree, THashSet<TString>& drops, THashSet<TString>& keyColumns, bool& needRebuild, bool topLevel, TExprContext& ctx) {
-    auto joinKind = joinTree->ChildPtr(0);
-    auto left = joinTree->ChildPtr(1);
-    auto right = joinTree->ChildPtr(2);
+void GatherEquiJoinKeyColumns(TExprNode::TPtr joinTree, THashSet<TString>& keyColumns) {
+    auto left = joinTree->Child(1);
+    if (!left->IsAtom()) {
+        GatherEquiJoinKeyColumns(left, keyColumns);
+    }
+
+    auto right = joinTree->Child(2);
+    if (!right->IsAtom()) {
+        GatherEquiJoinKeyColumns(right, keyColumns);
+    }
+
     auto leftColumns = joinTree->Child(3);
     auto rightColumns = joinTree->Child(4);
-    auto settings = joinTree->ChildPtr(5);
-
-    TSet<TString> unusedKeys;
-
-    TSet<TString> leftKeys;
-    GatherEquiJoinKeyColumnsFromEquality(leftColumns, leftKeys);
-    if (joinKind->Content() != "RightOnly" && joinKind->Content() != "RightSemi") {
-        for (auto& key : leftKeys) {
-            if (drops.contains(key)) {
-                unusedKeys.insert(key);
-            }
-        }
-    }
-    for (auto& key : leftKeys) {
-        drops.erase(key);
-    }
-    keyColumns.insert(leftKeys.begin(), leftKeys.end());
-
-    TSet<TString> rightKeys;
-    GatherEquiJoinKeyColumnsFromEquality(rightColumns, rightKeys);
-    if (joinKind->Content() != "LeftOnly" && joinKind->Content() != "LeftSemi") {
-        for (auto& key : rightKeys) {
-            if (drops.contains(key)) {
-                unusedKeys.insert(key);
-            }
-        }
-    }
-    for (auto& key : rightKeys) {
-        drops.erase(key);
-    }
-    keyColumns.insert(rightKeys.begin(), rightKeys.end());
-
-    if (!left->IsAtom()) {
-        left = DoMarkUnusedKeyColumns(left, drops, keyColumns, needRebuild, false, ctx);
-    }
-
-    if (!right->IsAtom()) {
-        right = DoMarkUnusedKeyColumns(right, drops, keyColumns, needRebuild, false, ctx);
-    }
-
-    TSet<TString> currentUnusedKeys;
-    if (auto setting = GetSetting(*settings, "unusedKeys")) {
-        for (ui32 i = 1; i < setting->ChildrenSize(); ++i) {
-            currentUnusedKeys.insert(ToString(setting->Child(i)->Content()));
-        }
-    }
-
-    if (!topLevel && currentUnusedKeys != unusedKeys) {
-        TExprNodeList settingValues;
-        settingValues.reserve(unusedKeys.size() + 1);
-        settingValues.push_back(ctx.NewAtom(settings->Pos(), "unusedKeys", TNodeFlags::Default));
-        for (auto& key : unusedKeys) {
-            settingValues.push_back(ctx.NewAtom(settings->Pos(), key));
-        }
-        settings = ReplaceSetting(*settings, ctx.NewList(settings->Pos(), std::move(settingValues)), ctx);
-        needRebuild = true;
-    }
-
-    if (needRebuild) {
-        return ctx.NewList(joinTree->Pos(), { joinKind, left, right, leftColumns, rightColumns, settings });
-    }
-
-    return joinTree;
-}
-
-TExprNode::TPtr MarkUnusedKeyColumns(const TExprNode::TPtr& joinTree, const TSet<TString>& drops, THashSet<TString>& keyColumns, TExprContext& ctx) {
-    bool needRebuild = false;
-    bool topLevel = true;
-    THashSet<TString> mutableDrops(drops.begin(), drops.end());
-    return DoMarkUnusedKeyColumns(joinTree, mutableDrops, keyColumns, needRebuild, topLevel, ctx);
+    GatherEquiJoinKeyColumnsFromEquality(leftColumns, keyColumns);
+    GatherEquiJoinKeyColumnsFromEquality(rightColumns, keyColumns);
 }
 
 void GatherDroppedSingleTableColumns(TExprNode::TPtr joinTree, const TJoinLabels& labels, TSet<TString>& drops) {
@@ -439,18 +386,14 @@ TExprNode::TPtr RemoveDeadPayloadColumns(const TExprNode::TPtr& node, TExprConte
         }
     }
 
-    auto joinTree = node->ChildPtr(node->ChildrenSize() - 2);
+    auto joinTree = node->Child(node->ChildrenSize() - 2);
     GatherDroppedSingleTableColumns(joinTree, labels, drops);
     if (drops.empty()) {
         return node;
     }
 
     THashSet<TString> keyColumns;
-    if (auto newTree = MarkUnusedKeyColumns(joinTree, drops, keyColumns, ctx); newTree != joinTree) {
-        YQL_CLOG(DEBUG, Core) << "MarkUnusedKeyColumns in EquiJoin";
-        return ctx.ChangeChild(*node, node->ChildrenSize() - 2, std::move(newTree));
-    }
-
+    GatherEquiJoinKeyColumns(joinTree, keyColumns);
     for (auto& keyColumn : keyColumns) {
         drops.erase(keyColumn);
     }
@@ -536,7 +479,7 @@ TExprNode::TPtr HandleEmptyListInJoin(const TExprNode::TPtr& node, TExprContext&
     return node;
 }
 
-TExprNode::TPtr UpdateJoinTreeUniqueRecursive(const TExprNode::TPtr& joinTree, const TJoinLabels& labels, const TVector<const TUniqueConstraintNode*>& unique, TExprContext& ctx) {
+TExprNode::TPtr UpdateJoinTreeUniqueRecursive(const TExprNode::TPtr& joinTree, const TJoinLabels& labels, const TVector<const TDistinctConstraintNode*>& unique, TExprContext& ctx) {
     TExprNode::TPtr res = joinTree;
 
     TEquiJoinLinkSettings linkSettings = GetEquiJoinLinkSettings(*joinTree->Child(5));
@@ -602,12 +545,12 @@ TExprNode::TPtr UpdateJoinTreeUniqueRecursive(const TExprNode::TPtr& joinTree, c
 
 
 TExprNode::TPtr HandleUniqueListInJoin(const TExprNode::TPtr& node, TExprContext& ctx, const TTypeAnnotationContext& typeCtx) {
-    if (!typeCtx.IsConstraintCheckEnabled<TUniqueConstraintNode>()) {
+    if (!typeCtx.IsConstraintCheckEnabled<TDistinctConstraintNode>()) {
         return node;
     }
 
     TJoinLabels labels;
-    TVector<const TUniqueConstraintNode*> unique;
+    TVector<const TDistinctConstraintNode*> unique;
     unique.reserve(node->ChildrenSize() - 2);
     for (ui32 i = 0; i < node->ChildrenSize() - 2; ++i) {
         auto err = labels.Add(ctx, *node->Child(i)->Child(1),
@@ -616,7 +559,7 @@ TExprNode::TPtr HandleUniqueListInJoin(const TExprNode::TPtr& node, TExprContext
             ctx.AddError(*err);
             return nullptr;
         }
-        unique.push_back(node->Child(i)->Head().GetConstraint<TUniqueConstraintNode>());
+        unique.push_back(node->Child(i)->Head().GetConstraint<TDistinctConstraintNode>());
     }
 
     auto joinTree = UpdateJoinTreeUniqueRecursive(node->ChildPtr(node->ChildrenSize() - 2), labels, unique, ctx);
@@ -1511,35 +1454,33 @@ bool ShouldConvertSqlInToJoin(const TCoSqlIn& sqlIn, bool /* negated */) {
 }
 
 bool CanConvertSqlInToJoin(const TCoSqlIn& sqlIn) {
-    auto leftArg = sqlIn.Lookup();
-    auto leftColumnType = leftArg.Ref().GetTypeAnn();
+    const auto leftArg = sqlIn.Lookup();
+    const auto leftColumnType = leftArg.Ref().GetTypeAnn();
 
-    auto rightArg = sqlIn.Collection();
-    auto rightArgType = rightArg.Ref().GetTypeAnn();
+    const auto rightArg = sqlIn.Collection();
+    const auto rightArgType = rightArg.Ref().GetTypeAnn();
 
     if (rightArgType->GetKind() == ETypeAnnotationKind::List) {
-        auto rightListItemType = rightArgType->Cast<TListExprType>()->GetItemType();
+        const auto rightListItemType = rightArgType->Cast<TListExprType>()->GetItemType();
 
-        auto isDataOrTupleOfData = [](const TTypeAnnotationNode* type) {
-            if (IsDataOrOptionalOfData(type)) {
+        const auto isDataOrTupleOfDataOrPg = [](const TTypeAnnotationNode* type) {
+            if (IsDataOrOptionalOfDataOrPg(type)) {
                 return true;
             }
             if (type->GetKind() == ETypeAnnotationKind::Tuple) {
-                return AllOf(type->Cast<TTupleExprType>()->GetItems(), [](const auto& item) {
-                    return IsDataOrOptionalOfData(item);
-                });
+                return AllOf(type->Cast<TTupleExprType>()->GetItems(), &IsDataOrOptionalOfDataOrPg);
             }
             return false;
         };
 
         if (rightListItemType->GetKind() == ETypeAnnotationKind::Struct) {
-            auto rightStructType = rightListItemType->Cast<TStructExprType>();
+            const auto rightStructType = rightListItemType->Cast<TStructExprType>();
             YQL_ENSURE(rightStructType->GetSize() == 1);
-            auto rightColumnType = rightStructType->GetItems()[0]->GetItemType();
-            return isDataOrTupleOfData(rightColumnType);
+            const auto rightColumnType = rightStructType->GetItems().front()->GetItemType();
+            return isDataOrTupleOfDataOrPg(rightColumnType);
         }
 
-        return isDataOrTupleOfData(rightListItemType);
+        return isDataOrTupleOfDataOrPg(rightListItemType);
     }
 
     /**
@@ -1552,8 +1493,8 @@ bool CanConvertSqlInToJoin(const TCoSqlIn& sqlIn) {
      */
 
     if (rightArgType->GetKind() == ETypeAnnotationKind::Dict) {
-        auto rightDictType = rightArgType->Cast<TDictExprType>()->GetKeyType();
-        return IsDataOrOptionalOfData(leftColumnType) && IsDataOrOptionalOfData(rightDictType);
+        const auto rightDictType = rightArgType->Cast<TDictExprType>()->GetKeyType();
+        return IsDataOrOptionalOfDataOrPg(leftColumnType) && IsDataOrOptionalOfDataOrPg(rightDictType);
     }
 
     return false;
@@ -1655,7 +1596,7 @@ TExprNode::TPtr BuildCollectionEmptyPred(TPositionHandle pos, const TExprNode::T
                 .Callable(0, "Take")
                     .Add(0, collectionAsList)
                     .Callable(1, "Uint64")
-                        .Atom(0, "1", TNodeFlags::Default)
+                        .Atom(0, 1)
                     .Seal()
                 .Seal()
             .Seal()
@@ -1817,7 +1758,7 @@ TPredicateChainNode ParsePredicateChainNode(const TExprNode::TPtr& predicate, co
             YQL_ENSURE(rightStructType->GetSize() == 1);
 
             const TItemExprType* itemType = rightStructType->GetItems()[0];
-            if (IsDataOrOptionalOfData(itemType->GetItemType())) {
+            if (IsDataOrOptionalOfDataOrPg(itemType->GetItemType())) {
                 result.Right = rightArg;
                 result.RightArgColumns = { ToString(itemType->GetName()) };
                 return result;
@@ -1850,7 +1791,7 @@ TPredicateChainNode ParsePredicateChainNode(const TExprNode::TPtr& predicate, co
                             .Name().Build(columnName)
                             .Value<TCoNth>()
                                 .Tuple(rowArg)
-                                .Index(ctx.NewAtom(sqlIn.Pos(), ToString(i)))
+                                .Index(ctx.NewAtom(sqlIn.Pos(), i))
                                 .Build()
                             .Build();
                     result.RightArgColumns.emplace_back(columnName);
@@ -1882,7 +1823,7 @@ TPredicateChainNode ParsePredicateChainNode(const TExprNode::TPtr& predicate, co
                             .Name().Build(columnName)
                             .Value<TCoNth>()
                                 .Tuple(rowArg)
-                                .Index(ctx.NewAtom(sqlIn.Pos(), ToString(i)))
+                                .Index(ctx.NewAtom(sqlIn.Pos(), i))
                                 .Build()
                             .Build();
                     result.RightArgColumns.emplace_back(columnName);
@@ -1900,7 +1841,7 @@ TPredicateChainNode ParsePredicateChainNode(const TExprNode::TPtr& predicate, co
 
             // fallthrough to default join by the whole tuple
         } else {
-            YQL_ENSURE(IsDataOrOptionalOfData(rightArgItemType), "" << FormatType(rightArgItemType));
+            YQL_ENSURE(IsDataOrOptionalOfDataOrPg(rightArgItemType), "" << FormatType(rightArgItemType));
         }
 
         // rewrite List<DataType|Tuple> to List<Struct<key: DataType|Tuple>>
@@ -1925,7 +1866,7 @@ TPredicateChainNode ParsePredicateChainNode(const TExprNode::TPtr& predicate, co
     YQL_ENSURE(rightArgType->GetKind() == ETypeAnnotationKind::Dict, "" << FormatType(rightArgType));
 
     auto rightDictType = rightArgType->Cast<TDictExprType>()->GetKeyType();
-    YQL_ENSURE(IsDataOrOptionalOfData(rightDictType));
+    YQL_ENSURE(IsDataOrOptionalOfDataOrPg(rightDictType));
 
     auto dictKeys = ctx.Builder(sqlIn.Pos())
         .Callable("DictKeys")
@@ -2032,7 +1973,7 @@ TExprNode::TPtr BuildEquiJoinForSqlInChain(const TExprNode::TPtr& flatMapNode, c
     YQL_ENSURE(inputRowType->GetKind() == ETypeAnnotationKind::Struct);
 
     static const TStringBuf inputTable = "_yql_injoin_input";
-    auto inputTableAtom = ctx.NewAtom(input->Pos(), inputTable);
+    auto inputTableAtom = ctx.NewAtom(input->Pos(), inputTable, TNodeFlags::Default);
 
     size_t startColumnIndex = 0;
     for (;;) {
@@ -2052,7 +1993,7 @@ TExprNode::TPtr BuildEquiJoinForSqlInChain(const TExprNode::TPtr& flatMapNode, c
         auto equiJoinArg = ctx.Builder(pos)
             .List()
                 .Add(0, chain[i].Right)
-                .Atom(1, tableName)
+                .Atom(1, tableName, TNodeFlags::Default)
             .Seal()
             .Build();
 
@@ -2061,7 +2002,7 @@ TExprNode::TPtr BuildEquiJoinForSqlInChain(const TExprNode::TPtr& flatMapNode, c
         TExprNodeList leftKeys;
         if (chain[i].LeftArgColumns.empty()) {
             leftKeys.push_back(inputTableAtom);
-            leftKeys.push_back(ctx.NewAtom(pos, columnName));
+            leftKeys.push_back(ctx.NewAtom(pos, columnName, TNodeFlags::Default));
         } else {
             for (TStringBuf leftKey : chain[i].LeftArgColumns) {
                 leftKeys.push_back(inputTableAtom);
@@ -2071,15 +2012,15 @@ TExprNode::TPtr BuildEquiJoinForSqlInChain(const TExprNode::TPtr& flatMapNode, c
 
         TExprNodeList rightKeys;
         for (const TString& rightKey : chain[i].RightArgColumns) {
-            rightKeys.push_back(ctx.NewAtom(pos, tableName));
+            rightKeys.push_back(ctx.NewAtom(pos, tableName, TNodeFlags::Default));
             rightKeys.push_back(ctx.NewAtom(pos, rightKey));
         }
 
         joinChain = ctx.Builder(pos)
             .List()
-                .Atom(0, chain[i].Negated ? "LeftOnly" : "LeftSemi")
+                .Atom(0, chain[i].Negated ? "LeftOnly" : "LeftSemi", TNodeFlags::Default)
                 .Add(1, joinChain ? joinChain : inputTableAtom)
-                .Atom(2, tableName)
+                .Atom(2, tableName, TNodeFlags::Default)
                 .List(3)
                     .Add(std::move(leftKeys))
                 .Seal()
@@ -2094,7 +2035,7 @@ TExprNode::TPtr BuildEquiJoinForSqlInChain(const TExprNode::TPtr& flatMapNode, c
         if (chain[i].LeftArgColumns.empty()) {
             auto rename = ctx.Builder(pos)
                 .List()
-                    .Atom(0, "rename")
+                    .Atom(0, "rename", TNodeFlags::Default)
                     .Atom(1, FullColumnName(inputTable, columnName))
                     .Atom(2, "")
                 .Seal()
@@ -2104,7 +2045,7 @@ TExprNode::TPtr BuildEquiJoinForSqlInChain(const TExprNode::TPtr& flatMapNode, c
             addMemberChain = ctx.Builder(chain[i].SqlInPos)
                 .Callable("AddMember")
                     .Add(0, addMemberChain ? addMemberChain : origLambdaArgs->HeadPtr())
-                    .Atom(1, columnName)
+                    .Atom(1, columnName, TNodeFlags::Default)
                     .Add(2, chain[i].Left)
                 .Seal()
                 .Build();
@@ -2114,18 +2055,13 @@ TExprNode::TPtr BuildEquiJoinForSqlInChain(const TExprNode::TPtr& flatMapNode, c
     for (const auto& i : inputRowType->Cast<TStructExprType>()->GetItems()) {
         auto rename = ctx.Builder(input->Pos())
             .List()
-                .Atom(0, "rename")
+                .Atom(0, "rename", TNodeFlags::Default)
                 .Atom(1, FullColumnName(inputTable, i->GetName()))
                 .Atom(2, i->GetName())
             .Seal()
             .Build();
         renames.push_back(rename);
     }
-    renames.push_back(ctx.Builder(input->Pos())
-        .List()
-            .Atom(0, "keep_sys")
-        .Seal()
-        .Build());
 
     equiJoinArgs.push_back(joinChain);
     equiJoinArgs.push_back(ctx.NewList(input->Pos(), std::move(renames)));

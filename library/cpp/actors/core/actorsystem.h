@@ -122,7 +122,21 @@ namespace NActors {
         }
 
         ui32 GetThreads(ui32 poolId) const {
-            return Executors ? Executors[poolId]->GetThreads() : CpuManager.GetThreads(poolId);
+            auto result = GetThreadsOptional(poolId);
+            Y_VERIFY(result, "undefined pool id: %" PRIu32, (ui32)poolId);
+            return *result;
+        }
+
+        std::optional<ui32> GetThreadsOptional(const ui32 poolId) const {
+            if (Y_LIKELY(Executors)) {
+                if (Y_LIKELY(poolId < ExecutorsCount)) {
+                    return Executors[poolId]->GetThreads();
+                } else {
+                    return {};
+                }
+            } else {
+                return CpuManager.GetThreadsOptional(poolId);
+            }
         }
     };
 
@@ -190,6 +204,8 @@ namespace NActors {
         bool SpecificSend(TAutoPtr<IEventHandle> ev) const;
 
         bool Send(const TActorId& recipient, IEventBase* ev, ui32 flags = 0, ui64 cookie = 0) const;
+        bool Send(const TActorId& recipient, IEventHandleLight* ev, ui32 flags = 0, ui64 cookie = 0) const;
+        bool Send(const TActorId& recipient, const TActorId& sender, IEventHandleLight* ev, ui32 flags = 0, ui64 cookie = 0) const;
 
         /**
          * Schedule one-shot event that will be send at given time point in the future.
@@ -284,6 +300,13 @@ namespace NActors {
         }
 
         void GetPoolStats(ui32 poolId, TExecutorPoolStats& poolStats, TVector<TExecutorThreadStats>& statsCopy) const;
+
+        std::optional<ui32> GetPoolThreadsCount(const ui32 poolId) const {
+            if (!SystemSetup) {
+                return {};
+            }
+            return SystemSetup->GetThreadsOptional(poolId);
+        }
 
         void DeferPreStop(std::function<void()> fn) {
             DeferredPreStop.push_back(std::move(fn));

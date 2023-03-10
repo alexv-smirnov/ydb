@@ -133,6 +133,7 @@ namespace NKikimr::NBlobDepot {
             TEvBlobStorage::TEvGet::TQuery query;
             query.Set(item.Id, item.Offset, item.Size);
             queriesPerGroup[item.GroupId].emplace_back(item.OutputOffset, query);
+            Agent.BytesRead += item.Size;
         }
 
         for (const auto& [groupId, queries] : queriesPerGroup) {
@@ -177,7 +178,7 @@ namespace NKikimr::NBlobDepot {
                 auto *item = resolve.AddItems();
                 item->SetExactKey(readContext.ReadArg.Key);
                 item->SetMustRestoreFirst(readContext.ReadArg.MustRestoreFirst);
-                STLOG(PRI_DEBUG, BLOB_DEPOT_AGENT, BDAxx, "issuing extra resolve", (Agent, Agent.LogId), (QueryId, GetQueryId()),
+                STLOG(PRI_DEBUG, BLOB_DEPOT_AGENT, BDA48, "issuing extra resolve", (Agent, Agent.LogId), (QueryId, GetQueryId()),
                     (ReadId, readContext.GetTag()), (Key, Agent.PrettyKey(readContext.ReadArg.Key)), (Msg, resolve));
                 Agent.Issue(std::move(resolve), this, readContext.shared_from_this());
                 readContext.StopProcessingParts = true;

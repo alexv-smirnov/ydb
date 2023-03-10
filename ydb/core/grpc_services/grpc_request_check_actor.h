@@ -2,6 +2,7 @@
 #include "defs.h"
 #include "audit_log.h"
 #include "service_ratelimiter_events.h"
+#include "grpc_request_proxy_handle_methods.h"
 #include "local_rate_limiter.h"
 #include "operation_helpers.h"
 #include "rpc_calls.h"
@@ -22,14 +23,16 @@ namespace NGRpcService {
 
 template <typename TEvent>
 class TGrpcRequestCheckActor
-    : public TActorBootstrappedSecureRequest<TGrpcRequestCheckActor<TEvent>>
+    : public TGRpcRequestProxyHandleMethods
+    , public TActorBootstrappedSecureRequest<TGrpcRequestCheckActor<TEvent>>
     , public ICheckerIface
+    , public IFacilityProvider
 {
     using TSelf = TGrpcRequestCheckActor<TEvent>;
     using TBase = TActorBootstrappedSecureRequest<TGrpcRequestCheckActor>;
 public:
     void OnAccessDenied(const TEvTicketParser::TError& error, const TActorContext& ctx) {
-        LOG_ERROR(ctx, NKikimrServices::GRPC_SERVER, error.ToString());
+        LOG_INFO(ctx, NKikimrServices::GRPC_SERVER, error.ToString());
         if (error.Retryable) {
             GrpcRequestBaseCtx_->UpdateAuthState(NGrpc::TAuthState::AS_UNAVAILABLE);
         } else {
@@ -66,7 +69,7 @@ public:
         }
     }
 
-    void SetEntries(const TVector<TEvTicketParser::TEvAuthorizeTicket::TEntry>& entries) {
+    void SetEntries(const TVector<TEvTicketParser::TEvAuthorizeTicket::TEntry>& entries) override {
         TBase::SetEntries(entries);
     }
 
@@ -76,14 +79,16 @@ public:
         const TActorId& owner,
         const TSchemeBoardEvents::TDescribeSchemeResult& schemeData,
         TIntrusivePtr<TSecurityObject> securityObject,
-        TAutoPtr<TEventHandle<TEvent>> request,
+        TAutoPtr<TEventHandleFat<TEvent>> request,
         IGRpcProxyCounters::TPtr counters,
-        bool skipCheckConnectRigths)
+        bool skipCheckConnectRigths,
+        const IFacilityProvider* facilityProvider)
         : Owner_(owner)
         , Request_(std::move(request))
         , Counters_(counters)
         , SecurityObject_(std::move(securityObject))
         , SkipCheckConnectRigths_(skipCheckConnectRigths)
+        , FacilityProvider_(facilityProvider)
     {
         GrpcRequestBaseCtx_ = Request_->Get();
         TMaybe<TString> authToken = GrpcRequestBaseCtx_->GetYdbToken();
@@ -204,8 +209,8 @@ public:
             ReplyUnavailableAndDie(issues);
         } else {
             GrpcRequestBaseCtx_->UpdateAuthState(NGrpc::TAuthState::AS_OK);
-            GrpcRequestBaseCtx_->SetInternalToken(TBase::GetSerializedToken());
-            ReplyBackAndDie();
+            GrpcRequestBaseCtx_->SetInternalToken(TBase::GetParsedToken());
+            Continue();
         }
     }
 
@@ -217,6 +222,16 @@ public:
 
     void HandlePoison(TEvents::TEvPoisonPill::TPtr&) {
         TBase::PassAway();
+    }
+
+    TIntrusiveConstPtr<TAppConfig> GetAppConfig() const override {
+        return FacilityProvider_->GetAppConfig();
+    }
+
+    TActorId RegisterActor(IActor* actor) const override {
+        // CheckActor will die after creation rpc_ actor
+        // so we can use same mailbox
+        return this->RegisterWithSameMailbox(actor);
     }
 
 private:
@@ -243,7 +258,7 @@ private:
                     break;
                 case Ydb::StatusIds::TIMEOUT:
                     Counters_->IncDatabaseRateLimitedCounter();
-                    LOG_ERROR(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "Throughput limit exceeded");
+                    LOG_INFO(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "Throughput limit exceeded");
                     ReplyOverloadedAndDie(MakeIssue(NKikimrIssues::TIssuesIds::YDB_RESOURCE_USAGE_LIMITED, "Throughput limit exceeded"));
                     break;
                 default:
@@ -363,6 +378,33 @@ private:
         TBase::PassAway();
     }
 
+    void Continue() {
+        if (!ValidateAndReplyOnError(GrpcRequestBaseCtx_)) {
+            TBase::PassAway();
+            return;
+        }
+        HandleAndDie(Request_);
+    }
+
+    void HandleAndDie(TAutoPtr<TEventHandleFat<TEvProxyRuntimeEvent>>& event) {
+        event->Release().Release()->Pass(*this);
+        TBase::PassAway();
+    }
+
+    void HandleAndDie(TAutoPtr<TEventHandleFat<TEvListEndpointsRequest>>&) {
+        ReplyBackAndDie();
+    }
+
+    void HandleAndDie(TRefreshTokenImpl::TPtr&) {
+        ReplyBackAndDie();
+    }
+
+    template <typename T>
+    void HandleAndDie(T& event) {
+        TGRpcRequestProxyHandleMethods::Handle(event, TlsActivationContext->AsActorContext());
+        TBase::PassAway();
+    }
+
     void ReplyBackAndDie() {
         TlsActivationContext->Send(Request_->Forward(Owner_));
         TBase::PassAway();
@@ -408,7 +450,8 @@ private:
         }
 
         const ui32 access = NACLib::ConnectDatabase;
-        if (SecurityObject_->CheckAccess(access, TBase::GetSerializedToken())) {
+        const auto& parsedToken = TBase::GetParsedToken();
+        if (parsedToken && SecurityObject_->CheckAccess(access, *parsedToken)) {
             return {false, std::nullopt};
         }
 
@@ -425,12 +468,12 @@ private:
             return {false, std::nullopt};
         }
 
-        LOG_ERROR(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "%s", error.c_str());
+        LOG_INFO(*TlsActivationContext, NKikimrServices::GRPC_SERVER, "%s", error.c_str());
         return {true, MakeIssue(NKikimrIssues::TIssuesIds::ACCESS_DENIED, error)};
     }
 
     const TActorId Owner_;
-    TAutoPtr<TEventHandle<TEvent>> Request_;
+    TAutoPtr<TEventHandleFat<TEvent>> Request_;
     IGRpcProxyCounters::TPtr Counters_;
     TIntrusivePtr<TSecurityObject> SecurityObject_;
     TString CheckedDatabaseName_;
@@ -438,6 +481,7 @@ private:
     NRpcService::TRlConfig* RlConfig = nullptr;
     bool SkipCheckConnectRigths_ = false;
     std::vector<std::pair<TString, TString>> Attributes_;
+    const IFacilityProvider* FacilityProvider_;
 };
 
 // default behavior - attributes in schema
@@ -465,11 +509,12 @@ IActor* CreateGrpcRequestCheckActor(
     const TActorId& owner,
     const TSchemeBoardEvents::TDescribeSchemeResult& schemeData,
     TIntrusivePtr<TSecurityObject> securityObject,
-    TAutoPtr<TEventHandle<TEvent>> request,
+    TAutoPtr<TEventHandleFat<TEvent>> request,
     IGRpcProxyCounters::TPtr counters,
-    bool skipCheckConnectRigths) {
+    bool skipCheckConnectRigths,
+    const IFacilityProvider* facilityProvider) {
 
-    return new TGrpcRequestCheckActor<TEvent>(owner, schemeData, std::move(securityObject), std::move(request), counters, skipCheckConnectRigths);
+    return new TGrpcRequestCheckActor<TEvent>(owner, schemeData, std::move(securityObject), std::move(request), counters, skipCheckConnectRigths, facilityProvider);
 }
 
 }

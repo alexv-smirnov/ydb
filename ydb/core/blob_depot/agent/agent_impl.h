@@ -167,6 +167,7 @@ namespace NKikimr::NBlobDepot {
                 EvQueryWatchdog = EventSpaceBegin(TEvents::ES_PRIVATE),
                 EvProcessPendingEvent,
                 EvPendingEventQueueWatchdog,
+                EvPushMetrics,
             };
         };
 
@@ -212,6 +213,8 @@ namespace NKikimr::NBlobDepot {
                 cFunc(TEvPrivate::EvPendingEventQueueWatchdog, HandlePendingEventQueueWatchdog);
 
                 cFunc(TEvPrivate::EvQueryWatchdog, HandleQueryWatchdog);
+
+                cFunc(TEvPrivate::EvPushMetrics, HandlePushMetrics);
             )
 
             DeletePendingQueries.Clear();
@@ -236,7 +239,7 @@ namespace NKikimr::NBlobDepot {
                 }
                 if (!info->GetTotalVDisksNum()) {
                     // proxy finishes serving user requests
-                    TActivationContext::Send(new IEventHandle(TEvents::TSystem::Poison, 0, ProxyId, {}, nullptr, 0));
+                    TActivationContext::Send(new IEventHandleFat(TEvents::TSystem::Poison, 0, ProxyId, {}, nullptr, 0));
                     ProxyId = {};
                 }
             }
@@ -260,10 +263,10 @@ namespace NKikimr::NBlobDepot {
             std::shared_ptr<TEvBlobStorage::TExecutionRelay> executionRelay = nullptr);
 
         template<typename TEvent>
-        void HandleTabletResponse(TAutoPtr<TEventHandle<TEvent>> ev);
+        void HandleTabletResponse(TAutoPtr<TEventHandleFat<TEvent>> ev);
 
         template<typename TEvent>
-        void HandleOtherResponse(TAutoPtr<TEventHandle<TEvent>> ev);
+        void HandleOtherResponse(TAutoPtr<TEventHandleFat<TEvent>> ev);
 
         void OnRequestComplete(ui64 id, TRequestSender::TResponse response, TRequestsInFlight& map,
             std::shared_ptr<TEvBlobStorage::TExecutionRelay> executionRelay = nullptr);
@@ -340,7 +343,7 @@ namespace NKikimr::NBlobDepot {
 
             virtual void OnUpdateBlock() {}
             virtual void OnRead(ui64 /*tag*/, NKikimrProto::EReplyStatus /*status*/, TString /*dataOrErrorReason*/) {}
-            virtual void OnIdAllocated() {}
+            virtual void OnIdAllocated(bool /*success*/) {}
             virtual void OnDestroy(bool /*success*/) {}
 
         protected: // reading logic
@@ -438,7 +441,7 @@ namespace NKikimr::NBlobDepot {
             void RebuildHeap();
 
             void EnqueueQueryWaitingForId(TQuery *query);
-            void ProcessQueriesWaitingForId();
+            void ProcessQueriesWaitingForId(bool success);
         };
 
         THashMap<NKikimrBlobDepot::TChannelKind::E, TChannelKind> ChannelKinds;
@@ -481,6 +484,16 @@ namespace NKikimr::NBlobDepot {
                 return EscapeC(key);
             }
         }
+
+        ////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+        // Metrics
+
+        ui64 BytesRead = 0;
+        ui64 BytesWritten = 0;
+        ui64 LastBytesRead = 0;
+        ui64 LastBytesWritten = 0;
+
+        void HandlePushMetrics();
     };
 
 #define BDEV_QUERY(MARKER, TEXT, ...) BDEV(MARKER, TEXT, (VG, Agent.VirtualGroupId), (BDT, Agent.TabletId), \
