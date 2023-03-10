@@ -11,7 +11,7 @@ jobs:
       matrix:
         arch: [ X64, ARM64 ]
 
-    runs-on: [ self-hosted, "${{ matrix.version }}" ]
+    runs-on: self-hosted, ${{ matrix.arch }}
 
     steps:
     - name: Checkout
