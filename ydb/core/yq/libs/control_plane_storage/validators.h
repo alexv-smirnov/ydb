@@ -7,7 +7,7 @@
 #include <util/generic/fwd.h>
 #include <util/string/printf.h>
 
-#include <ydb/public/api/protos/yq.pb.h>
+#include <ydb/public/api/protos/draft/fq.pb.h>
 #include <ydb/public/sdk/cpp/client/ydb_params/params.h>
 #include <ydb/public/sdk/cpp/client/ydb_params/params.h>
 #include <ydb/public/sdk/cpp/client/ydb_result/result.h>
@@ -17,7 +17,7 @@
 #include <ydb/core/yq/libs/db_schema/db_schema.h>
 #include <ydb/core/yq/libs/exceptions/exceptions.h>
 
-namespace NYq {
+namespace NFq {
 
 struct TValidationQuery {
     TString Query;
@@ -26,7 +26,7 @@ struct TValidationQuery {
 };
 
 TValidationQuery CreateUniqueNameValidator(const TString& tableName,
-                                           YandexQuery::Acl::Visibility visibility,
+                                           FederatedQuery::Acl::Visibility visibility,
                                            const TString& scope,
                                            const TString& name,
                                            const TString& user,
@@ -35,7 +35,7 @@ TValidationQuery CreateUniqueNameValidator(const TString& tableName,
 
 TValidationQuery CreateModifyUniqueNameValidator(const TString& tableName,
                                                  const TString& idColumnName,
-                                                 YandexQuery::Acl::Visibility visibility,
+                                                 FederatedQuery::Acl::Visibility visibility,
                                                  const TString& scope,
                                                  const TString& name,
                                                  const TString& user,
@@ -85,7 +85,7 @@ TValidationQuery CreateConnectionExistsValidator(const TString& scope,
                                                  const TString& error,
                                                  TPermissions permissions,
                                                  const TString& user,
-                                                 YandexQuery::Acl::Visibility bindingVisibility,
+                                                 FederatedQuery::Acl::Visibility bindingVisibility,
                                                  const TString& tablePathPrefix);
 
 TValidationQuery CreateConnectionOverrideBindingValidator(const TString& scope,
@@ -106,7 +106,7 @@ TValidationQuery CreateTtlValidator(const TString& tableName,
                                     const TString& error,
                                     const TString& tablePathPrefix);
 
-TValidationQuery CreateQueryComputeStatusValidator(const std::vector<YandexQuery::QueryMeta::ComputeStatus>& computeStatuses,
+TValidationQuery CreateQueryComputeStatusValidator(const std::vector<FederatedQuery::QueryMeta::ComputeStatus>& computeStatuses,
                                                    const TString& scope,
                                                    const TString& id,
                                                    const TString& error,
@@ -182,4 +182,4 @@ TValidationQuery CreateIdempotencyKeyValidator(const TString& scope,
     return {query.Sql, query.Params, validator};
 }
 
-} // namespace NYq
+} // namespace NFq

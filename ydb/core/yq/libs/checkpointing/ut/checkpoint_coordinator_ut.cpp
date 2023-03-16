@@ -10,7 +10,7 @@
 namespace {
 
 using namespace NKikimr;
-using namespace NYq;
+using namespace NFq;
 
 enum ETestGraphFlags : ui64 {
     InputWithSource = 1,
@@ -100,7 +100,7 @@ struct TTestBootstrap : public TTestActorRuntime {
             Settings,
             Counters,
             NProto::TGraphParams(),
-            YandexQuery::StateLoadMode::FROM_LAST_CHECKPOINT,
+            FederatedQuery::StateLoadMode::FROM_LAST_CHECKPOINT,
             {},
             //
             "my-graph-id",
@@ -119,7 +119,7 @@ struct TTestBootstrap : public TTestActorRuntime {
 
 } // namespace
 
-namespace NYq {
+namespace NFq {
 
 void MockRegisterCoordinatorResponseEvent(TTestBootstrap& bootstrap, NYql::TIssues issues = NYql::TIssues()) {
     bootstrap.Send(new IEventHandleFat(
@@ -286,4 +286,4 @@ Y_UNIT_TEST_SUITE(TCheckpointCoordinatorTests) {
     }
 }
 
-} // namespace NYq
+} // namespace NFq

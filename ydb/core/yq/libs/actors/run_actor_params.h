@@ -18,7 +18,7 @@
 #include <library/cpp/time_provider/time_provider.h>
 #include <library/cpp/random_provider/random_provider.h>
 
-namespace NYq {
+namespace NFq {
 
 struct TRunActorParams { // TODO2 : Change name
     TRunActorParams(
@@ -31,7 +31,7 @@ struct TRunActorParams { // TODO2 : Change name
         ui64 nextUniqueId,
         NKikimr::NMiniKQL::TComputationNodeFactory dqCompFactory,
         ::NPq::NConfigurationManager::IConnections::TPtr pqCmConnections,
-        const ::NYq::NConfig::TConfig& config,
+        const ::NFq::NConfig::TConfig& config,
         const TString& sql,
         const NYdb::NFq::TScope& scope,
         const TString& authToken,
@@ -40,19 +40,19 @@ struct TRunActorParams { // TODO2 : Change name
         const TString& userId,
         const TString& owner,
         const int64_t previousQueryRevision,
-        TVector<YandexQuery::Connection> connections,
-        TVector<YandexQuery::Binding> bindings,
+        TVector<FederatedQuery::Connection> connections,
+        TVector<FederatedQuery::Binding> bindings,
         NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
         THashMap<TString, TString> accountIdSignatures,
-        YandexQuery::QueryContent::QueryType queryType,
-        YandexQuery::QueryContent::QuerySyntax querySyntax,
-        YandexQuery::ExecuteMode executeMode,
+        FederatedQuery::QueryContent::QueryType queryType,
+        FederatedQuery::QueryContent::QuerySyntax querySyntax,
+        FederatedQuery::ExecuteMode executeMode,
         const TString& resultId,
-        const YandexQuery::StateLoadMode stateLoadMode,
-        const YandexQuery::StreamingDisposition& streamingDisposition,
-        YandexQuery::QueryMeta::ComputeStatus status,
+        const FederatedQuery::StateLoadMode stateLoadMode,
+        const FederatedQuery::StreamingDisposition& streamingDisposition,
+        FederatedQuery::QueryMeta::ComputeStatus status,
         const TString& cloudId,
-        TVector<YandexQuery::ResultSetMeta> resultSetMetas,
+        TVector<FederatedQuery::ResultSetMeta> resultSetMetas,
         TVector<TString> dqGraphs,
         int32_t dqGraphIndex,
         bool automatic,
@@ -82,7 +82,7 @@ struct TRunActorParams { // TODO2 : Change name
     NKikimr::NMiniKQL::TComputationNodeFactory DqCompFactory;
 
     ::NPq::NConfigurationManager::IConnections::TPtr PqCmConnections;
-    const ::NYq::NConfig::TConfig Config;
+    const ::NFq::NConfig::TConfig Config;
     const TString Sql;
     const NYdb::NFq::TScope Scope;
     const TString AuthToken;
@@ -91,19 +91,19 @@ struct TRunActorParams { // TODO2 : Change name
     const TString UserId;
     const TString Owner;
     const int64_t PreviousQueryRevision;
-    const TVector<YandexQuery::Connection> Connections;
-    const TVector<YandexQuery::Binding> Bindings;
+    const TVector<FederatedQuery::Connection> Connections;
+    const TVector<FederatedQuery::Binding> Bindings;
     const NYql::ISecuredServiceAccountCredentialsFactory::TPtr CredentialsFactory;
     const THashMap<TString, TString> AccountIdSignatures;
-    const YandexQuery::QueryContent::QueryType QueryType;
-    const YandexQuery::QueryContent::QuerySyntax QuerySyntax;
-    const YandexQuery::ExecuteMode ExecuteMode;
+    const FederatedQuery::QueryContent::QueryType QueryType;
+    const FederatedQuery::QueryContent::QuerySyntax QuerySyntax;
+    const FederatedQuery::ExecuteMode ExecuteMode;
     const TString ResultId;
-    const YandexQuery::StateLoadMode StateLoadMode;
-    const YandexQuery::StreamingDisposition StreamingDisposition;
-    YandexQuery::QueryMeta::ComputeStatus Status;
+    const FederatedQuery::StateLoadMode StateLoadMode;
+    const FederatedQuery::StreamingDisposition StreamingDisposition;
+    FederatedQuery::QueryMeta::ComputeStatus Status;
     const TString CloudId;
-    const TVector<YandexQuery::ResultSetMeta> ResultSetMetas;
+    const TVector<FederatedQuery::ResultSetMeta> ResultSetMetas;
     const TVector<TString> DqGraphs;
     const int32_t DqGraphIndex;
 
@@ -122,4 +122,4 @@ struct TRunActorParams { // TODO2 : Change name
     Fq::Private::TaskResources Resources;
 };
 
-} /* NYq */
+} /* NFq */

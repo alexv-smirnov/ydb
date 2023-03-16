@@ -771,8 +771,13 @@ public:
         auto id = index + StartPathIndex;
         const TString requestId = CreateGuidAsString();
         LOG_D("TS3ReadActor", "Download: " << url << ", ID: " << id << ", request id: [" << requestId << "]");
-        Gateway->Download(url, MakeHeaders(Token, requestId), 0U, std::min(size, SizeLimit),
-            std::bind(&TS3ReadActor::OnDownloadFinished, ActorSystem, SelfId(), requestId, std::placeholders::_1, id, path), {}, RetryPolicy);
+        Gateway->Download(url,
+            IHTTPGateway::MakeYcHeaders(requestId, Token),
+            0U,
+            std::min(size, SizeLimit),
+            std::bind(&TS3ReadActor::OnDownloadFinished, ActorSystem, SelfId(), requestId, std::placeholders::_1, id, path),
+            {},
+            RetryPolicy);
     }
 
     TObjectPath ReadPathFromCache() {
@@ -953,14 +958,6 @@ private:
         ContainerCache.Clear();
         Send(FileQueueActor, new NActors::TEvents::TEvPoison());
         TActorBootstrapped<TS3ReadActor>::PassAway();
-    }
-
-    static IHTTPGateway::THeaders MakeHeaders(const TString& token, const TString& requestId) {
-        IHTTPGateway::THeaders headers{TString{"X-Request-ID:"} += requestId};
-        if (token) {
-            headers.emplace_back(TString("X-YaCloud-SubjectToken:") += token);
-        }
-        return headers;
     }
 
 private:
@@ -1339,7 +1336,7 @@ public:
 
         while (NDB::Block batch = stream->read()) {
             if (++cntBlocksInFly > MaxBlocksInFly) {
-                WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>();
+                WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
                 --cntBlocksInFly;
             }
             Send(ParentActorId, new TEvPrivate::TEvNextBlock(batch, PathIndex, [actorSystem, selfId]() {
@@ -1347,7 +1344,7 @@ public:
             }, TakeIngressDelta(), TakeCpuTimeDelta()));
         }
         while (cntBlocksInFly--) {
-            WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>();
+            WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
         }
 
         IngressBytes += GetFileLength(fileName);
@@ -1389,7 +1386,7 @@ public:
 
         CpuTime += GetCpuTimeDelta();
 
-        WaitForSpecificEvent<TEvPrivate::TEvFutureResolved>();
+        WaitForSpecificEvent<TEvPrivate::TEvFutureResolved>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
         auto result = future.GetValue();
 
         StartCycleCount = GetCycleCountFast();
@@ -1411,7 +1408,7 @@ public:
 
             CpuTime += GetCpuTimeDelta();
 
-            WaitForSpecificEvent<TEvPrivate::TEvFutureResolved>();
+            WaitForSpecificEvent<TEvPrivate::TEvFutureResolved>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
             auto table = future.GetValue();
 
             StartCycleCount = GetCycleCountFast();
@@ -1511,7 +1508,7 @@ public:
     arrow::Status WillNeed(const std::vector<arrow::io::ReadRange>& readRanges) {
         if (Paused) {
             CpuTime += GetCpuTimeDelta();
-            auto ev = WaitForSpecificEvent<TEvPrivate::TEvContinue>();
+            auto ev = WaitForSpecificEvent<TEvPrivate::TEvContinue>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
             HandleEvent(*ev);
             StartCycleCount = GetCycleCountFast();
         }
@@ -1570,11 +1567,11 @@ public:
         CpuTime += GetCpuTimeDelta();
 
         while (!cache.Ready) {
-            auto ev = WaitForSpecificEvent<TEvPrivate::TEvReadResult2>();
+            auto ev = WaitForSpecificEvent<TEvPrivate::TEvReadResult2>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
             HandleEvent(*ev);
         }
         if (Paused) {
-            auto ev = WaitForSpecificEvent<TEvPrivate::TEvContinue>();
+            auto ev = WaitForSpecificEvent<TEvPrivate::TEvContinue>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
             HandleEvent(*ev);
         }
 
@@ -1746,7 +1743,7 @@ public:
             ::arrow::Status status;
             while (status = reader->ReadNext(&batch), status.ok() && batch) {
                 if (++cntBlocksInFly > MaxBlocksInFly) {
-                    WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>();
+                    WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
                     --cntBlocksInFly;
                 }
                 Send(ParentActorId, new TEvPrivate::TEvNextRecordBatch(
@@ -1760,7 +1757,7 @@ public:
             }
         }
         while (cntBlocksInFly--) {
-            WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>();
+            WaitForSpecificEvent<TEvPrivate::TEvBlockProcessed>(&TS3ReadCoroImpl::ProcessUnexpectedEvent);
         }
 
         LOG_CORO_D("RunCoroBlockArrowParserOverFile - FINISHED");
@@ -2022,7 +2019,7 @@ private:
             Send(ParentActorId, new TEvPrivate::TEvFileFinished(PathIndex, TakeIngressDelta(), TakeCpuTimeDelta()));
     }
 
-    void ProcessUnexpectedEvent(TAutoPtr<IEventHandle> ev) final {
+    void ProcessUnexpectedEvent(TAutoPtr<IEventHandle> ev) {
         return StateFunc(ev, GetActorContext());
     }
 
@@ -2208,7 +2205,7 @@ public:
         auto stuff = std::make_shared<TRetryStuff>(
             Gateway,
             Url + objectPath.Path,
-            MakeHeaders(Token, requestId),
+            IHTTPGateway::MakeYcHeaders(requestId, Token),
             objectPath.Size,
             TxId,
             requestId,
@@ -2415,14 +2412,6 @@ private:
         ArrowRowContainerCache.Clear();
 
         TActorBootstrapped<TS3StreamReadActor>::PassAway();
-    }
-
-    static IHTTPGateway::THeaders MakeHeaders(const TString& token, const TString& requestId) {
-        IHTTPGateway::THeaders headers{TString{"X-Request-ID:"} += requestId};
-        if (token) {
-            headers.emplace_back(TString("X-YaCloud-SubjectToken:") += token);
-        }
-        return headers;
     }
 
     void MaybePause() {

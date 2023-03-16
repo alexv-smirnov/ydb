@@ -4,6 +4,7 @@
 #include <ydb/core/tx/schemeshard/schemeshard.h>
 
 #include <ydb/public/sdk/cpp/client/ydb_table/table.h>
+#include <ydb/public/lib/yson_value/ydb_yson_value.h>
 
 #include <library/cpp/testing/unittest/registar.h>
 
@@ -19,27 +20,35 @@ void THelper::WaitForSchemeOperation(TActorId sender, ui64 txId) {
     runtime.GrabEdgeEventRethrow<NSchemeShard::TEvSchemeShard::TEvNotifyTxCompletionResult>(sender);
 }
 
-void THelper::StartDataRequest(const TString& request, const bool expectSuccess) const {
+void THelper::StartDataRequest(const TString& request, const bool expectSuccess, TString* result) const {
     NYdb::NTable::TTableClient tClient(Server.GetDriver(),
         NYdb::NTable::TClientSettings().UseQueryCache(false).AuthToken("root@builtin"));
     auto expectation = expectSuccess;
     bool resultReady = false;
     bool* rrPtr = &resultReady;
-    tClient.CreateSession().Subscribe([rrPtr, request, expectation](NThreading::TFuture<NYdb::NTable::TCreateSessionResult> f) {
+    tClient.CreateSession().Subscribe([this, result, rrPtr, request, expectation](NThreading::TFuture<NYdb::NTable::TCreateSessionResult> f) {
         auto session = f.GetValueSync().GetSession();
         session.ExecuteDataQuery(request
             , NYdb::NTable::TTxControl::BeginTx(NYdb::NTable::TTxSettings::SerializableRW()).CommitTx())
-            .Subscribe([rrPtr, expectation, request](NYdb::NTable::TAsyncDataQueryResult f)
+            .Subscribe([this, result, rrPtr, expectation, request](NYdb::NTable::TAsyncDataQueryResult f)
                 {
                     TStringStream ss;
                     f.GetValueSync().GetIssues().PrintTo(ss, false);
                     Cerr << "REQUEST=" << request << ";RESULT=" << ss.Str() << ";EXPECTATION=" << expectation << Endl;
                     UNIT_ASSERT(expectation == f.GetValueSync().IsSuccess());
                     *rrPtr = true;
+                    if (result && expectation) {
+                        TStringStream ss;
+                        NYson::TYsonWriter writer(&ss, NYson::EYsonFormat::Text);
+                        for (auto&& i : f.GetValueSync().GetResultSets()) {
+                            PrintResultSet(i, writer);
+                        }
+                        *result = ss.Str();
+                    }
                 });
         });
     const TInstant start = TInstant::Now();
-    while (!resultReady && start + TDuration::Seconds(200) > TInstant::Now()) {
+    while (!resultReady && start + TDuration::Seconds(60) > TInstant::Now()) {
         Server.GetRuntime()->SimulateSleep(TDuration::Seconds(1));
     }
     Cerr << "REQUEST=" << request << ";EXPECTATION=" << expectation << Endl;
@@ -94,6 +103,21 @@ void THelper::DropTable(const TString& tablePath) {
     };
 
     runtime->DispatchEvents(options);
+}
+
+void THelper::PrintResultSet(const NYdb::TResultSet& resultSet, NYson::TYsonWriter& writer) const {
+    auto columns = resultSet.GetColumnsMeta();
+
+    NYdb::TResultSetParser parser(resultSet);
+    while (parser.TryNextRow()) {
+        writer.OnListItem();
+        writer.OnBeginList();
+        for (ui32 i = 0; i < columns.size(); ++i) {
+            writer.OnListItem();
+            FormatValueYson(parser.GetValue(i), writer);
+        }
+        writer.OnEndList();
+    }
 }
 
 }

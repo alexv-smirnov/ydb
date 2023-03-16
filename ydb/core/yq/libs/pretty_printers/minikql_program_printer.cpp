@@ -5,7 +5,7 @@
 #include <ydb/library/yql/minikql/mkql_node_serialization.h>
 #include <ydb/library/yql/minikql/mkql_node_visitor.h>
 
-namespace NYq {
+namespace NFq {
 
 namespace {
 
@@ -73,6 +73,10 @@ public:
     }
     void Visit(TBlockType&) override {
         Out << "BlockType";
+    }
+
+    void Visit(TMultiType&) override {
+        Out << "MultiType";
     }
 
     // Values
@@ -249,4 +253,4 @@ TString PrettyPrintMkqlProgram(const TString& rawProgram, size_t initialIndentCh
     return PrettyPrintMkqlProgram(node, initialIndentChars);
 }
 
-} // namespace NYq
+} // namespace NFq

@@ -2,7 +2,7 @@
 
 #include <ydb/services/ydb/ydb_common_ut.h>
 
-using namespace NYq;
+using namespace NFq;
 
 Y_UNIT_TEST_SUITE(ResultFormatter) {
     Y_UNIT_TEST(Primitive) {
@@ -624,13 +624,13 @@ Y_UNIT_TEST_SUITE(ResultFormatter) {
     }
 
     Y_UNIT_TEST(FormatEmptySchema) {
-        YandexQuery::Schema s;
+        FederatedQuery::Schema s;
         auto result = FormatSchema(s);
         UNIT_ASSERT_VALUES_EQUAL(result, R"(["StructType";[]])");
     }
 
     Y_UNIT_TEST(FormatNonEmptySchema) {
-        YandexQuery::Schema s;
+        FederatedQuery::Schema s;
         auto& c1 = *s.Addcolumn();
         c1.set_name("key");
         c1.mutable_type()->set_type_id(Ydb::Type::STRING);

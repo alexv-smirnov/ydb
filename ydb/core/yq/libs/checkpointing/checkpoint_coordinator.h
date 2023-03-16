@@ -8,7 +8,7 @@
 #include <ydb/core/yq/libs/checkpoint_storage/events/events.h>
 
 #include <ydb/core/yq/libs/config/protos/checkpoint_coordinator.pb.h>
-#include <ydb/public/api/protos/yq.pb.h>
+#include <ydb/public/api/protos/draft/fq.pb.h>
 
 #include <ydb/library/yql/dq/actors/compute/dq_compute_actor.h>
 #include <ydb/library/yql/dq/actors/compute/retry_queue.h>
@@ -17,10 +17,10 @@
 
 #include <library/cpp/actors/core/actor_bootstrapped.h>
 
-namespace NYq {
+namespace NFq {
 
 using namespace NActors;
-using namespace NYq::NConfig;
+using namespace NFq::NConfig;
 
 class TCheckpointCoordinator : public NYql::TTaskControllerImpl<TCheckpointCoordinator> {
 public:
@@ -30,8 +30,8 @@ public:
                            const TCheckpointCoordinatorConfig& settings,
                            const ::NMonitoring::TDynamicCounterPtr& counters,
                            const NProto::TGraphParams& graphParams,
-                           const YandexQuery::StateLoadMode& stateLoadMode,
-                           const YandexQuery::StreamingDisposition& streamingDisposition,
+                           const FederatedQuery::StateLoadMode& stateLoadMode,
+                           const FederatedQuery::StreamingDisposition& streamingDisposition,
                            // vvv TaskController temporary params vvv
                            const TString& traceId,
                            const NActors::TActorId& executerId,
@@ -192,8 +192,8 @@ private:
 
     TCheckpointCoordinatorMetrics Metrics;
 
-    YandexQuery::StateLoadMode StateLoadMode;
-    YandexQuery::StreamingDisposition StreamingDisposition;
+    FederatedQuery::StateLoadMode StateLoadMode;
+    FederatedQuery::StreamingDisposition StreamingDisposition;
 };
 
 THolder<NActors::IActor> MakeCheckpointCoordinator(
@@ -203,8 +203,8 @@ THolder<NActors::IActor> MakeCheckpointCoordinator(
     const TCheckpointCoordinatorConfig& settings,
     const ::NMonitoring::TDynamicCounterPtr& counters,
     const NProto::TGraphParams& graphParams,
-    const YandexQuery::StateLoadMode& stateLoadMode /* = YandexQuery::StateLoadMode::FROM_LAST_CHECKPOINT */,
-    const YandexQuery::StreamingDisposition& streamingDisposition /* = {} */,
+    const FederatedQuery::StateLoadMode& stateLoadMode /* = FederatedQuery::StateLoadMode::FROM_LAST_CHECKPOINT */,
+    const FederatedQuery::StreamingDisposition& streamingDisposition /* = {} */,
     // vvv TaskController temporary params vvv
     const TString& traceId,
     const NActors::TActorId& executerId,
@@ -215,4 +215,4 @@ THolder<NActors::IActor> MakeCheckpointCoordinator(
     const TDuration& aggrPeriod
     );
 
-} // namespace NYq
+} // namespace NFq

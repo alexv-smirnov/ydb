@@ -3,7 +3,7 @@
 #include <ydb/core/yq/libs/events/event_subspace.h>
 #include <ydb/core/yq/libs/quota_manager/events/events.h>
 
-#include <ydb/public/api/protos/yq.pb.h>
+#include <ydb/public/api/protos/draft/fq.pb.h>
 
 #include <library/cpp/actors/core/event_pb.h>
 #include <library/cpp/actors/core/events.h>
@@ -13,7 +13,7 @@
 
 #include <util/digest/multi.h>
 
-namespace NYq {
+namespace NFq {
 
 enum TenantState : ui64 {
     Active = 0,
@@ -48,12 +48,12 @@ struct TTenantInfo {
 struct TEvControlPlaneConfig {
     // Event ids.
     enum EEv : ui32 {
-        EvGetTenantInfoRequest = YqEventSubspaceBegin(NYq::TYqEventSubspace::ControlPlaneConfig),
+        EvGetTenantInfoRequest = YqEventSubspaceBegin(NFq::TYqEventSubspace::ControlPlaneConfig),
         EvGetTenantInfoResponse,
         EvEnd,
     };
 
-    static_assert(EvEnd <= YqEventSubspaceEnd(NYq::TYqEventSubspace::ControlPlaneConfig), "All events must be in their subspace");
+    static_assert(EvEnd <= YqEventSubspaceEnd(NFq::TYqEventSubspace::ControlPlaneConfig), "All events must be in their subspace");
 
     struct TEvGetTenantInfoRequest : NActors::TEventLocal<TEvGetTenantInfoRequest, EvGetTenantInfoRequest> {
     };

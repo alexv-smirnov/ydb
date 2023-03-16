@@ -18,7 +18,7 @@
 #include <library/cpp/monlib/service/pages/templates.h>
 #include <library/cpp/protobuf/interop/cast.h>
 
-#include <ydb/public/api/protos/yq.pb.h>
+#include <ydb/public/api/protos/draft/fq.pb.h>
 #include <ydb/public/sdk/cpp/client/ydb_scheme/scheme.h>
 
 #include <ydb/library/db_pool/db_pool.h>
@@ -42,7 +42,7 @@
 
 #include <type_traits>
 
-namespace NYq {
+namespace NFq {
 
 using namespace NActors;
 using namespace NConfig;
@@ -57,14 +57,14 @@ inline static void PrepareAccessConditionImpl(TSqlQueryBuilder& builder, TPermis
         // any row
     } else if (permissions.Check(publicPermission)) {
         builder.AddString("user", user);
-        builder.AddInt64("visibility_scope", YandexQuery::Acl::SCOPE);
+        builder.AddInt64("visibility_scope", FederatedQuery::Acl::SCOPE);
         builder.AddText(" AND (`" VISIBILITY_COLUMN_NAME "` = $visibility_scope OR `" USER_COLUMN_NAME "` = $user)");
     } else if (permissions.Check(privatePermission)) {
-        builder.AddInt64("visibility_private", YandexQuery::Acl::PRIVATE);
+        builder.AddInt64("visibility_private", FederatedQuery::Acl::PRIVATE);
         builder.AddText(" AND (`" VISIBILITY_COLUMN_NAME "` = $visibility_private)");
     } else {
         builder.AddString("user", user);
-        builder.AddInt64("visibility_private", YandexQuery::Acl::PRIVATE);
+        builder.AddInt64("visibility_private", FederatedQuery::Acl::PRIVATE);
         builder.AddText(" AND (`" VISIBILITY_COLUMN_NAME "` = $visibility_private AND `" USER_COLUMN_NAME "` = $user)");
     }
 }
@@ -77,19 +77,19 @@ inline static void PrepareManageAccessCondition(TSqlQueryBuilder& builder, TPerm
     PrepareAccessConditionImpl(builder, permissions, user, TPermissions::MANAGE_PRIVATE, TPermissions::MANAGE_PUBLIC);
 }
 
-inline static bool HasAccessImpl(TPermissions permissions, YandexQuery::Acl::Visibility entityVisibility, const TString& entityUser, const TString& user, TPermissions::TPermission privatePermission, TPermissions::TPermission publicPermission) {
+inline static bool HasAccessImpl(TPermissions permissions, FederatedQuery::Acl::Visibility entityVisibility, const TString& entityUser, const TString& user, TPermissions::TPermission privatePermission, TPermissions::TPermission publicPermission) {
     return (permissions.Check(publicPermission) && permissions.Check(privatePermission))
-        || (permissions.Check(publicPermission) && (entityVisibility == YandexQuery::Acl::SCOPE || entityUser == user))
-        || (permissions.Check(privatePermission) && entityVisibility == YandexQuery::Acl::PRIVATE)
-        || (entityVisibility == YandexQuery::Acl::PRIVATE && entityUser == user);
+        || (permissions.Check(publicPermission) && (entityVisibility == FederatedQuery::Acl::SCOPE || entityUser == user))
+        || (permissions.Check(privatePermission) && entityVisibility == FederatedQuery::Acl::PRIVATE)
+        || (entityVisibility == FederatedQuery::Acl::PRIVATE && entityUser == user);
 }
 
 
-inline static bool HasViewAccess(TPermissions permissions, YandexQuery::Acl::Visibility entityVisibility, const TString& entityUser, const TString& user) {
+inline static bool HasViewAccess(TPermissions permissions, FederatedQuery::Acl::Visibility entityVisibility, const TString& entityUser, const TString& user) {
     return HasAccessImpl(permissions, entityVisibility, entityUser, user, TPermissions::VIEW_PRIVATE, TPermissions::VIEW_PUBLIC);
 }
 
-inline static bool HasManageAccess(TPermissions permissions, YandexQuery::Acl::Visibility entityVisibility, const TString& entityUser, const TString& user) {
+inline static bool HasManageAccess(TPermissions permissions, FederatedQuery::Acl::Visibility entityVisibility, const TString& entityUser, const TString& user) {
     return HasAccessImpl(permissions, entityVisibility, entityUser, user, TPermissions::MANAGE_PRIVATE, TPermissions::MANAGE_PUBLIC);
 }
 
@@ -186,7 +186,7 @@ THashMap<TString, T> GetEntitiesWithVisibilityPriority(const TResultSet& resultS
         const TString name = entity.content().name();
         if (auto it = entities.find(name); it != entities.end()) {
             const auto visibility = entity.content().acl().visibility();
-            if (visibility == YandexQuery::Acl::PRIVATE) {
+            if (visibility == FederatedQuery::Acl::PRIVATE) {
                 entities[name] = std::move(entity);
             }
         } else {
@@ -284,11 +284,11 @@ protected:
     TControlPlaneStorageUtils(
         const NConfig::TControlPlaneStorageConfig& config,
         const NConfig::TCommonConfig& common)
-    : Config(std::make_shared<::NYq::TControlPlaneStorageConfig>(config, common))
+    : Config(std::make_shared<::NFq::TControlPlaneStorageConfig>(config, common))
     {
     }
 
-    explicit TControlPlaneStorageUtils(const std::shared_ptr<::NYq::TControlPlaneStorageConfig>& config)
+    explicit TControlPlaneStorageUtils(const std::shared_ptr<::NFq::TControlPlaneStorageConfig>& config)
     : Config(config)
     {
     }
@@ -301,7 +301,7 @@ protected:
     template<typename T>
     NYql::TIssues ValidateConnection(T& ev, bool clickHousePasswordRequire = true)
     {
-        return ::NYq::ValidateConnection<T>(ev, Config->Proto.GetMaxRequestSize(),
+        return ::NFq::ValidateConnection<T>(ev, Config->Proto.GetMaxRequestSize(),
                                   Config->AvailableConnections, Config->Proto.GetDisableCurrentIam(),
                                   clickHousePasswordRequire);
     }
@@ -309,19 +309,19 @@ protected:
     template<typename T>
      NYql::TIssues ValidateBinding(T& ev)
     {
-        return ::NYq::ValidateBinding<T>(ev, Config->Proto.GetMaxRequestSize(), Config->AvailableBindings);
+        return ::NFq::ValidateBinding<T>(ev, Config->Proto.GetMaxRequestSize(), Config->AvailableBindings);
     }
 
     template<typename T>
     NYql::TIssues ValidateQuery(const T& ev)
     {
-        return ::NYq::ValidateQuery<T>(ev, Config->Proto.GetMaxRequestSize());
+        return ::NFq::ValidateQuery<T>(ev, Config->Proto.GetMaxRequestSize());
     }
 
     template<class P>
     NYql::TIssues ValidateEvent(const P& ev)
     {
-        return ::NYq::ValidateEvent<P>(ev, Config->Proto.GetMaxRequestSize());
+        return ::NFq::ValidateEvent<P>(ev, Config->Proto.GetMaxRequestSize());
     }
 
     static TString MakeLogPrefix(const TString& scope, const TString& user, const TString& id = "") {
@@ -336,8 +336,8 @@ protected:
         return s.size() > maxLength ? (s.substr(0, maxLength - 3) + "...") : s;
     }
 
-    static YandexQuery::CommonMeta CreateCommonMeta(const TString& id, const TString& user, const TInstant& startTime, int64_t revision) {
-        YandexQuery::CommonMeta common;
+    static FederatedQuery::CommonMeta CreateCommonMeta(const TString& id, const TString& user, const TInstant& startTime, int64_t revision) {
+        FederatedQuery::CommonMeta common;
         common.set_id(id);
         common.set_created_by(user);
         common.set_modified_by(user);
@@ -349,7 +349,7 @@ protected:
     }
 
 protected:
-    std::shared_ptr<::NYq::TControlPlaneStorageConfig> Config;
+    std::shared_ptr<::NFq::TControlPlaneStorageConfig> Config;
 
     static constexpr int64_t InitialRevision = 1;
 };
@@ -494,7 +494,7 @@ class TYdbControlPlaneStorageActor : public NActors::TActorBootstrapped<TYdbCont
     public:
         ::NMonitoring::TDynamicCounterPtr Counters;
 
-        explicit TCounters(const ::NMonitoring::TDynamicCounterPtr& counters, const ::NYq::TControlPlaneStorageConfig& config)
+        explicit TCounters(const ::NMonitoring::TDynamicCounterPtr& counters, const ::NFq::TControlPlaneStorageConfig& config)
             : ScopeCounters{TTtlCacheSettings{}.SetTtl(config.MetricsTtl)}
             , FinalStatusCounters{TTtlCacheSettings{}.SetTtl(config.MetricsTtl)}
             , Counters(counters)
@@ -554,7 +554,7 @@ class TYdbControlPlaneStorageActor : public NActors::TActorBootstrapped<TYdbCont
 
     TCounters Counters;
 
-    ::NYq::TYqSharedResources::TPtr YqSharedResources;
+    ::NFq::TYqSharedResources::TPtr YqSharedResources;
 
     NKikimr::TYdbCredentialsProviderFactory CredProviderFactory;
     TString TenantName;
@@ -572,7 +572,7 @@ public:
         const NConfig::TControlPlaneStorageConfig& config,
         const NConfig::TCommonConfig& common,
         const ::NMonitoring::TDynamicCounterPtr& counters,
-        const ::NYq::TYqSharedResources::TPtr& yqSharedResources,
+        const ::NFq::TYqSharedResources::TPtr& yqSharedResources,
         const NKikimr::TYdbCredentialsProviderFactory& credProviderFactory,
         const TString& tenantName)
         : TControlPlaneStorageUtils(config, common)

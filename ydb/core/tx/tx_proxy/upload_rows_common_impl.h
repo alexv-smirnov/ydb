@@ -150,6 +150,7 @@ protected:
     TVector<std::pair<TString, NScheme::TTypeInfo>> YdbSchema;
     THashMap<ui32, size_t> Id2Position; // columnId -> its position in YdbSchema
     THashMap<TString, NScheme::TTypeInfo> ColumnsToConvert;
+    THashMap<TString, NScheme::TTypeInfo> ColumnsToConvertInplace;
 
     bool WriteToTableShadow = false;
     bool AllowWriteToPrivateTable = false;
@@ -279,9 +280,17 @@ private:
     static bool SameDstType(NScheme::TTypeInfo type1, NScheme::TTypeInfo type2, bool allowConvert) {
         bool res = (type1 == type2);
         if (!res && allowConvert) {
-            res = NArrow::GetArrowType(type1)->id() == NArrow::GetArrowType(type2)->id();
+            res = (NArrow::GetArrowType(type1)->id() == NArrow::GetArrowType(type2)->id());
         }
         return res;
+    }
+
+    static bool SameOrConvertableDstType(NScheme::TTypeInfo type1, NScheme::TTypeInfo type2, bool allowConvert) {
+        bool ok = SameDstType(type1, type2, allowConvert) || NArrow::TArrowToYdbConverter::NeedInplaceConversion(type1, type2);
+        if (!ok && allowConvert) {
+            ok = NArrow::TArrowToYdbConverter::NeedConversion(type1, type2);
+        }
+        return ok;
     }
 
     bool BuildSchema(const NActors::TActorContext& ctx, TString& errorMessage, bool makeYqbSchema) {
@@ -365,12 +374,16 @@ private:
 
             if (typeInProto.type_id()) {
                 auto typeInRequest = NScheme::TTypeInfo(typeInProto.type_id());
-                bool ok = SameDstType(typeInRequest, ci.PType, GetSourceType() != EUploadSource::ProtoValues);
-                if (!ok) {
-                    errorMessage = Sprintf("Type mismatch for column %s: expected %s, got %s",
+                bool sourceIsArrow = GetSourceType() != EUploadSource::ProtoValues;
+                bool ok = SameOrConvertableDstType(typeInRequest, ci.PType, sourceIsArrow); // TODO
+                if (!ok) { 
+                    errorMessage = Sprintf("Type mismatch for column %s: expected %s, got %s", 
                                            name.c_str(), NScheme::TypeName(ci.PType).c_str(),
                                            NScheme::TypeName(typeInRequest).c_str());
                     return false;
+                }
+                if (NArrow::TArrowToYdbConverter::NeedInplaceConversion(typeInRequest, ci.PType)) {
+                    ColumnsToConvertInplace[name] = ci.PType;
                 }
             } else if (typeInProto.has_decimal_type() && ci.PType.GetTypeId() == NScheme::NTypeIds::Decimal) {
                 int precision = typeInProto.decimal_type().precision();
@@ -572,6 +585,9 @@ private:
                     if (!ExtractBatch(errorMessage)) {
                         return ReplyWithError(Ydb::StatusIds::BAD_REQUEST, errorMessage, ctx);
                     }
+                    if (!ColumnsToConvertInplace.empty()) {
+                        Batch = NArrow::InplaceConvertColumns(Batch, ColumnsToConvertInplace);
+                    }
                     // Explicit types conversion
                     if (!ColumnsToConvert.empty()) {
                         Batch = NArrow::ConvertColumns(Batch, ColumnsToConvert);
@@ -608,6 +624,7 @@ private:
         if (TableKind == NSchemeCache::TSchemeCacheNavigate::KindTable) {
             ResolveShards(ctx);
         } else if (isColumnTable) {
+            // Batch is already converted
             WriteToColumnTable(ctx);
         } else {
             return ReplyWithError(Ydb::StatusIds::SCHEME_ERROR,

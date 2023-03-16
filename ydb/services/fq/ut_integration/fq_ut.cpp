@@ -858,9 +858,9 @@ Y_UNIT_TEST_SUITE(Yq_1) {
 Y_UNIT_TEST_SUITE(Yq_2) {
     // use fork for data test due to ch initialization problem
     Y_UNIT_TEST(Test_HostNameTrasformation) {
-        UNIT_ASSERT_VALUES_EQUAL(::NYq::TransformMdbHostToCorrectFormat("rc1c-p5waby2y5y1kb5ue.mdb.yandexcloud.net"), "rc1c-p5waby2y5y1kb5ue.db.yandex.net:8443");
-        UNIT_ASSERT_VALUES_EQUAL(::NYq::TransformMdbHostToCorrectFormat("xxx.xxx"), "xxx.db.yandex.net:8443");
-        UNIT_ASSERT_VALUES_EQUAL(::NYq::TransformMdbHostToCorrectFormat("host."), "host.db.yandex.net:8443");
+        UNIT_ASSERT_VALUES_EQUAL(::NFq::TransformMdbHostToCorrectFormat("rc1c-p5waby2y5y1kb5ue.mdb.yandexcloud.net"), "rc1c-p5waby2y5y1kb5ue.db.yandex.net:8443");
+        UNIT_ASSERT_VALUES_EQUAL(::NFq::TransformMdbHostToCorrectFormat("xxx.xxx"), "xxx.db.yandex.net:8443");
+        UNIT_ASSERT_VALUES_EQUAL(::NFq::TransformMdbHostToCorrectFormat("host."), "host.db.yandex.net:8443");
     }
 
     SIMPLE_UNIT_FORKED_TEST(ReadFromYdbOverYq) {
@@ -941,7 +941,7 @@ Y_UNIT_TEST_SUITE(PrivateApi) {
             req.mutable_query_id()->set_value("id");
             req.set_scope(scope.ToString());
             req.set_owner_id("some_owner");
-            req.set_status(YandexQuery::QueryMeta::COMPLETED);
+            req.set_status(FederatedQuery::QueryMeta::COMPLETED);
             auto result = client.PingTask(std::move(req)).ExtractValueSync();
             result.GetIssues().PrintTo(Cerr);
             UNIT_ASSERT_VALUES_EQUAL(result.GetStatus(), EStatus::GENERIC_ERROR);

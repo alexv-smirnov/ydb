@@ -178,6 +178,7 @@ public:
     }
 
     void Handle(NKqp::TEvKqpExecuter::TEvStreamData::TPtr& ev, const TActorContext& ctx) {
+        ExecuterActorId = ev->Sender;
         auto& record = ev->Get()->Record;
 
         if (!HasMeta) {
@@ -213,12 +214,6 @@ public:
     void Handle(NKqp::TEvKqpExecuter::TEvStreamProfile::TPtr& ev, const TActorContext& ctx) {
         Y_UNUSED(ctx);
         Executions.push_back(std::move(*ev->Get()->Record.MutableProfile()));
-    }
-
-    void Handle(NKqp::TEvKqpExecuter::TEvExecuterProgress::TPtr& ev, const TActorContext& ctx) {
-        ExecuterActorId = ActorIdFromProto(ev->Get()->Record.GetExecuterActorId());
-        LOG_DEBUG_S(ctx, NKikimrServices::KQP_GATEWAY, SelfId()
-            << "Received executer progress for scan query, id: " << ExecuterActorId);
     }
 
     void Handle(NKqp::TEvKqp::TEvProcessResponse::TPtr& ev, const TActorContext& ctx) {
@@ -257,7 +252,6 @@ public:
             HFunc(NKqp::TEvKqp::TEvAbortExecution, Handle);
             HFunc(NKqp::TEvKqpExecuter::TEvStreamData, Handle);
             HFunc(NKqp::TEvKqpExecuter::TEvStreamProfile, Handle);
-            HFunc(NKqp::TEvKqpExecuter::TEvExecuterProgress, Handle);
             HFunc(TResponse, HandleResponse);
 
         default:
@@ -403,20 +397,13 @@ public:
 
     void Handle(NKqp::TEvKqpExecuter::TEvStreamData::TPtr& ev, const TActorContext& ctx) {
         Y_UNUSED(ctx);
+        ExecuterActorId = ev->Sender;
         TlsActivationContext->Send(ev->Forward(TargetActorId));
     }
 
     void Handle(NKqp::TEvKqpExecuter::TEvStreamDataAck::TPtr& ev, const TActorContext& ctx) {
         Y_UNUSED(ctx);
         TlsActivationContext->Send(ev->Forward(ExecuterActorId));
-    }
-
-    void Handle(NKqp::TEvKqpExecuter::TEvExecuterProgress::TPtr& ev, const TActorContext& ctx) {
-        ExecuterActorId = ActorIdFromProto(ev->Get()->Record.GetExecuterActorId());
-        ActorIdToProto(SelfId(), ev->Get()->Record.MutableExecuterActorId());
-        LOG_DEBUG_S(ctx, NKikimrServices::KQP_GATEWAY, SelfId()
-            << "Received executer progress for scan query, id: " << ExecuterActorId);
-        TlsActivationContext->Send(ev->Forward(TargetActorId));
     }
 
     void Handle(NKqp::TEvKqpExecuter::TEvStreamProfile::TPtr& ev, const TActorContext& ctx) {
@@ -461,7 +448,6 @@ public:
             HFunc(NKqp::TEvKqp::TEvAbortExecution, Handle);
             HFunc(NKqp::TEvKqpExecuter::TEvStreamData, Handle);
             HFunc(NKqp::TEvKqpExecuter::TEvStreamProfile, Handle);
-            HFunc(NKqp::TEvKqpExecuter::TEvExecuterProgress, Handle);
             HFunc(TResponse, HandleResponse);
 
         default:
@@ -476,7 +462,7 @@ private:
 };
 
 
-class TKqpExecPureRequestHandler: public TActorBootstrapped<TKqpExecPureRequestHandler> {
+class TKqpExecLiteralRequestHandler: public TActorBootstrapped<TKqpExecLiteralRequestHandler> {
 public:
     using TResult = IKqpGateway::TExecPhysicalResult;
 
@@ -484,7 +470,7 @@ public:
         return NKikimrServices::TActivity::KQP_EXEC_PHYSICAL_REQUEST_HANDLER;
     }
 
-    TKqpExecPureRequestHandler(IKqpGateway::TExecPhysicalRequest&& request,
+    TKqpExecLiteralRequestHandler(IKqpGateway::TExecPhysicalRequest&& request,
         TKqpRequestCounters::TPtr counters, TPromise<TResult> promise, TQueryData::TPtr params)
         : Request(std::move(request))
         , Parameters(params)
@@ -493,7 +479,7 @@ public:
     {}
 
     void Bootstrap() {
-        auto result = ::NKikimr::NKqp::ExecutePure(std::move(Request), Counters, SelfId());
+        auto result = ::NKikimr::NKqp::ExecuteLiteral(std::move(Request), Counters, SelfId());
         ProcessPureExecution(result);
         Become(&TThis::DieState);
         Send(SelfId(), new TEvents::TEvPoisonPill());
@@ -1262,7 +1248,7 @@ public:
 
             NKikimrSchemeOp::TExternalTableDescription& externalTableDesc = *schemeTx.MutableCreateExternalTable();
             FillCreateExternalTableColumnDesc(externalTableDesc, pathPair.second, settings);
-            return SendSchemeRequest(ev.Release());
+            return SendSchemeRequest(ev.Release(), true);
         }
         catch (yexception& e) {
             return MakeFuture(ResultFromException<TGenericResult>(e));
@@ -1529,7 +1515,7 @@ public:
     protected:
         virtual TFuture<NMetadata::NModifications::TObjectOperatorResult> DoExecute(
             NMetadata::IClassBehaviour::TPtr manager, const TSettings& settings,
-            const NMetadata::NModifications::IOperationsManager::TModificationContext& context) = 0;
+            const NMetadata::NModifications::IOperationsManager::TExternalModificationContext& context) = 0;
         ui32 GetNodeId() const {
             return Owner.NodeId;
         }
@@ -1558,7 +1544,7 @@ public:
                 if (!cBehaviour->GetOperationsManager()) {
                     return MakeFuture(ResultFromError<TGenericResult>("type has not manager for operations"));
                 }
-                NMetadata::NModifications::IOperationsManager::TModificationContext context;
+                NMetadata::NModifications::IOperationsManager::TExternalModificationContext context;
                 if (GetUserToken()) {
                     context.SetUserToken(*GetUserToken());
                 }
@@ -1585,7 +1571,7 @@ public:
     protected:
         virtual TFuture<NMetadata::NModifications::TObjectOperatorResult> DoExecute(
             NMetadata::IClassBehaviour::TPtr manager, const NYql::TCreateObjectSettings& settings,
-            const NMetadata::NModifications::IOperationsManager::TModificationContext& context) override
+            const NMetadata::NModifications::IOperationsManager::TExternalModificationContext& context) override
         {
             return manager->GetOperationsManager()->CreateObject(settings, TBase::GetNodeId(), manager, context);
         }
@@ -1599,7 +1585,7 @@ public:
     protected:
         virtual TFuture<NMetadata::NModifications::TObjectOperatorResult> DoExecute(
             NMetadata::IClassBehaviour::TPtr manager, const NYql::TAlterObjectSettings& settings,
-            const NMetadata::NModifications::IOperationsManager::TModificationContext& context) override {
+            const NMetadata::NModifications::IOperationsManager::TExternalModificationContext& context) override {
             return manager->GetOperationsManager()->AlterObject(settings, TBase::GetNodeId(), manager, context);
         }
     public:
@@ -1612,7 +1598,7 @@ public:
     protected:
         virtual TFuture<NMetadata::NModifications::TObjectOperatorResult> DoExecute(
             NMetadata::IClassBehaviour::TPtr manager, const NYql::TDropObjectSettings& settings,
-            const NMetadata::NModifications::IOperationsManager::TModificationContext& context) override {
+            const NMetadata::NModifications::IOperationsManager::TExternalModificationContext& context) override {
             return manager->GetOperationsManager()->DropObject(settings, TBase::GetNodeId(), manager, context);
         }
     public:
@@ -1810,12 +1796,12 @@ public:
         }
     }
 
-    TFuture<TExecPhysicalResult> ExecutePure(TExecPhysicalRequest&& request, TQueryData::TPtr params) override {
+    TFuture<TExecPhysicalResult> ExecuteLiteral(TExecPhysicalRequest&& request, TQueryData::TPtr params) override {
         YQL_ENSURE(!request.Transactions.empty());
         YQL_ENSURE(request.DataShardLocks.empty());
         YQL_ENSURE(!request.NeedTxId);
 
-        auto containOnlyPureStages = [](const auto& request) {
+        auto containOnlyLiteralStages = [](const auto& request) {
             for (const auto& tx : request.Transactions) {
                 if (tx.Body->GetType() != NKqpProto::TKqpPhyTx::TYPE_COMPUTE) {
                     return false;
@@ -1831,9 +1817,9 @@ public:
             return true;
         };
 
-        YQL_ENSURE(containOnlyPureStages(request));
+        YQL_ENSURE(containOnlyLiteralStages(request));
         auto promise = NewPromise<TExecPhysicalResult>();
-        IActor* requestHandler = new TKqpExecPureRequestHandler(std::move(request), Counters, promise, params);
+        IActor* requestHandler = new TKqpExecLiteralRequestHandler(std::move(request), Counters, promise, params);
         RegisterActor(requestHandler);
         return promise.GetFuture();
     }

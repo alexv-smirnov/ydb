@@ -9,7 +9,7 @@
 #include <ydb/core/yq/libs/signer/signer.h>
 #include <ydb/library/yql/providers/common/token_accessor/client/factory.h>
 #include <ydb/library/yql/providers/pq/cm_client/client.h>
-#include <ydb/public/api/protos/yq.pb.h>
+#include <ydb/public/api/protos/draft/fq.pb.h>
 
 #include <library/cpp/actors/core/actor.h>
 #include <library/cpp/monlib/dynamic_counters/counters.h>
@@ -37,7 +37,7 @@
 #define TC_LOG_AS_T(a, s) \
     LOG_YQ_TEST_CONNECTION_AS_TRACE(a, s)
 
-namespace NYq {
+namespace NFq {
 
 NActors::TActorId TestConnectionActorId();
 
@@ -46,7 +46,7 @@ NActors::IActor* CreateTestConnectionActor(
         const NConfig::TControlPlaneStorageConfig& controlPlaneStorageConfig,
         const NConfig::TCommonConfig& commonConfig,
         const NConfig::TTokenAccessorConfig& tokenAccessorConfig,
-        const NYq::TYqSharedResources::TPtr& sharedResources,
+        const NFq::TYqSharedResources::TPtr& sharedResources,
         const NYql::ISecuredServiceAccountCredentialsFactory::TPtr& credentialsFactory,
         const NPq::NConfigurationManager::IConnections::TPtr& cmConnections,
         const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
@@ -54,24 +54,24 @@ NActors::IActor* CreateTestConnectionActor(
         const ::NMonitoring::TDynamicCounterPtr& counters);
 
 NActors::IActor* CreateTestDataStreamsConnectionActor(
-        const YandexQuery::DataStreams& ds,
-        const NYq::NConfig::TCommonConfig& commonConfig,
+        const FederatedQuery::DataStreams& ds,
+        const NFq::NConfig::TCommonConfig& commonConfig,
         const std::shared_ptr<NYql::IDatabaseAsyncResolver>& dbResolver,
         const NActors::TActorId& sender,
         ui64 cookie,
-        const NYq::TYqSharedResources::TPtr& sharedResources,
+        const NFq::TYqSharedResources::TPtr& sharedResources,
         const NYql::ISecuredServiceAccountCredentialsFactory::TPtr& credentialsFactory,
         const ::NPq::NConfigurationManager::IConnections::TPtr& cmConnections,
         const NKikimr::NMiniKQL::IFunctionRegistry* functionRegistry,
         const TString& scope,
         const TString& user,
         const TString& token,
-        const NYq::TSigner::TPtr& signer,
+        const NFq::TSigner::TPtr& signer,
         const TTestConnectionRequestCountersPtr& counters);
 
 NActors::IActor* CreateTestObjectStorageConnectionActor(
-        const YandexQuery::ObjectStorageConnection& os,
-        const NYq::NConfig::TCommonConfig& commonConfig,
+        const FederatedQuery::ObjectStorageConnection& os,
+        const NFq::NConfig::TCommonConfig& commonConfig,
         const NActors::TActorId& sender,
         ui64 cookie,
         const NYql::ISecuredServiceAccountCredentialsFactory::TPtr& credentialsFactory,
@@ -79,11 +79,11 @@ NActors::IActor* CreateTestObjectStorageConnectionActor(
         const TString& scope,
         const TString& user,
         const TString& token,
-        const NYq::TSigner::TPtr& signer,
+        const NFq::TSigner::TPtr& signer,
         const TTestConnectionRequestCountersPtr& counters);
 
 NActors::IActor* CreateTestMonitoringConnectionActor(
-        const YandexQuery::Monitoring& monitoring,
+        const FederatedQuery::Monitoring& monitoring,
         const NActors::TActorId& sender,
         ui64 cookie,
         const TString& endpoint,
@@ -91,7 +91,7 @@ NActors::IActor* CreateTestMonitoringConnectionActor(
         const TString& scope,
         const TString& user,
         const TString& token,
-        const NYq::TSigner::TPtr& signer,
+        const NFq::TSigner::TPtr& signer,
         const TTestConnectionRequestCountersPtr& counters);
 
-} // namespace NYq
+} // namespace NFq

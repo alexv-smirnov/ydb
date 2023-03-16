@@ -16,7 +16,7 @@
 
 #include <library/cpp/json/yson/json2yson.h>
 
-namespace NYq {
+namespace NFq {
 
 using namespace NKikimr::NMiniKQL;
 using NYql::NUdf::TUnboxedValuePod;
@@ -399,7 +399,7 @@ NJson::TJsonValue FormatColumnPrettyValue(
 
 } // namespace
 
-TString FormatSchema(const YandexQuery::Schema& schema)
+TString FormatSchema(const FederatedQuery::Schema& schema)
 {
     NYql::TExprContext ctx;
     TVector<std::pair<TString, const NYql::TTypeAnnotationNode*>> typedColumns;
@@ -455,4 +455,4 @@ void FormatResultSet(NJson::TJsonValue& root, const NYdb::TResultSet& resultSet,
     }
 }
 
-} // namespace NYq
+} // namespace NFq

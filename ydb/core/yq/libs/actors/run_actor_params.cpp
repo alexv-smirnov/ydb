@@ -1,6 +1,6 @@
 #include "run_actor_params.h"
 
-namespace NYq {
+namespace NFq {
 
 using namespace NActors;
 
@@ -14,7 +14,7 @@ TRunActorParams::TRunActorParams(
     ui64 nextUniqueId,
     NKikimr::NMiniKQL::TComputationNodeFactory dqCompFactory,
     ::NPq::NConfigurationManager::IConnections::TPtr pqCmConnections,
-    const ::NYq::NConfig::TConfig& config,
+    const ::NFq::NConfig::TConfig& config,
     const TString& sql,
     const NYdb::NFq::TScope& scope,
     const TString& authToken,
@@ -23,19 +23,19 @@ TRunActorParams::TRunActorParams(
     const TString& userId,
     const TString& owner,
     const int64_t previousQueryRevision,
-    TVector<YandexQuery::Connection> connections,
-    TVector<YandexQuery::Binding> bindings,
+    TVector<FederatedQuery::Connection> connections,
+    TVector<FederatedQuery::Binding> bindings,
     NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory,
     THashMap<TString, TString> accountIdSignatures,
-    YandexQuery::QueryContent::QueryType queryType,
-    YandexQuery::QueryContent::QuerySyntax querySyntax,
-    YandexQuery::ExecuteMode executeMode,
+    FederatedQuery::QueryContent::QueryType queryType,
+    FederatedQuery::QueryContent::QuerySyntax querySyntax,
+    FederatedQuery::ExecuteMode executeMode,
     const TString& resultId,
-    const YandexQuery::StateLoadMode stateLoadMode,
-    const YandexQuery::StreamingDisposition& streamingDisposition,
-    YandexQuery::QueryMeta::ComputeStatus status,
+    const FederatedQuery::StateLoadMode stateLoadMode,
+    const FederatedQuery::StreamingDisposition& streamingDisposition,
+    FederatedQuery::QueryMeta::ComputeStatus status,
     const TString& cloudId,
-    TVector<YandexQuery::ResultSetMeta> resultSetMetas,
+    TVector<FederatedQuery::ResultSetMeta> resultSetMetas,
     TVector<TString> dqGraphs,
     int32_t dqGraphIndex,
     bool automatic,
@@ -99,4 +99,4 @@ TRunActorParams::TRunActorParams(
     {
     }
 
-} /* NYq */
+} /* NFq */

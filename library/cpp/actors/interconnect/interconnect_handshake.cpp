@@ -19,6 +19,7 @@ namespace NActors {
        , public TInterconnectLoggingBase
     {
         struct TExHandshakeFailed : yexception {};
+        struct TExPoison {};
 
         static constexpr TDuration ResolveTimeout = TDuration::Seconds(1);
 
@@ -98,6 +99,7 @@ namespace NActors {
         const TDuration MuteDuration = TDuration::Seconds(15);
         TMonotonic Deadline;
         TActorId HandshakeBroker;
+        std::optional<TBrokerLeaseHolder> BrokerLeaseHolder;
 
     public:
         THandshakeActor(TInterconnectProxyCommon::TPtr common, const TActorId& self, const TActorId& peer,
@@ -133,83 +135,89 @@ namespace NActors {
             }
         }
 
+        ~THandshakeActor() {
+            // BrokerLeaseHolder sends messages in destuctor, so it must be deleted before other actor's components
+            BrokerLeaseHolder.reset();
+        }
+
         void UpdatePrefix() {
             SetPrefix(Sprintf("Handshake %s [node %" PRIu32 "]", SelfActorId.ToString().data(), PeerNodeId));
         }
 
         void Run() override {
-            UpdatePrefix();
-
-            bool isBrokerEnabled = !Socket && Common->OutgoingHandshakeInflightLimit;
-            bool isBrokerActive = false;
-
-            if (isBrokerEnabled) {
-                if (Send(HandshakeBroker, new TEvHandshakeBrokerTake())) {
-                    isBrokerActive = true;
-                    WaitForSpecificEvent<TEvHandshakeBrokerPermit>("HandshakeBrokerPermit");
-                }
-            }
-
-            auto freeHandshakeBroker = [&]() {
-                if (isBrokerActive) {
-                    Send(HandshakeBroker, new TEvHandshakeBrokerFree());
-                }
-            };
-
             try {
-                // set up overall handshake process timer
-                TDuration timeout = Common->Settings.Handshake;
-                if (timeout == TDuration::Zero()) {
-                    timeout = DEFAULT_HANDSHAKE_TIMEOUT;
-                }
-                timeout += ResolveTimeout * 2;
-
-                if (Socket) {
-                    // Incoming handshakes have shorter timeout than outgoing
-                    timeout *= 0.9;
-                }
-
-                Deadline = TActivationContext::Monotonic() + timeout;
-                Schedule(Deadline, new TEvents::TEvWakeup);
-
-                try {
-                    if (Socket) {
-                        PerformIncomingHandshake();
-                    } else {
-                        PerformOutgoingHandshake();
-                    }
-
-                    // establish encrypted channel, or, in case when encryption is disabled, check if it matches settings
-                    if (ProgramInfo) {
-                        if (Params.Encryption) {
-                            EstablishSecureConnection();
-                        } else if (Common->Settings.EncryptionMode == EEncryptionMode::REQUIRED && !Params.AuthOnly) {
-                            Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "Peer doesn't support encryption, which is required");
-                        }
-                    }
-                } catch (const TExHandshakeFailed&) {
-                    ProgramInfo.Clear();
-                }
-
-                if (ProgramInfo) {
-                    LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICH04", NLog::PRI_INFO, "handshake succeeded");
-                    Y_VERIFY(NextPacketFromPeer);
-                    if (PollerToken) {
-                        Y_VERIFY(PollerToken->RefCount() == 1);
-                        PollerToken.Reset(); // ensure we are going to destroy poller token here as we will re-register the socket within other actor
-                    }
-                    SendToProxy(MakeHolder<TEvHandshakeDone>(std::move(Socket), PeerVirtualId, SelfVirtualId,
-                        *NextPacketFromPeer, ProgramInfo->Release(), std::move(Params)));
-                }
+                RunImpl();
             } catch (const TDtorException&) {
-                throw; // we can't use actor system when handling this exception
+                if (BrokerLeaseHolder) {
+                    BrokerLeaseHolder->ForgetLease();
+                }
+                throw;
+            } catch (const TExPoison&) {
+                return; // just stop execution
             } catch (...) {
-                freeHandshakeBroker();
                 throw;
             }
+        }
 
-            freeHandshakeBroker();
+        void RunImpl() {
+            UpdatePrefix();
+
+            if (!Socket && Common->OutgoingHandshakeInflightLimit) {
+                // Create holder, which sends request to broker and automatically frees the place when destroyed
+                BrokerLeaseHolder.emplace(SelfActorId, HandshakeBroker);
+            }
+
+            if (BrokerLeaseHolder && BrokerLeaseHolder->IsLeaseRequested()) {
+                WaitForSpecificEvent<TEvHandshakeBrokerPermit>("HandshakeBrokerPermit");
+            }
+
+            // set up overall handshake process timer
+            TDuration timeout = Common->Settings.Handshake;
+            if (timeout == TDuration::Zero()) {
+                timeout = DEFAULT_HANDSHAKE_TIMEOUT;
+            }
+            timeout += ResolveTimeout * 2;
+
+            if (Socket) {
+                // Incoming handshakes have shorter timeout than outgoing
+                timeout *= 0.9;
+            }
+
+            Deadline = TActivationContext::Monotonic() + timeout;
+            Schedule(Deadline, new TEvents::TEvWakeup);
+
+            try {
+                if (Socket) {
+                    PerformIncomingHandshake();
+                } else {
+                    PerformOutgoingHandshake();
+                }
+
+                // establish encrypted channel, or, in case when encryption is disabled, check if it matches settings
+                if (ProgramInfo) {
+                    if (Params.Encryption) {
+                        EstablishSecureConnection();
+                    } else if (Common->Settings.EncryptionMode == EEncryptionMode::REQUIRED && !Params.AuthOnly) {
+                        Fail(TEvHandshakeFail::HANDSHAKE_FAIL_PERMANENT, "Peer doesn't support encryption, which is required");
+                    }
+                }
+            } catch (const TExHandshakeFailed&) {
+                ProgramInfo.Clear();
+            }
+
+            if (ProgramInfo) {
+                LOG_LOG_IC_X(NActorsServices::INTERCONNECT, "ICH04", NLog::PRI_INFO, "handshake succeeded");
+                Y_VERIFY(NextPacketFromPeer);
+                if (PollerToken) {
+                    Y_VERIFY(PollerToken->RefCount() == 1);
+                    PollerToken.Reset(); // ensure we are going to destroy poller token here as we will re-register the socket within other actor
+                }
+                SendToProxy(MakeHolder<TEvHandshakeDone>(std::move(Socket), PeerVirtualId, SelfVirtualId,
+                    *NextPacketFromPeer, ProgramInfo->Release(), std::move(Params)));
+            }
+
             Socket.Reset();
+            BrokerLeaseHolder.reset();
         }
 
         void EstablishSecureConnection() {
@@ -249,7 +257,7 @@ namespace NActors {
             }
         }
 
-        void ProcessUnexpectedEvent(TAutoPtr<IEventHandle> ev) override {
+        void ProcessUnexpectedEvent(TAutoPtr<IEventHandle> ev) {
             switch (const ui32 type = ev->GetTypeRewrite()) {
                 case TEvents::TSystem::Wakeup:
                     Fail(TEvHandshakeFail::HANDSHAKE_FAIL_TRANSIENT, Sprintf("Handshake timed out, State# %s", State.data()), true);
@@ -264,7 +272,7 @@ namespace NActors {
                    break;
 
                 case TEvents::TSystem::Poison:
-                   throw TStopCoroutineException();
+                   throw TExPoison();
 
                 default:
                     Y_FAIL("unexpected event 0x%08" PRIx32, type);
@@ -840,13 +848,13 @@ namespace NActors {
         template <typename TEvent>
         THolder<typename TEvent::THandle> WaitForSpecificEvent(TString state, TMonotonic deadline = TMonotonic::Max()) {
             State = std::move(state);
-            return TActorCoroImpl::WaitForSpecificEvent<TEvent>(deadline);
+            return TActorCoroImpl::WaitForSpecificEvent<TEvent>(&THandshakeActor::ProcessUnexpectedEvent, deadline);
         }
 
         template <typename T1, typename T2, typename... TEvents>
         THolder<IEventHandle> WaitForSpecificEvent(TString state, TMonotonic deadline = TMonotonic::Max()) {
             State = std::move(state);
-            return TActorCoroImpl::WaitForSpecificEvent<T1, T2, TEvents...>(deadline);
+            return TActorCoroImpl::WaitForSpecificEvent<T1, T2, TEvents...>(&THandshakeActor::ProcessUnexpectedEvent, deadline);
         }
 
         template <typename TEvent>

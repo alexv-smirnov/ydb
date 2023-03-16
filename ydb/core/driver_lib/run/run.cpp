@@ -105,7 +105,6 @@
 #include <ydb/services/ydb/ydb_scheme.h>
 #include <ydb/services/ydb/ydb_scripting.h>
 #include <ydb/services/ydb/ydb_table.h>
-#include <ydb/services/yq/grpc_service.h>
 
 #include <ydb/core/yq/libs/init/init.h>
 
@@ -842,7 +841,6 @@ void TKikimrRunner::InitializeGRpc(const TKikimrRunConfig& runConfig) {
         }
 
         if (hasYandexQuery) {
-            server.AddService(new NGRpcService::TGRpcYandexQueryService(ActorSystem.Get(), Counters, grpcRequestProxies[0]));
             server.AddService(new NGRpcService::TGRpcFederatedQueryService(ActorSystem.Get(), Counters, grpcRequestProxies[0]));
             server.AddService(new NGRpcService::TGRpcFqPrivateTaskService(ActorSystem.Get(), Counters, grpcRequestProxies[0]));
         }   /* REMOVE */ else /* THIS else as well and separate ifs */ if (hasYandexQueryPrivate) {
@@ -1485,6 +1483,14 @@ TIntrusivePtr<TServiceInitializersList> TKikimrRunner::CreateServiceInitializers
         sil->AddServiceInitializer(new TMetadataProviderInitializer(runConfig));
     }
 
+    if (serviceMask.ExternalIndex) {
+        sil->AddServiceInitializer(new TExternalIndexInitializer(runConfig));
+    }
+
+    if (serviceMask.EnableBackgroundTasks) {
+        sil->AddServiceInitializer(new TBackgroundTasksInitializer(runConfig));
+    }
+
     if (serviceMask.EnableCms) {
         sil->AddServiceInitializer(new TCmsServiceInitializer(runConfig));
     }
@@ -1537,7 +1543,7 @@ TIntrusivePtr<TServiceInitializersList> TKikimrRunner::CreateServiceInitializers
     }
 
     if (serviceMask.EnableYandexQuery && runConfig.AppConfig.GetFederatedQueryConfig().GetEnabled()) {
-        YqSharedResources = NYq::CreateYqSharedResources(
+        YqSharedResources = NFq::CreateYqSharedResources(
             runConfig.AppConfig.GetFederatedQueryConfig(),
             NKikimr::CreateYdbCredentialsProviderFactory,
             Counters->GetSubgroup("counters", "yq"));

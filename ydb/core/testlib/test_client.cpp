@@ -7,7 +7,6 @@
 #include <ydb/public/lib/base/msgbus.h>
 #include <ydb/core/grpc_services/grpc_request_proxy.h>
 #include <ydb/services/auth/grpc_service.h>
-#include <ydb/services/yq/grpc_service.h>
 #include <ydb/services/fq/grpc_service.h>
 #include <ydb/services/fq/private_grpc.h>
 #include <ydb/services/cms/grpc_service.h>
@@ -32,7 +31,6 @@
 #include <ydb/services/persqueue_v1/topic.h>
 #include <ydb/services/persqueue_v1/grpc_pq_write.h>
 #include <ydb/services/monitoring/grpc_service.h>
-#include <ydb/services/yq/grpc_service.h>
 #include <ydb/core/yq/libs/control_plane_proxy/control_plane_proxy.h>
 #include <ydb/core/yq/libs/control_plane_storage/control_plane_storage.h>
 #include <ydb/core/client/metadata/types_metadata.h>
@@ -94,6 +92,9 @@
 #include <ydb/services/metadata/service.h>
 #include <ydb/services/bg_tasks/ds_table/executor.h>
 #include <ydb/services/bg_tasks/service.h>
+#include <ydb/services/ext_index/common/config.h>
+#include <ydb/services/ext_index/common/service.h>
+#include <ydb/services/ext_index/service/executor.h>
 #include <ydb/library/folder_service/mock/mock_folder_service.h>
 
 #include <ydb/core/client/server/msgbus_server_tracer.h>
@@ -368,7 +369,6 @@ namespace Tests {
         GRpcServer->AddService(new NGRpcService::TGRpcMonitoringService(system, counters, grpcRequestProxies[0], true));
         GRpcServer->AddService(new NGRpcService::TGRpcYdbQueryService(system, counters, grpcRequestProxies[0], true));
         if (Settings->EnableYq) {
-            GRpcServer->AddService(new NGRpcService::TGRpcYandexQueryService(system, counters, grpcRequestProxies[0]));
             GRpcServer->AddService(new NGRpcService::TGRpcFederatedQueryService(system, counters, grpcRequestProxies[0]));
             GRpcServer->AddService(new NGRpcService::TGRpcFqPrivateTaskService(system, counters, grpcRequestProxies[0]));
         }
@@ -724,6 +724,11 @@ namespace Tests {
             const auto aid = Runtime->Register(actor, nodeIdx, appData.SystemPoolId, TMailboxType::Revolving, 0);
             Runtime->RegisterService(NBackgroundTasks::MakeServiceId(Runtime->GetNodeId(nodeIdx)), aid);
         }
+        if (Settings->IsEnableExternalIndex()) {
+            auto* actor = NCSIndex::CreateService(NCSIndex::TConfig());
+            const auto aid = Runtime->Register(actor, nodeIdx, appData.SystemPoolId, TMailboxType::Revolving, 0);
+            Runtime->RegisterService(NCSIndex::MakeServiceId(Runtime->GetNodeId(nodeIdx)), aid);
+        }
         Runtime->Register(CreateLabelsMaintainer({}), nodeIdx, appData.SystemPoolId, TMailboxType::Revolving, 0);
 
         auto sysViewService = NSysView::CreateSysViewServiceForTests();
@@ -863,7 +868,7 @@ namespace Tests {
         }
 
         if (Settings->EnableYq) {
-            NYq::NConfig::TConfig protoConfig;
+            NFq::NConfig::TConfig protoConfig;
             protoConfig.SetEnabled(true);
 
             protoConfig.MutableQuotasManager()->SetEnabled(true);
@@ -964,8 +969,8 @@ namespace Tests {
 
             const auto ydbCredFactory = NKikimr::CreateYdbCredentialsProviderFactory;
             auto counters = MakeIntrusive<::NMonitoring::TDynamicCounters>();
-            YqSharedResources = NYq::CreateYqSharedResources(protoConfig, ydbCredFactory, counters);
-            NYq::Init(
+            YqSharedResources = NFq::CreateYqSharedResources(protoConfig, ydbCredFactory, counters);
+            NFq::Init(
                 protoConfig,
                 Runtime->GetNodeId(nodeIdx),
                 actorRegistrator,
@@ -977,7 +982,7 @@ namespace Tests {
                 /*IcPort = */0,
                 {}
                 );
-            NYq::InitTest(Runtime.Get(), port, Settings->GrpcPort, YqSharedResources);
+            NFq::InitTest(Runtime.Get(), port, Settings->GrpcPort, YqSharedResources);
         }
     }
 

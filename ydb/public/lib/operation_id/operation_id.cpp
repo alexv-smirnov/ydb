@@ -13,6 +13,23 @@ namespace NOperationId {
 
 using namespace NUri;
 
+static const TString QueryIdPrefix = "ydb://preparedqueryid/4?id=";
+
+TString FormatPreparedQueryIdCompat(const TString& in) {
+    return QueryIdPrefix + in;
+}
+
+bool DecodePreparedQueryIdCompat(const TString& in, TString& out) {
+    if (in.size() <= QueryIdPrefix.size()) {
+        ythrow yexception() << "Unable to parse input string";
+    }
+    if (in.compare(0, QueryIdPrefix.size(), QueryIdPrefix) == 0) {
+        out = in.substr(QueryIdPrefix.size());
+        return true;
+    }
+    return false;
+}
+
 TString ProtoToString(const Ydb::TOperationId& proto) {
     using namespace ::google::protobuf;
     const Reflection& reflection = *proto.GetReflection();

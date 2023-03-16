@@ -212,6 +212,8 @@ namespace Tests {
     private:
         YDB_FLAG_ACCESSOR(EnableMetadataProvider, true);
         YDB_FLAG_ACCESSOR(EnableBackgroundTasks, false);
+        YDB_FLAG_ACCESSOR(EnableExternalIndex, false);
+        
     };
 
     class TServer : public TThrRefBase, TMoveOnly {
@@ -285,7 +287,7 @@ namespace Tests {
         TAutoPtr<NMsgBusProxy::IMessageBusServer> BusServer;
         std::unique_ptr<NGrpc::TGRpcServer> GRpcServer;
         TIntrusivePtr<::NMonitoring::TDynamicCounters> GRpcServerRootCounters;
-        NYq::IYqSharedResources::TPtr YqSharedResources;
+        NFq::IYqSharedResources::TPtr YqSharedResources;
     };
 
     class TClient {

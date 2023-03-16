@@ -170,9 +170,10 @@ double TPoolInfo::GetlastSecondPoolConsumed(i16 threadIdx) {
 void TPoolInfo::PullStats(ui64 ts) {
     for (i16 threadIdx = 0; threadIdx < MaxThreadCount; ++threadIdx) {
         TThreadInfo &threadInfo = ThreadInfo[threadIdx];
-        threadInfo.Consumed.Register(ts, Pool->GetThreadConsumedUs(threadIdx));
+        TCpuConsumption cpuConsumption = Pool->GetThreadCpuConsumption(threadIdx);
+        threadInfo.Consumed.Register(ts, cpuConsumption.ConsumedUs);
         LWPROBE(SavedValues, Pool->PoolId, Pool->GetName(), "consumed", UNROLL_HISTORY(threadInfo.Consumed.History));
-        threadInfo.Booked.Register(ts, Pool->GetThreadBookedUs(threadIdx));
+        threadInfo.Booked.Register(ts, cpuConsumption.BookedUs);
         LWPROBE(SavedValues, Pool->PoolId, Pool->GetName(), "booked", UNROLL_HISTORY(threadInfo.Booked.History));
     }
 }
@@ -237,7 +238,7 @@ void THarmonizer::PullStats(ui64 ts) {
 }
 
 Y_FORCE_INLINE bool IsStarved(double consumed, double booked) {
-    return Max(consumed, booked) > 0.1 && consumed < booked * 0.7;
+    return consumed < booked * 0.7;
 }
 
 Y_FORCE_INLINE bool IsHoggish(double booked, ui16 currentThreadCount) {
@@ -304,30 +305,33 @@ void THarmonizer::HarmonizeImpl(ui64 ts) {
     }
     double overbooked = consumed - booked;
     if (isStarvedPresent) {
-      // last_starved_at_consumed_value = сумма по всем пулам consumed;
-      // TODO(cthulhu): использовать как лимит планвно устремлять этот лимит к total,
-      // использовать вместо total
-      if (beingStopped && beingStopped >= overbooked) {
-          // do nothing
-      } else {
-          TStackVec<size_t> reorder;
-          for (size_t i = 0; i < Pools.size(); ++i) {
-              reorder.push_back(i);
-          }
-          for (ui16 poolIdx : PriorityOrder) {
-              TPoolInfo &pool = Pools[poolIdx];
-              i64 threadCount = pool.GetThreadCount();
-              if (threadCount > pool.DefaultThreadCount) {
-                  pool.SetThreadCount(threadCount - 1);
-                  AtomicIncrement(pool.DecreasingThreadsByStarvedState);
-                  overbooked--;
-                  LWPROBE(HarmonizeOperation, poolIdx, pool.Pool->GetName(), "decrease", threadCount - 1, pool.DefaultThreadCount, pool.MaxThreadCount);
-                  if (overbooked < 1) {
-                      break;
-                  }
-              }
-          }
-      }
+        // last_starved_at_consumed_value = сумма по всем пулам consumed;
+        // TODO(cthulhu): использовать как лимит планвно устремлять этот лимит к total,
+        // использовать вместо total
+        if (beingStopped && beingStopped >= overbooked) {
+            // do nothing
+        } else {
+            TStackVec<size_t> reorder;
+            for (size_t i = 0; i < Pools.size(); ++i) {
+                reorder.push_back(i);
+            }
+            for (ui16 poolIdx : PriorityOrder) {
+                TPoolInfo &pool = Pools[poolIdx];
+                i64 threadCount = pool.GetThreadCount();
+                while (threadCount > pool.DefaultThreadCount) {
+                    pool.SetThreadCount(threadCount - 1);
+                    AtomicIncrement(pool.DecreasingThreadsByStarvedState);
+                    overbooked--;
+                    LWPROBE(HarmonizeOperation, poolIdx, pool.Pool->GetName(), "decrease", threadCount - 1, pool.DefaultThreadCount, pool.MaxThreadCount);
+                    if (overbooked < 1) {
+                        break;
+                    }
+                }
+                if (overbooked < 1) {
+                    break;
+                }
+            }
+        }
     } else {
         for (size_t needyPoolIdx : needyPools) {
             TPoolInfo &pool = Pools[needyPoolIdx];
