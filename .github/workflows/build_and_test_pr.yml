@@ -30,7 +30,6 @@ jobs:
           memory: 64GB
           core-fraction: 100
           subnet-id: e2li3l3l0jpuk44kgjoa
-          public-ip: false
 
   build-and-test:
     strategy:
