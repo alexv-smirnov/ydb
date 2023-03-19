@@ -66,7 +66,7 @@ jobs:
     - name: Configure ccache
       shell: bash
       run: |
-        ccache --set-config=remote_storage='${{secrets.CCACHE_REMOTE}}'
+        ccache --set-config=remote_storage="http://${{secrets.REMOTE_CACHE_AUTH}}@$REMOTE_CACHE_URL"
         ccache --set-config=max_size=50G
         ccache -p
     - name: Checkout YDB
