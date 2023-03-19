@@ -56,7 +56,7 @@ jobs:
     - name: Configure remote cache
       shell: bash
       run: |
-        /usr/bin/bash -xc ccache --set-config=remote-storage="${{secrets.CCACHE_REMOTE}}"
+        ccache --set-config=remote_storage='${{secrets.CCACHE_REMOTE}}'
         ccache -p
     - name: Checkout
       uses: actions/checkout@v3
