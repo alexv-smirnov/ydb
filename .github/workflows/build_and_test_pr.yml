@@ -32,7 +32,7 @@ jobs:
           subnet-id: e2li3l3l0jpuk44kgjoa
           public-ip: false
 
-  build_and_test:
+  build-and-test:
     strategy:
       matrix:
         arch: [ X64, ARM64 ]
