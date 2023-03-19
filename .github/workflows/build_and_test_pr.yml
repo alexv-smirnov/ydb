@@ -6,7 +6,7 @@ on:
 env:
   ALLURE_TOKEN: ${{ secrets.ALLURE_TOKEN }}
   ALLURE_ENDPOINT: ${{ secrets.ALLURE_ENDPOINT }}
-  ALLURE_PROJECT_ID: ${{ secrets.ALLURE_PROJECT_ID }}
+  ALLURE_PROJECT_ID: $ALLURE_PROJECT_ID
   
 jobs:
 
@@ -49,18 +49,24 @@ jobs:
         sudo apt-get update
         sudo apt-get -y install git cmake python3-pip ninja-build antlr3 m4 clang-12 lld-12 libidn11-dev libaio1 libaio-dev
         sudo pip3 install conan==1.59
-    - name: Checkout
+    - name: Checkout ccache
       uses: actions/checkout@v3
-    - name: Install ccache
-      uses: hendrikmuhs/ccache-action@v1.2 
       with:
-        max-size: 50G
-    - name: Configure remote cache
+        repository: https://github.com/ccache/ccache
+    - name: Build ccache
+      shell: bash
+      run: |
+        mkdir build && cd build
+        cmake -DCMAKE_BUILD_TYPE=Release ..
+        make
+        make install
+    - name: Configure ccache
       shell: bash
       run: |
         ccache --set-config=remote_storage='${{secrets.CCACHE_REMOTE}}'
+        ccache --set-config=max-size=50G
         ccache -p
-    - name: Configure
+    - name: Configure YDB
       shell: bash
       run: |
         mkdir ../build
@@ -69,12 +75,12 @@ jobs:
         cd ../build
         rm -rf *
         cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE=../ydb/clang.toolchain ../ydb
-    - name: Build
+    - name: Build YDB
       shell: bash
       run: |
         cd ../build
         ninja
-    - name: Test
+    - name: Test YDB
       shell: bash
       run: |
         cd ../build/ydb
