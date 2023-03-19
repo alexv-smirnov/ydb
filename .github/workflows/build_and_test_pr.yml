@@ -85,7 +85,8 @@ jobs:
       shell: bash
       run: |
         cd ../build
-        ninja
+        ninja contrib/libs/base64/all
+        ccache -s
     - name: Test YDB
       shell: bash
       run: |
