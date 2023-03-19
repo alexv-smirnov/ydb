@@ -52,7 +52,7 @@ jobs:
     - name: Checkout ccache
       uses: actions/checkout@v3
       with:
-        repository: https://github.com/ccache/ccache
+        repository: ccache/ccache
     - name: Build ccache
       shell: bash
       run: |
