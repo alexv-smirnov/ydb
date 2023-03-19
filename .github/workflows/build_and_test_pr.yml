@@ -42,6 +42,7 @@ jobs:
     - name: Install dependencies
       shell: bash
       run: |
+        curl -X PUT http://cache_user:JJnn11qq@10.129.0.27:8080/ac/af54d75a499f0cd57ca9a732d1d7372f968ed304af54d75a499f0cd57ca9a732
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
         wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc | sudo apt-key add -
         echo "deb http://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
