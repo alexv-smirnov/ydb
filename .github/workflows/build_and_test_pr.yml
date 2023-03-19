@@ -1,0 +1,88 @@
+name: C/C++ CI 2
+
+on: 
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+  
+env:
+  ALLURE_TOKEN: ${{ secrets.ALLURE_TOKEN }}
+  ALLURE_ENDPOINT: ${{ secrets.ALLURE_ENDPOINT }}
+  ALLURE_PROJECT_ID: ${{ secrets.ALLURE_PROJECT_ID }}
+  
+jobs:
+
+  start-runner:
+    name: Start self-hosted YC runner
+    runs-on: ubuntu-latest
+    outputs:
+      label: ${{ steps.start-yc-runner.outputs.label }}
+      instance-id: ${{ steps.start-yc-runner.outputs.instance-id }}
+    steps:
+      - name: Start YC runner
+        id: start-yc-runner
+        uses: yc-actions/yc-github-runner@v1
+        with:
+          mode: start
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          folder-id: b1gkd7mdvthhba180rcl
+          image-id: fd8snjpoq85qqv0mk9gi
+          cores: 32
+          memory: 64GB
+          core-fraction: 100
+          subnet-id: e2li3l3l0jpuk44kgjoa
+
+  build_and_test:
+    strategy:
+      matrix:
+        arch: [ X64, ARM64 ]
+      fail-fast: false
+
+    runs-on: [ self-hosted, "${{matrix.arch}}" ] 
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v3
+    - name: Configure
+      shell: bash
+      run: |
+        cd ../build
+        rm -rf *
+        cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE=../ydb/clang.toolchain ../ydb
+    - name: Build
+      shell: bash
+      run: |
+        cd ../build
+        ninja
+    - name: Test
+      shell: bash
+      run: |
+        cd ../build/ydb
+        rm -rf $(pwd)/../../tmp/*
+        rm -rf $(pwd)/../../test_reports/*
+        # Our test util provides output with coloring, so remove it using sed before sending to grep
+        TMPDIR=$(pwd)/../../tmp GTEST_OUTPUT="xml:$(pwd)/../../test_reports/" Y_UNITTEST_OUTPUT="xml:$(pwd)/../../test_reports/" \
+          ~/allurectl watch --results $(pwd)/../../test_reports/ -- \
+          ctest -j28 --timeout 1200 --force-new-ctest-process --output-on-failure \
+            --output-junit $(pwd)/../../test_reports/ctest_report.xml | \
+          sed -e 's/\x1b\[[0-9;]*m//g' | \
+          tee testrun.log | \
+          grep -E '(Test\s*#.*\*\*\*|\[FAIL\])|.*tests passed,.*tests failed out of'
+  
+  stop-runner:
+    name: Stop self-hosted YC runner
+    needs:
+      - start-runner # required to get output from the start-runner job
+      - do-the-job # required to wait when the main job is done
+    runs-on: ubuntu-latest
+    if: ${{ always() }} # required to stop the runner even if the error happened in the previous jobs
+    steps:
+      - name: Stop YC runner
+        uses: yc-actions/yc-github-runner@v1
+        with:
+          mode: stop
+          yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
+          github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
+          label: ${{ needs.start-runner.outputs.label }}
+          instance-id: ${{ needs.start-runner.outputs.instance-id }}
