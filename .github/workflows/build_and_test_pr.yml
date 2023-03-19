@@ -39,11 +39,23 @@ jobs:
     runs-on: ${{ needs.start-runner.outputs.label }} # run the job on the newly created runner
 
     steps:
+    - name: Install dependencies
+      shell: bash
+      run: |
+        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc | sudo apt-key add -
+        echo "deb http://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
+        echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+        sudo apt-get update
+        sudo apt-get -y install git cmake python3-pip ninja-build antlr3 m4 clang-12 lld-12 libidn11-dev libaio1 libaio-dev
+        sudo pip3 install conan==1.59
     - name: Checkout
       uses: actions/checkout@v3
     - name: Configure
       shell: bash
       run: |
+        mkdir ../build
+        mkdir ../test_reports
         cd ../build
         rm -rf *
         cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE=../ydb/clang.toolchain ../ydb
