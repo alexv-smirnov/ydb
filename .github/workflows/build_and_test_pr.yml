@@ -84,6 +84,7 @@ jobs:
     - name: Build YDB
       shell: bash
       run: |
+        ccache -p
         cd ../build
         ninja contrib/libs/base64/all
         ccache -s
