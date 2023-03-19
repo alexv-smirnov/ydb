@@ -35,11 +35,6 @@ jobs:
           subnet-id: e2li3l3l0jpuk44kgjoa
 
   build-and-test:
-    strategy:
-      matrix:
-        arch: [ X64, ARM64 ]
-      fail-fast: false
-
     needs: start-runner # required to start the main job when the runner is ready
     runs-on: ${{ needs.start-runner.outputs.label }} # run the job on the newly created runner
 
