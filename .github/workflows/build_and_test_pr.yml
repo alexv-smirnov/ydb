@@ -1,8 +1,6 @@
-name: C/C++ CI 2
+name: On-demand VM Build+Test
 
 on: 
-  schedule:
-    - cron: "0 1 * * *"
   workflow_dispatch:
   
 env:
