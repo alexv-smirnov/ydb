@@ -29,7 +29,8 @@ jobs:
           cores: 32
           memory: 64GB
           core-fraction: 100
-          subnet-id: e9bsde3qfr3q961k328m
+          zone-id: ru-central1-b
+          subnet-id: e2li3l3l0jpuk44kgjoa
 
   build-and-test:
     strategy:
