@@ -30,6 +30,7 @@ jobs:
           memory: 64GB
           core-fraction: 100
           subnet-id: e2li3l3l0jpuk44kgjoa
+          public-ip: false
 
   build_and_test:
     strategy:
@@ -72,7 +73,7 @@ jobs:
     name: Stop self-hosted YC runner
     needs:
       - start-runner # required to get output from the start-runner job
-      - do-the-job # required to wait when the main job is done
+      - build-and-test # required to wait when the main job is done
     runs-on: ubuntu-latest
     if: ${{ always() }} # required to stop the runner even if the error happened in the previous jobs
     steps:
