@@ -56,9 +56,15 @@ jobs:
       run: |
         mkdir ../build
         mkdir ../test_reports
+        mkdir ~/.ccache
+        echo "remote_storage = ${{secrets.CCACHE_REMOTE}}" > ~/.ccache/ccache.conf
         cd ../build
         rm -rf *
         cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE=../ydb/clang.toolchain ../ydb
+    - name: Install ccache
+      uses: hendrikmuhs/ccache-action@v1.2 
+      with:
+        max-size: 50G
     - name: Build
       shell: bash
       run: |
