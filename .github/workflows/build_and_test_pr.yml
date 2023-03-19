@@ -57,7 +57,6 @@ jobs:
         mkdir ../build
         mkdir ../test_reports
         mkdir ~/.ccache
-        echo "remote_storage = ${{secrets.CCACHE_REMOTE}}" > ~/.ccache/ccache.conf
         cd ../build
         rm -rf *
         cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE=../ydb/clang.toolchain ../ydb
@@ -68,6 +67,7 @@ jobs:
     - name: Build
       shell: bash
       run: |
+        /usr/bin/bash -xc ccache --set-config=remote-storage=${{secrets.CCACHE_REMOTE}}
         cd ../build
         ninja
     - name: Test
