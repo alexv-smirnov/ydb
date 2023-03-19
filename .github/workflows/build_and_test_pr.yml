@@ -65,12 +65,6 @@ jobs:
         make install
     - name: Checkout YDB
       uses: actions/checkout@v3
-    - name: Configure ccache
-      shell: bash
-      run: |
-        ccache --set-config=remote_storage='http://cache_user:JJnn11qq@10.129.0.27|layout=bazel|connect-timeout=50'
-        ccache --set-config=max_size=50G
-        ccache -p | base64
     - name: Configure YDB
       shell: bash
       run: |
@@ -84,6 +78,8 @@ jobs:
     - name: Build YDB
       shell: bash
       run: |
+        ccache --set-config=remote_storage='http://cache_user:JJnn11qq@10.129.0.27|layout=bazel|connect-timeout=50'
+        ccache --set-config=max_size=50G
         ccache -p
         cd ../build
         ninja contrib/libs/base64/all
