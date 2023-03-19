@@ -49,6 +49,15 @@ jobs:
         sudo apt-get update
         sudo apt-get -y install git cmake python3-pip ninja-build antlr3 m4 clang-12 lld-12 libidn11-dev libaio1 libaio-dev
         sudo pip3 install conan==1.59
+    - name: Install ccache
+      uses: hendrikmuhs/ccache-action@v1.2 
+      with:
+        max-size: 50G
+    - name: Configure remote cache
+      shell: bash
+      run: |
+        /usr/bin/bash -xc ccache --set-config=remote-storage="${{secrets.CCACHE_REMOTE}}"
+        ccache -p
     - name: Checkout
       uses: actions/checkout@v3
     - name: Configure
@@ -60,14 +69,9 @@ jobs:
         cd ../build
         rm -rf *
         cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_TOOLCHAIN_FILE=../ydb/clang.toolchain ../ydb
-    - name: Install ccache
-      uses: hendrikmuhs/ccache-action@v1.2 
-      with:
-        max-size: 50G
     - name: Build
       shell: bash
       run: |
-        /usr/bin/bash -xc ccache --set-config=remote-storage=${{secrets.CCACHE_REMOTE}}
         cd ../build
         ninja
     - name: Test
