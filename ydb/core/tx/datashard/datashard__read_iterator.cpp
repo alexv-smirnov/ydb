@@ -553,6 +553,17 @@ public:
             } else {
                 Self->IncCounter(COUNTER_READ_ITERATOR_MAX_TIME_REACHED);
             }
+
+            NKikimrTxDataShard::TReadContinuationToken continuationToken;
+            continuationToken.SetFirstUnprocessedQuery(FirstUnprocessedQuery);
+
+            // note that when LastProcessedKey set then
+            // FirstUnprocessedQuery is definitely partially read range
+            if (LastProcessedKey)
+                continuationToken.SetLastProcessedKey(LastProcessedKey);
+
+            bool res = continuationToken.SerializeToString(record.MutableContinuationToken());
+            Y_ASSERT(res);
         } else {
             state.IsFinished = true;
             record.SetFinished(true);
@@ -617,17 +628,6 @@ public:
             record.MutableSnapshot()->SetStep(State.ReadVersion.Step);
             record.MutableSnapshot()->SetTxId(State.ReadVersion.TxId);
         }
-
-        NKikimrTxDataShard::TReadContinuationToken continuationToken;
-        continuationToken.SetFirstUnprocessedQuery(FirstUnprocessedQuery);
-
-        // note that when LastProcessedKey set then
-        // FirstUnprocessedQuery is definitely partially read range
-        if (LastProcessedKey)
-            continuationToken.SetLastProcessedKey(LastProcessedKey);
-
-        bool res = continuationToken.SerializeToString(record.MutableContinuationToken());
-        Y_ASSERT(res);
     }
 
     void UpdateState(TReadIteratorState& state) {
@@ -688,8 +688,7 @@ private:
         Y_UNUSED(ctx);
         while (iter->Next(NTable::ENext::Data) == NTable::EReady::Data) {
             TDbTupleRef rowKey = iter->GetKey();
-
-            LastProcessedKey = TSerializedCellVec::Serialize(rowKey.Cells());
+            TSerializedCellVec::Serialize(LastProcessedKey, rowKey.Cells());
 
             TDbTupleRef rowValues = iter->GetValues();
 
@@ -898,8 +897,8 @@ class TDataShard::TReadOperation : public TOperation, public IReadOperation {
     static constexpr ui32 Flags = NTxDataShard::TTxFlags::ReadOnly | NTxDataShard::TTxFlags::Immediate;
 
 public:
-    TReadOperation(TDataShard* ds, ui64 txId, TInstant receivedAt, ui64 tieBreakerIndex, TEvDataShard::TEvRead::TPtr ev)
-        : TOperation(TBasicOpInfo(txId, EOperationKind::ReadTx, Flags, 0, receivedAt, tieBreakerIndex))
+    TReadOperation(TDataShard* ds, TInstant receivedAt, ui64 tieBreakerIndex, TEvDataShard::TEvRead::TPtr ev)
+        : TOperation(TBasicOpInfo(EOperationKind::ReadTx, Flags, 0, receivedAt, tieBreakerIndex))
         , Self(ds)
         , Sender(ev->Sender)
         , Request(ev->Release().Release())
@@ -1724,7 +1723,7 @@ public:
 
             if (Ev) {
                 const ui64 tieBreaker = Self->NextTieBreakerIndex++;
-                Op = new TReadOperation(Self, tieBreaker, ctx.Now(), tieBreaker, Ev);
+                Op = new TReadOperation(Self, ctx.Now(), tieBreaker, Ev);
                 Op->BuildExecutionPlan(false);
                 Self->Pipeline.GetExecutionUnit(Op->GetCurrentUnit()).AddOperation(Op);
 

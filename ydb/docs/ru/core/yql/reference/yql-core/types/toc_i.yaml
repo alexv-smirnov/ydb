@@ -15,3 +15,6 @@ items:
   href: type_string.md
 - name: JSON
   href: json.md
+- name: YSON
+  hidden: true
+  href: yson.md

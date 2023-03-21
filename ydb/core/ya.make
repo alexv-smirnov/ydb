@@ -11,7 +11,9 @@ RECURSE(
     discovery
     engine
     erasure
+    external_sources
     filestore
+    fq
     formats
     grpc_caching
     grpc_services
@@ -49,7 +51,6 @@ RECURSE(
     ydb_convert
     ymq
     driver_lib
-    yq
     yql_testlib
 )
 

@@ -379,10 +379,9 @@ Y_UNIT_TEST_SUITE(KqpSplit) {
             TKikimrSettings settings;
             NKikimrConfig::TAppConfig appConfig;
             appConfig.MutableTableServiceConfig()->SetEnableKqpScanQuerySourceRead(true);
+            appConfig.MutableTableServiceConfig()->SetEnableKqpScanQueryStreamLookup(false);
+            appConfig.MutableTableServiceConfig()->SetEnablePredicateExtractForScanQueries(true);
             settings.SetDomainRoot(KikimrDefaultUtDomainRoot);
-            TFeatureFlags flags;
-            flags.SetEnablePredicateExtractForScanQueries(true);
-            settings.SetFeatureFlags(flags);
             settings.SetAppConfig(appConfig);
 
             Kikimr.ConstructInPlace(settings);

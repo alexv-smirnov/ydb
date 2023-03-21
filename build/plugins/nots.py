@@ -95,39 +95,56 @@ def on_ts_test_configure(unit):
     test_runner_handlers = _get_test_runner_handlers()
     test_runner = unit.get("TS_TEST_RUNNER")
 
-    if test_runner not in test_runner_handlers:
-        raise Exception("Test runner: {} is not available, try to use one of these: {}"
-                        .format(test_runner, ", ".join(test_runner_handlers.keys())))
-
     if not test_runner:
         raise Exception("Test runner is not specified")
+
+    if test_runner not in test_runner_handlers:
+        raise Exception(
+            "Test runner: {} is not available, try to use one of these: {}".format(
+                test_runner, ", ".join(test_runner_handlers.keys())
+            )
+        )
 
     test_files = ytest.get_values_list(unit, "_TS_TEST_SRCS_VALUE")
     if not test_files:
         raise Exception("No tests found in {}".format(unit.path()))
 
-    config_path = unit.get(unit.get("TS_TEST_CONFIG_PATH_VAR"))
-    abs_config_path = unit.resolve(unit.resolve_arc_path(config_path))
-    if not abs_config_path:
-        raise Exception("{} config not found: {}".format(test_runner, config_path))
+    config_path = _resolve_config_path(unit, test_runner)
+    data_dirs = list(
+        set(
+            [
+                os.path.dirname(rootrel_arc_src(p, unit))
+                for p in (ytest.get_values_list(unit, "_TS_TEST_DATA_VALUE") or [])
+            ]
+        )
+    )
 
-    mod_dir = unit.get("MODDIR")
-    test_files = _resolve_module_files(unit, mod_dir, test_files)
-    data_dirs = list(set([os.path.dirname(rootrel_arc_src(p, unit))
-                          for p in (ytest.get_values_list(unit, "_TS_TEST_DATA_VALUE") or [])]))
-
-    deps = _create_pm(unit).get_peers_from_package_json()
     test_record = {
+        # TODO: remove TS-ROOT-DIR, TS-OUT-DIR. fake values are for back-compat with ya and test_tool
+        "TS-ROOT-DIR": "fake",
+        "TS-OUT-DIR": "fake",
         "TS-TEST-FOR-PATH": unit.get("TS_TEST_FOR_PATH"),
-        "TS-ROOT-DIR": unit.get("TS_CONFIG_ROOT_DIR"),
-        "TS-OUT-DIR": unit.get("TS_CONFIG_OUT_DIR"),
         "TS-TEST-DATA-DIRS": ytest.serialize_list(data_dirs),
         "TS-TEST-DATA-DIRS-RENAME": unit.get("_TS_TEST_DATA_DIRS_RENAME_VALUE"),
         "CONFIG-PATH": config_path,
     }
 
+    _set_nodejs_root(unit)
+    test_files = _resolve_module_files(unit, unit.get("MODDIR"), test_files)
+    deps = _create_pm(unit).get_peers_from_package_json()
     add_ts_test = test_runner_handlers[test_runner]
     add_ts_test(unit, test_runner, test_files, deps, test_record)
+
+
+def _resolve_config_path(unit, test_runner):
+    config_path = unit.get(unit.get("TS_TEST_CONFIG_PATH_VAR"))
+    abs_config_path = unit.resolve(unit.resolve_arc_path(config_path))
+    if not abs_config_path:
+        raise Exception("{} config not found: {}".format(test_runner, config_path))
+
+    abs_test_for_path = unit.resolve(unit.resolve_arc_path(unit.get("TS_TEST_FOR_PATH")))
+
+    return os.path.relpath(abs_config_path, start=abs_test_for_path)
 
 
 def _get_test_runner_handlers():
@@ -138,6 +155,7 @@ def _get_test_runner_handlers():
 
 
 def _add_jest_ts_test(unit, test_runner, test_files, deps, test_record):
+    # TODO: remove these 3 lines. NOTS-PLUGINS-PATH is for back-compat with ya nad test_tool
     nots_plugins_path = os.path.join(unit.get("NOTS_PLUGINS_PATH"), "jest")
     deps.append(nots_plugins_path)
     test_record["NOTS-PLUGINS-PATH"] = nots_plugins_path
@@ -152,11 +170,13 @@ def _add_hermione_ts_test(unit, test_runner, test_files, deps, test_record):
     if not len(test_record["TS-TEST-DATA-DIRS"]):
         _add_default_hermione_test_data(unit, test_record)
 
-    test_record.update({
-        "SIZE": "LARGE",
-        "TAG": ytest.serialize_list(test_tags),
-        "REQUIREMENTS": ytest.serialize_list(test_requirements),
-    })
+    test_record.update(
+        {
+            "SIZE": "LARGE",
+            "TAG": ytest.serialize_list(test_tags),
+            "REQUIREMENTS": ytest.serialize_list(test_requirements),
+        }
+    )
 
     _add_test(unit, test_runner, test_files, deps, test_record)
 
@@ -171,13 +191,16 @@ def _add_default_hermione_test_data(unit, test_record):
     file_paths = _find_file_paths(abs_root_dir, "**/screens/*/*/*.png")
     file_dirs = [os.path.dirname(f) for f in file_paths]
 
-    rename_from, rename_to = [os.path.relpath(os.path.normpath(os.path.join(mod_dir, d)), test_for_path)
-                              for d in [root_dir, out_dir]]
+    rename_from, rename_to = [
+        os.path.relpath(os.path.normpath(os.path.join(mod_dir, d)), test_for_path) for d in [root_dir, out_dir]
+    ]
 
-    test_record.update({
-        "TS-TEST-DATA-DIRS": ytest.serialize_list(_resolve_module_files(unit, mod_dir, file_dirs)),
-        "TS-TEST-DATA-DIRS-RENAME": "{}:{}".format(rename_from, rename_to),
-    })
+    test_record.update(
+        {
+            "TS-TEST-DATA-DIRS": ytest.serialize_list(_resolve_module_files(unit, mod_dir, file_dirs)),
+            "TS-TEST-DATA-DIRS-RENAME": "{}:{}".format(rename_from, rename_to),
+        }
+    )
 
 
 def _setup_eslint(unit):
@@ -207,7 +230,7 @@ def _resolve_module_files(unit, mod_dir, file_paths):
     for path in file_paths:
         resolved = rootrel_arc_src(path, unit)
         if resolved.startswith(mod_dir):
-            resolved = resolved[len(mod_dir) + 1:]
+            resolved = resolved[len(mod_dir) + 1 :]
         resolved_files.append(resolved)
 
     return resolved_files
@@ -247,7 +270,7 @@ def _add_test(unit, test_type, test_files, deps=None, test_record=None, test_cwd
         "BINARY-PATH": os.path.join(test_dir, unit.filename()),
         "SPLIT-FACTOR": unit.get("TEST_SPLIT_FACTOR") or "",
         "FORK-MODE": unit.get("TEST_FORK_MODE") or "",
-        "SIZE": "SMALL",
+        "SIZE": unit.get("TEST_SIZE_NAME") or "",
         "TEST-FILES": ytest.serialize_list(test_files),
         "TEST-CWD": test_cwd or "",
         "TAG": ytest.serialize_list(ytest.get_values_list(unit, "TEST_TAGS_VALUE")),
@@ -304,6 +327,7 @@ def _select_matching_node_version(range_str):
         raise ValueError("There is no allowed version to satisfy this range: '{}'".format(range_str))
     except Exception as error:
         raise Exception(
-            "Requested nodejs version range '{}'' could not be satisfied. Please use a range that would include one of the following: {}.\nFor further details please visit the link: {}\nOriginal error: {}"
-            .format(range_str, map(str, SUPPORTED_NODE_VERSIONS), "https://nda.ya.ru/t/ulU4f5Ru5egzHV", str(error))
+            "Requested nodejs version range '{}'' could not be satisfied. Please use a range that would include one of the following: {}.\nFor further details please visit the link: {}\nOriginal error: {}".format(
+                range_str, map(str, SUPPORTED_NODE_VERSIONS), "https://nda.ya.ru/t/ulU4f5Ru5egzHV", str(error)
+            )
         )

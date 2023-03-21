@@ -1777,7 +1777,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             NLs::IndexKeys({"value1"})});
         TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/DirA/Table1/UserDefinedIndexByValue1/indexImplTable", true, true),
                            {NLs::Finished,
-                            NLs::MaxPartitionsCountEqual(5000),
+                            NLs::NoMaxPartitionsCount,
                             NLs::SizeToSplitEqual(2<<30)}); // 2G
         TestDescribeResult(DescribePrivatePath(runtime, "/MyRoot/DirA/Table1/UserDefinedIndexByValues"),
                            {NLs::Finished,
@@ -10273,7 +10273,8 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             NLs::PathVersionEqual(4),
                             NLs::PartitionCount(1),
                             NLs::MinPartitionsCountEqual(1),
-                            NLs::MaxPartitionsCountEqual(5000)});
+                            NLs::NoMaxPartitionsCount
+                            });
 
 
         TestSplitTable(runtime, ++txId, "/MyRoot/table/indexByValue/indexImplTable", R"(
@@ -10295,7 +10296,8 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                             NLs::PathVersionEqual(5),
                             NLs::PartitionCount(3),
                             NLs::MinPartitionsCountEqual(1),
-                            NLs::MaxPartitionsCountEqual(5000)});
+                            NLs::NoMaxPartitionsCount
+                            });
 
         // request without token
         TestAlterTable(runtime, ++txId, "/MyRoot/table/indexByValue/", R"(
@@ -10398,7 +10400,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
                            {NLs::PathExist,
                             NLs::PartitionCount(1),
                             NLs::MinPartitionsCountEqual(1),
-                            NLs::MaxPartitionsCountEqual(5000),
+                            NLs::NoMaxPartitionsCount,
                             NLs::SizeToSplitEqual(100500)});
     }
 
@@ -10884,4 +10886,53 @@ Y_UNIT_TEST_SUITE(TSchemeShardTest) {
 
         UNIT_ASSERT_VALUES_EQUAL(subDomainPathId, event->LocalPathId);
     }
+
+    Y_UNIT_TEST(CreateTopicOverDiskSpaceQuotas) {
+        TTestBasicRuntime runtime;
+
+        TTestEnvOptions opts;
+        opts.DisableStatsBatching(true);
+        opts.EnablePersistentPartitionStats(true);
+        opts.EnableTopicDiskSubDomainQuota(true);
+
+        TTestEnv env(runtime, opts);
+
+        ui64 txId = 100;
+
+        // Subdomain with a 1-byte data size quota
+        TestCreateSubDomain(runtime, ++txId,  "/MyRoot", R"(
+                        Name: "USER_1"
+                        PlanResolution: 50
+                        Coordinators: 1
+                        Mediators: 1
+                        TimeCastBucketsPerMediator: 2
+                        StoragePools {
+                            Name: "name_USER_0_kind_hdd-1"
+                            Kind: "hdd-1"
+                        }
+                        StoragePools {
+                            Name: "name_USER_0_kind_hdd-2"
+                            Kind: "hdd-2"
+                        }
+                        DatabaseQuotas {
+                            data_size_hard_quota: 1
+                        }
+                )");
+        env.TestWaitNotification(runtime, txId);
+
+        TestCreatePQGroup(runtime, ++txId, "/MyRoot/USER_1", R"(
+            Name: "Topic1"
+            TotalGroupCount: 3
+            PartitionPerTablet: 7
+            PQTabletConfig {
+                PartitionConfig {
+                    LifetimeSeconds: 1
+                    WriteSpeedInBytesPerSecond : 121
+                }
+                MeteringMode: METERING_MODE_RESERVED_CAPACITY
+            }
+        )", {{TEvSchemeShard::EStatus::StatusResourceExhausted, "database size limit exceeded"}});
+        env.TestWaitNotification(runtime, txId);
+    }
+
 }

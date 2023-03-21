@@ -55,6 +55,7 @@ SRCS(
     datashard_load.proto
     drivemodel.proto
     export.proto
+    external_sources.proto
     flat_tx_scheme.proto
     flat_scheme_op.proto
     health.proto
@@ -137,7 +138,7 @@ GENERATE_ENUM_SERIALIZATION(datashard_load.pb.h)
 
 PEERDIR(
     library/cpp/actors/protos
-    ydb/core/yq/libs/config/protos
+    ydb/core/fq/libs/config/protos
     ydb/library/login/protos
     ydb/library/mkql_proto/protos
     ydb/public/api/protos

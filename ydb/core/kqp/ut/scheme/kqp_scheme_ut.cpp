@@ -2695,6 +2695,7 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
             const auto& changefeeds = describeResult.GetTableDescription().GetChangefeedDescriptions();
             UNIT_ASSERT_VALUES_EQUAL(changefeeds.size(), 1);
             UNIT_ASSERT_VALUES_EQUAL(changefeeds.at(0), TChangefeedDescription("feed", mode, format));
+            UNIT_ASSERT_VALUES_EQUAL(changefeeds.at(0).GetState(), EChangefeedState::Enabled);
         }
 
         {
@@ -3929,8 +3930,8 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
             CREATE EXTERNAL TABLE `)" << externalTableName << R"(` (
                 Key Uint64,
                 Value String,
-                year Int,
-                month Int
+                year Int64 NOT NULL,
+                month Int64 NOT NULL
             ) WITH (
                 DATA_SOURCE=")" << externalDataSourceName << R"(",
                 LOCATION="/folder1/*",
@@ -3946,7 +3947,7 @@ Y_UNIT_TEST_SUITE(KqpScheme) {
                 `projection.month.interval`="1",
                 `projection.month.digits`="2",
                 `storage.location.template`="${year}/${month}",
-                PARTITONED_BY = "[year, month]"
+                PARTITIONED_BY = "[year, month]"
             );)";
         auto result = session.ExecuteSchemeQuery(query).GetValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());

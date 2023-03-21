@@ -76,7 +76,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                         %s
                     }
                 }
-            )", storeName.c_str(), storeShardsCount, PROTO_SCHEMA));
+            )", storeName.c_str(), storeShardsCount, GetTestTableSchema().data()));
 
             TString shardingColumns = "[\"timestamp\", \"uid\"]";
             if (shardingFunction != "HASH_FUNCTION_CLOUD_LOGS") {
@@ -1215,7 +1215,6 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
             }
 
             qBuilder << R"(PRAGMA Kikimr.OptEnablePredicateExtract = "false";)" << Endl;
-            qBuilder << R"(PRAGMA AnsiLike;)" << Endl;
             qBuilder << "SELECT `timestamp` FROM `/Root/olapStore/olapTable` WHERE ";
             qBuilder << predicate;
             qBuilder << " ORDER BY `timestamp`";
@@ -2758,7 +2757,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
                 LIMIT 10;
             )")
             .AddExpectedPlanOptions("KqpOlapFilter")
-            .SetExpectedReadNodeType("Aggregate-Filter-TableFullScan");
+            .SetExpectedReadNodeType("Aggregate-TableFullScan");
         q22.FillExpectedAggregationGroupByPlanOptions();
 
         TAggregationTestCase q39;
@@ -3799,10 +3798,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
 
         //EnableDebugLogging(kikimr);
 
-        auto& server = kikimr.GetTestServer();
         auto tableClient = kikimr.GetTableClient();
-        Tests::NCommon::THelper lHelper(server);
-
         auto session = tableClient.CreateSession().GetValueSync().GetSession();
 
         auto query = TStringBuilder() << R"(
@@ -3856,7 +3852,7 @@ Y_UNIT_TEST_SUITE(KqpOlap) {
     }
 
     Y_UNIT_TEST(OlapUpsert) {
-        TestOlapUpsert(2); // it should lead to planned tx
+        TestOlapUpsert(2);
     }
 
     Y_UNIT_TEST(OlapDeleteImmediate) {

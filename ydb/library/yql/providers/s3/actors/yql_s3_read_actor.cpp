@@ -1113,12 +1113,12 @@ std::shared_ptr<arrow::Array> ArrowDate32AsYqlDate(const std::shared_ptr<arrow::
                 continue;
             }
         } else if (!item) {
-            throw yexception() << "null value for date could not be represented in non-optional type";
+            throw parquet::ParquetException(TStringBuilder() << "null value for date could not be represented in non-optional type");
         }
 
         const i32 v = item.As<i32>();
         if (v < 0 || v > ::NYql::NUdf::MAX_DATE) {
-            throw yexception() << "date in parquet is out of range [0, " << ::NYql::NUdf::MAX_DATE << "]: " << v;
+            throw parquet::ParquetException(TStringBuilder() << "date in parquet is out of range [0, " << ::NYql::NUdf::MAX_DATE << "]: " << v);
         }
         builder.Add(NUdf::TBlockItem(static_cast<ui16>(v)));
     }
@@ -1358,14 +1358,20 @@ public:
         for (int i = 0; i < outputSchema->num_fields(); ++i) {
             const auto& targetField = outputSchema->field(i);
             auto srcFieldIndex = dataSchema->GetFieldIndex(targetField->name());
-            YQL_ENSURE(srcFieldIndex != -1, "Missing field: " << targetField->name());
+            if (srcFieldIndex == -1) {
+                throw parquet::ParquetException(TStringBuilder() << "Missing field: " << targetField->name());
+            };
             auto targetType = targetField->type();
             auto originalType = dataSchema->field(srcFieldIndex)->type();
-            YQL_ENSURE(!originalType->layout().has_dictionary, "Unsupported dictionary encoding is used for field: "
-                        << targetField->name() << ", type: " << originalType->ToString());
+            if (originalType->layout().has_dictionary) {
+                throw parquet::ParquetException(TStringBuilder() << "Unsupported dictionary encoding is used for field: "
+                    << targetField->name() << ", type: " << originalType->ToString());
+            }
             columnIndices.push_back(srcFieldIndex);
             auto rowSpecColumnIt = ReadSpec->RowSpec.find(targetField->name());
-            YQL_ENSURE(rowSpecColumnIt != ReadSpec->RowSpec.end(), "Column " << targetField->name() << " not found in row spec");
+            if (rowSpecColumnIt == ReadSpec->RowSpec.end()) {
+                throw parquet::ParquetException(TStringBuilder() << "Column " << targetField->name() << " not found in row spec");
+            }
             columnConverters.emplace_back(BuildColumnConverter(targetField->name(), originalType, targetType, rowSpecColumnIt->second));
         }
     }
@@ -1539,12 +1545,12 @@ public:
             LOG_CORO_W("Download completed for unknown/discarded range [" << readyRange.Offset << "-" << readyRange.Length << "]");
             return;
         }
-        
+
         if (it->second.Cookie != event.Cookie) {
             LOG_CORO_W("Mistmatched cookie for range [" << readyRange.Offset << "-" << readyRange.Length << "], received " << event.Cookie << ", expected " << it->second.Cookie);
             return;
-        } 
-        
+        }
+
         it->second.Data = event.Get()->Result.Extract();
         ui64 size = it->second.Data.size();
         it->second.Ready = true;
@@ -1653,7 +1659,7 @@ public:
                     CpuTime += GetCpuTimeDelta();
 
                     // if reordering is not allowed wait for row groups sequentially
-                    while (ReadyRowGroups.empty() 
+                    while (ReadyRowGroups.empty()
                             || (!ReadSpec->RowGroupReordering && ReadyRowGroups.top() > readyGroupCount) ) {
                         ProcessOneEvent();
                     }
@@ -1849,7 +1855,11 @@ public:
         if (Issues) {
             RetryStuff->NextRetryDelay = RetryStuff->GetRetryState()->GetNextRetryDelay(HttpResponseCode >= 300 ? HttpResponseCode : 0);
             LOG_CORO_D("TEvReadFinished with Issues (try to retry): " << Issues.ToOneLineString());
-            if (!RetryStuff->NextRetryDelay) {
+            if (RetryStuff->NextRetryDelay) {
+                // inplace retry: report problem to TransientIssues and repeat
+                Send(ComputeActorId, new IDqComputeActorAsyncInput::TEvAsyncInputError(InputIndex, Issues, NYql::NDqProto::StatusIds::UNSPECIFIED));
+            } else {
+                // can't retry here: fail download
                 RetryStuff->RetryState = nullptr;
                 InputFinished = true;
                 LOG_CORO_W("ReadError: " << Issues.ToOneLineString() << ", LastOffset: " << LastOffset << ", LastData: " << GetLastDataAsText());
@@ -1957,7 +1967,7 @@ private:
         try {
             if (ReadSpec->Arrow) {
                 if (ReadSpec->Compression) {
-                    Issues.AddIssue(TIssue("Blocks optimisations are incompatible with external compression, use Pragma DisableUseBlocks"));
+                    Issues.AddIssue(TIssue("Blocks optimisations are incompatible with external compression"));
                     fatalCode = NYql::NDqProto::StatusIds::BAD_REQUEST;
                 } else {
                     try {
@@ -2780,13 +2790,10 @@ std::pair<NYql::NDq::IDqComputeActorAsyncInput*, IActor*> CreateS3ReadActor(
             ythrow yexception()
                 << "'pathpatternvariant' must be configured for directory listing";
         }
-        auto maybePathPatternVariant =
-            NS3Lister::DeserializePatternVariant(pathPatternVariantValue->second);
-        if (maybePathPatternVariant.Empty()) {
+        if (!TryFromString(pathPatternVariantValue->second, pathPatternVariant)) {
             ythrow yexception()
                 << "Unknown 'pathpatternvariant': " << pathPatternVariantValue->second;
         }
-        pathPatternVariant = *maybePathPatternVariant;
     }
     ui64 fileSizeLimit = cfg.FileSizeLimit;
     if (params.HasFormat()) {
@@ -2817,6 +2824,7 @@ std::pair<NYql::NDq::IDqComputeActorAsyncInput*, IActor*> CreateS3ReadActor(
         readSpec->ParallelRowGroupCount = std::max(1ul, params.GetParallelRowGroupCount());
         readSpec->RowGroupReordering = params.GetRowGroupReordering();
         if (readSpec->Arrow) {
+            fileSizeLimit = cfg.BlockFileSizeLimit;
             arrow::SchemaBuilder builder;
             const TStringBuf blockLengthColumn("_yql_block_length"sv);
             auto extraStructType = static_cast<TStructType*>(pb->NewStructType(structType, blockLengthColumn,

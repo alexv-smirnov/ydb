@@ -2,6 +2,7 @@ import sys
 import subprocess
 import tempfile
 import os
+import shutil
 
 
 class Opts(object):
@@ -26,8 +27,8 @@ class Opts(object):
                 self.modify_flags = ['-M']
             self.need_modify = any(item.endswith('.a') for item in auto_input)
             if self.need_modify:
-                self.objs = filter(lambda x: x.endswith('.o'), auto_input)
-                self.libs = filter(lambda x: x.endswith('.a'), auto_input)
+                self.objs = list( filter(lambda x: x.endswith('.o'), auto_input) )
+                self.libs = list( filter(lambda x: x.endswith('.a'), auto_input) )
             else:
                 self.objs = auto_input
                 self.libs = []
@@ -77,6 +78,9 @@ if __name__ == "__main__":
         cmd = [opts.archiver] + opts.create_flags + opts.plugin_flags + opts.extra_args + opts.output_opts + opts.objs
         stdin = None
         exit_code = call()
+    elif len(opts.objs) == 0 and len(opts.libs) == 1:
+        shutil.copy(opts.libs[0], opts.output)
+        exit_code = 0
     else:
         temp = tempfile.NamedTemporaryFile(dir=os.path.dirname(opts.output), delete=False)
 

@@ -134,6 +134,9 @@ struct TKikimrConfiguration : public TKikimrSettings, public NCommon::TSettingDi
     bool EnableKqpScanQueryStreamLookup = false;
     bool EnableKqpDataQueryStreamLookup = false;
     bool EnableKqpDataQueryStreamPointLookup = false;
+    bool EnableKqpScanQueryStreamIdxLookupJoin = false;
+    bool EnablePredicateExtractForScanQuery = true;
+    bool EnablePredicateExtractForDataQuery = false;
 };
 
 }

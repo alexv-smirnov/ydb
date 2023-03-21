@@ -427,7 +427,14 @@ void TBlobStorageController::ReadVSlot(const TVSlotInfo& vslot, TEvBlobStorage::
     if (TGroupInfo *group = FindGroup(vslot.GroupId)) {
         const TStoragePoolInfo& info = StoragePools.at(group->StoragePoolId);
         vDisk->SetStoragePoolName(info.Name);
-        SerializeDonors(vDisk, vslot, *group);
+
+        const TVSlotFinder vslotFinder{[this](TVSlotId vslotId, auto&& callback) {
+            if (const TVSlotInfo *vslot = FindVSlot(vslotId)) {
+                callback(*vslot);
+            }
+        }};
+
+        SerializeDonors(vDisk, vslot, *group, vslotFinder);
     } else {
         Y_VERIFY(vslot.Mood != TMood::Donor);
     }

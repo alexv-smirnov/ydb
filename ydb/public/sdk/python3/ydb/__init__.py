@@ -1,5 +1,6 @@
 from .credentials import *  # noqa
 from .driver import *  # noqa
+from .global_settings import *  # noqa
 from .table import *  # noqa
 from .issues import *  # noqa
 from .types import *  # noqa
@@ -17,3 +18,11 @@ try:
     import ydb.aio as aio  # noqa
 except Exception:
     pass
+try:
+    import kikimr.public.sdk.python.ydb_v3_new_behavior  # noqa
+    global_allow_split_transactions(False)  # noqa
+    global_allow_split_transactions(False)  # noqa
+except ModuleNotFoundError:
+    # Old, deprecated
+    global_allow_split_transactions(True)  # noqa
+    global_allow_split_transactions(True)  # noqa

@@ -122,6 +122,10 @@ public:
                 meta.TotalMemory -= task.Memory;
                 meta.TotalComputeActors--;
 
+                auto ret = TRemoveTaskContext{
+                    requestIt->second.TotalMemory, requestIt->second.InFlyTasks.size(), meta.TotalComputeActors == 0, senderIt->second
+                };
+
                 if (requestIt->second.InFlyTasks.empty()) {
                     auto bounds = ExpiringRequests.equal_range(requestIt->second.Deadline);
                     for (auto it = bounds.first; it != bounds.second; ) {
@@ -141,9 +145,7 @@ public:
                     Meta.erase(txId);
                 }
 
-                return TRemoveTaskContext{
-                    requestIt->second.TotalMemory, requestIt->second.InFlyTasks.size(), meta.TotalComputeActors == 0, senderIt->second
-                };
+                return ret;
             }
         }
 
@@ -152,36 +154,7 @@ public:
 
     TMaybe<TTasksRequest> RemoveRequest(ui64 txId, const TActorId& requester) {
         TWriteGuard guard(RWLock);
-        auto key = std::make_pair(txId, requester);
-        auto* request = Requests.FindPtr(key);
-        if (!request) {
-            return Nothing();
-        }
-
-        TMaybe<TTasksRequest> ret = std::move(*request);
-        Requests.erase(key);
-
-        const auto senders = SenderIdsByTxId.equal_range(txId);
-        for (auto senderIt = senders.first; senderIt != senders.second; ++senderIt) {
-            if (senderIt->second == requester) {
-                SenderIdsByTxId.erase(senderIt);
-                break;
-            }
-        }
-
-        YQL_ENSURE(Requests.size() == SenderIdsByTxId.size());
-
-        auto& meta = Meta[txId];
-        Y_VERIFY_DEBUG(meta.TotalMemory >= ret->TotalMemory);
-        Y_VERIFY_DEBUG(meta.TotalComputeActors >= 1);
-        meta.TotalMemory -= ret->TotalMemory;
-        meta.TotalComputeActors -= ret->InFlyTasks.size();
-
-        if (meta.TotalComputeActors == 0) {
-            Meta.erase(txId);
-        }
-
-        return ret;
+        return RemoveRequestImpl(txId, requester);
     }
 
     std::vector<TTasksRequest> RemoveTx(ui64 txId) {
@@ -220,7 +193,7 @@ public:
             auto delIt = it++;
             ExpiringRequests.erase(delIt);
 
-            auto request = RemoveRequest(reqId.TxId, reqId.Requester);
+            auto request = RemoveRequestImpl(reqId.TxId, reqId.Requester);
             ret.push_back({reqId, bool(request)});
         }
         return ret;
@@ -254,6 +227,41 @@ public:
             }
         }
     }
+private:
+
+    TMaybe<TTasksRequest> RemoveRequestImpl(ui64 txId, const TActorId& requester) {
+        auto key = std::make_pair(txId, requester);
+        auto* request = Requests.FindPtr(key);
+        if (!request) {
+            return Nothing();
+        }
+
+        TMaybe<TTasksRequest> ret = std::move(*request);
+        Requests.erase(key);
+
+        const auto senders = SenderIdsByTxId.equal_range(txId);
+        for (auto senderIt = senders.first; senderIt != senders.second; ++senderIt) {
+            if (senderIt->second == requester) {
+                SenderIdsByTxId.erase(senderIt);
+                break;
+            }
+        }
+
+        YQL_ENSURE(Requests.size() == SenderIdsByTxId.size());
+
+        auto& meta = Meta[txId];
+        Y_VERIFY_DEBUG(meta.TotalMemory >= ret->TotalMemory);
+        Y_VERIFY_DEBUG(meta.TotalComputeActors >= 1);
+        meta.TotalMemory -= ret->TotalMemory;
+        meta.TotalComputeActors -= ret->InFlyTasks.size();
+
+        if (meta.TotalComputeActors == 0) {
+            Meta.erase(txId);
+        }
+
+        return ret;
+    }
+
 private:
 
     TRWMutex RWLock; // Lock for state bucket
