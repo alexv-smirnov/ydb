@@ -1,14 +1,7 @@
 name: C/C++ CI 2
 
 on: 
-  schedule:
-    - cron: "0 1 * * *"
   workflow_dispatch:
-  
-env:
-  ALLURE_TOKEN: ${{ secrets.ALLURE_TOKEN }}
-  ALLURE_ENDPOINT: ${{ secrets.ALLURE_ENDPOINT }}
-  ALLURE_PROJECT_ID: ${{ secrets.ALLURE_PROJECT_ID }}
   
 jobs:
   build:
@@ -17,8 +10,8 @@ jobs:
         arch: [ X64, ARM64 ]
       fail-fast: false
 
-    runs-on: [ self-hosted, "${{matrix.arch}}" ] 
-
+    runs-on: [ self-hosted, "${{matrix.arch}}" ]
+    
     steps:
     - name: Checkout
       uses: actions/checkout@v3
@@ -39,11 +32,12 @@ jobs:
         cd ../build/ydb
         rm -rf $(pwd)/../../tmp/*
         rm -rf $(pwd)/../../test_reports/*
-        # Our test util provides output with coloring, so remove it using sed before sending to grep
+        # Sed removes coloring from the output
         TMPDIR=$(pwd)/../../tmp GTEST_OUTPUT="xml:$(pwd)/../../test_reports/" Y_UNITTEST_OUTPUT="xml:$(pwd)/../../test_reports/" \
-          ~/allurectl watch --results $(pwd)/../../test_reports/ -- \
+          ~/allurectl watch --endpoint ${{secrets.ALLURE_ENDPOINT}} -t ${{secrets.ALLURE_TOKEN}} --project-id 1 \
+                --results $(pwd)/../../test_reports/ -- \
           ctest -j28 --timeout 1200 --force-new-ctest-process --output-on-failure \
-            --output-junit $(pwd)/../../test_reports/ctest_report.xml | \
+                --output-junit $(pwd)/../../test_reports/ctest_report.xml | \
           sed -e 's/\x1b\[[0-9;]*m//g' | \
           tee testrun.log | \
           grep -E '(Test\s*#.*\*\*\*|\[FAIL\])|.*tests passed,.*tests failed out of'
