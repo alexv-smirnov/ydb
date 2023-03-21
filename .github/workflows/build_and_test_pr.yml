@@ -24,7 +24,7 @@ jobs:
           mode: start
           yc-sa-json-credentials: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
           github-token: ${{ secrets.GH_PERSONAL_ACCESS_TOKEN }}
-          folder-id: b1gkd7mdvthhba180rcl
+          folder-id: ${{secrets.YC_FOLDER}}
           image-id: fd8snjpoq85qqv0mk9gi
           disk-size: 930GB
           disk-type: network-ssd-nonreplicated
@@ -32,7 +32,7 @@ jobs:
           memory: 64GB
           core-fraction: 100
           zone-id: ru-central1-b
-          subnet-id: e2li3l3l0jpuk44kgjoa
+          subnet-id: ${{secrets.YC_SUBNET}}
 
   build-and-test:
     needs: start-runner # required to start the main job when the runner is ready
