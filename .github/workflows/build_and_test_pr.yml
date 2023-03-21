@@ -39,7 +39,7 @@ jobs:
     runs-on: ${{ needs.start-runner.outputs.label }} # run the job on the newly created runner
 
     steps:
-    - name: Install dependencies
+    - name: Install YDB Build dependencies
       shell: bash
       run: |
         wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
@@ -49,6 +49,11 @@ jobs:
         sudo apt-get update
         sudo apt-get -y install git cmake python3-pip ninja-build antlr3 m4 clang-12 lld-12 libidn11-dev libaio1 libaio-dev
         sudo pip3 install conan==1.59
+    - name: Install AllureCtl
+      shell: bash
+      run: |
+        wget https://github.com/allure-framework/allurectl/releases/latest/download/allurectl_linux_386 -O ~/allurectl
+        chmod +x ~/allurectl
     - name: Checkout ccache
       uses: actions/checkout@v3
       with:
