@@ -84,7 +84,7 @@ jobs:
       shell: bash
       run: |
         cd ../build
-        ccache --set-config=remote_storage='http://${{secrets.REMOTE_CACHE_AUTH}}@${{vars.REMOTE_CACHE_URL}}'
+        ccache --set-config=remote_storage='http://${{secrets.REMOTE_CACHE_AUTH}}${{vars.REMOTE_CACHE_URL}}'
         ccache --set-config=max_size=50G
         ninja
     - name: Test YDB
