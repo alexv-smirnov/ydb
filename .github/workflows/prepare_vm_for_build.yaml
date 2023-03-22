@@ -9,7 +9,7 @@ on:
         
 jobs:
   prepare:
-    runs-on: ${{ inputs.runner_label }} # run the job on a particula runner
+    runs-on: ${{ inputs.runner_label }} # run the job on a particular runner
     steps:
     - name: Install YDB Build dependencies
       shell: bash
