@@ -6,6 +6,9 @@ on:
       runner_label:
         required: true
         type: string
+    secrets:
+      rc_auth:
+        required: false
         
 jobs:
   prepare:
@@ -41,7 +44,7 @@ jobs:
         make -j32
         make install
         mkdir -p ~/.ccache
-        echo 'remote_storage = http://${{secrets.REMOTE_CACHE_AUTH}}${{vars.REMOTE_CACHE_URL}}' > /root/.ccache/ccache.conf
+        echo 'remote_storage = http://${{secrets.rc_auth}}${{vars.REMOTE_CACHE_URL}}' > /root/.ccache/ccache.conf
         echo 'max_size = 50G' >> /root/.ccache/ccache.conf
         ccache -p
 
