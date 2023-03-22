@@ -2,6 +2,8 @@ name: On-demand VM Build+Test
 
 on: 
   workflow_dispatch:
+  pull_request:
+    branches: [ main ]
   
 env:
   ALLURE_TOKEN: ${{ secrets.ALLURE_TOKEN }}
