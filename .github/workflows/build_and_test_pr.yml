@@ -34,42 +34,17 @@ jobs:
           zone-id: ru-central1-b
           subnet-id: ${{secrets.YC_SUBNET}}
 
+  prepare_vm:
+    needs: start-runner
+    uses: ./.github/workflows/prepare_vm_for_build.yaml
+    with:
+      runner_label: ${{ needs.start-runner.outputs.label }}
+
   build-and-test:
-    needs: start-runner # required to start the main job when the runner is ready
+    needs: prepare_vm
     runs-on: ${{ needs.start-runner.outputs.label }} # run the job on the newly created runner
 
     steps:
-    - name: Install YDB Build dependencies
-      shell: bash
-      run: |
-        wget -O - https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
-        wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc | sudo apt-key add -
-        echo "deb http://apt.kitware.com/ubuntu/ $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/kitware.list >/dev/null
-        echo "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
-        sudo apt-get update
-        sudo apt-get -y install git cmake python3-pip ninja-build antlr3 m4 clang-12 lld-12 libidn11-dev libaio1 libaio-dev
-        sudo pip3 install conan==1.59
-    - name: Install AllureCtl
-      shell: bash
-      run: |
-        wget https://github.com/allure-framework/allurectl/releases/latest/download/allurectl_linux_386 -O ~/allurectl
-        chmod +x ~/allurectl
-    - name: Checkout ccache
-      uses: actions/checkout@v3
-      with:
-        repository: ccache/ccache
-        path: ccache
-    - name: Build ccache
-      shell: bash
-      run: |
-        pwd
-        cd ccache
-        mkdir build && cd build
-        cmake -DCMAKE_BUILD_TYPE=Release ..
-        make -j32
-        make install
-        ccache --set-config=remote_storage='http://${{secrets.REMOTE_CACHE_AUTH}}${{vars.REMOTE_CACHE_URL}}'
-        ccache --set-config=max_size=50G
     - name: Checkout YDB
       uses: actions/checkout@v3
     - name: Configure YDB
