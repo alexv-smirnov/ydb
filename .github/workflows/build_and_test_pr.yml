@@ -34,14 +34,16 @@ jobs:
           zone-id: ru-central1-b
           subnet-id: ${{secrets.YC_SUBNET}}
 
-  prepare_vm:
+  prepare-vm:
     needs: start-runner
     uses: ./.github/workflows/prepare_vm_for_build.yaml
     with:
       runner_label: ${{ needs.start-runner.outputs.label }}
 
   build-and-test:
-    needs: prepare_vm
+    needs: 
+    - start-runner
+    - prepare-vm
     runs-on: ${{ needs.start-runner.outputs.label }} # run the job on the newly created runner
 
     steps:
