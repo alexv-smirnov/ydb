@@ -40,6 +40,8 @@ jobs:
     uses: ./.github/workflows/prepare_vm_for_build.yaml
     with:
       runner_label: ${{ needs.start-runner.outputs.label }}
+    secrets:
+      rc_auth: ${{ secrets.REMOTE_CACHE_AUTH }}
 
   build-and-test:
     needs: 
