@@ -1,4 +1,4 @@
-name: On-demand VM Build+Test
+name: Prepare VM for YDB build
 
 on:
   workflow_call:
