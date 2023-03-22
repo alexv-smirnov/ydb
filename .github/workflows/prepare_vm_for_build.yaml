@@ -40,6 +40,7 @@ jobs:
         cmake -DCMAKE_BUILD_TYPE=Release ..
         make -j32
         make install
+        mkdir -p /root/.ccache
         echo 'remote_storage = http://${{secrets.REMOTE_CACHE_AUTH}}${{vars.REMOTE_CACHE_URL}}' > /root/.ccache/ccache.conf
         echo 'max_size = 50G' >> /root/.ccache/ccache.conf
         ccache -p
