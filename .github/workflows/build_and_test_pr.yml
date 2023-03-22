@@ -102,7 +102,10 @@ jobs:
           sed -e 's/\x1b\[[0-9;]*m//g' | \
           tee testrun.log | \
           grep -E '(Test\s*#.*\*\*\*|\[FAIL\])|.*tests passed,.*tests failed out of'
+        echo "Finished"
+        ls -l testrun.log
         tail -n 1000 testrun.log
+        echo "Finished2"
   
   stop-runner:
     name: Stop self-hosted YC runner
