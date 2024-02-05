@@ -14,12 +14,12 @@ SRCS(
     database_service.proto
     location.proto
     location_service.proto
-#    operation_service.proto
-#    quota_service.proto
-#    resource_preset.proto
-#    resource_preset_service.proto
-#    storage_type.proto
-#    storage_type_service.proto
+    operation_service.proto
+    quota_service.proto
+    resource_preset.proto
+    resource_preset_service.proto
+    storage_type.proto
+    storage_type_service.proto
 )
 
 USE_COMMON_GOOGLE_APIS(
@@ -34,6 +34,7 @@ USE_COMMON_GOOGLE_APIS(
 PEERDIR(
     ydb/public/api/client/yc_private/access
     ydb/public/api/client/yc_private/operation
+    ydb/public/api/client/yc_private/quota
 )
 
 END()

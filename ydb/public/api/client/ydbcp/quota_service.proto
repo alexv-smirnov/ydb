@@ -3,9 +3,9 @@ syntax = "proto3";
 package yandex.cloud.priv.ydb.v1;
 
 import "google/protobuf/empty.proto";
-import "yandex/cloud/priv/quota/quota.proto";
+import "ydb/public/api/client/yc_private/quota/quota.proto";
 
-option go_package = "a.yandex-team.ru/cloud/bitbucket/private-api/yandex/cloud/priv/ydb/v1;ydb";
+option go_package = "github.com/ydb-platform/ydb/ydb/public/api/client/ydbcp;ydb";
 
 service QuotaService {
 
