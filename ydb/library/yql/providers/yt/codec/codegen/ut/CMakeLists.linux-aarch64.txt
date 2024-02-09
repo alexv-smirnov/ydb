@@ -20,7 +20,7 @@ target_link_libraries(ydb-library-yql-providers-yt-codec-codegen-ut PUBLIC
   yutil
   cpp-testing-unittest_main
   yt-codec-codegen
-  minikql-computation-llvm
+  minikql-computation-llvm14
   udf-service-exception_policy
   library-yql-sql
   yql-sql-pg_dummy

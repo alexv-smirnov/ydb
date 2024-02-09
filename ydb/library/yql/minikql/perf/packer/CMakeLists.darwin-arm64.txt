@@ -14,7 +14,7 @@ target_compile_options(packer PRIVATE
 target_link_libraries(packer PUBLIC
   contrib-libs-cxxsupp
   yutil
-  minikql-comp_nodes-llvm
+  minikql-comp_nodes-llvm14
   yql-public-udf
   udf-service-exception_policy
   yql-sql-pg_dummy

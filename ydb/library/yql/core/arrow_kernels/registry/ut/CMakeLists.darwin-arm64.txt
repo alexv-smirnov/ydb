@@ -23,7 +23,7 @@ target_link_libraries(ydb-library-yql-core-arrow_kernels-registry-ut PUBLIC
   yql-public-udf
   udf-service-exception_policy
   yql-sql-pg_dummy
-  minikql-comp_nodes-llvm
+  minikql-comp_nodes-llvm14
   url_udf
   json2_udf
 )

@@ -46,7 +46,7 @@ set_property(
   ydb-core-kqp-ut-federated_query-generic
   PROPERTY
   SPLIT_FACTOR
-  10
+  1
 )
 add_yunittest(
   NAME
@@ -65,7 +65,7 @@ set_yunittest_property(
   ydb-core-kqp-ut-federated_query-generic
   PROPERTY
   LABELS
-  SMALL
+  MEDIUM
 )
 set_yunittest_property(
   TEST

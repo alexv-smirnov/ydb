@@ -22,7 +22,7 @@ target_link_libraries(ydb-library-yql-minikql-arrow-ut PUBLIC
   yql-public-udf
   udf-service-exception_policy
   yql-sql-pg_dummy
-  minikql-invoke_builtins-llvm
+  minikql-invoke_builtins-llvm14
 )
 target_link_options(ydb-library-yql-minikql-arrow-ut PRIVATE
   -Wl,-platform_version,macos,11.0,11.0

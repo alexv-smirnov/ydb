@@ -20,7 +20,7 @@ target_link_libraries(ydb-library-binary_json-ut PUBLIC
   cpp-testing-unittest_main
   ydb-library-binary_json
   yql-minikql-dom
-  minikql-invoke_builtins-llvm
+  minikql-invoke_builtins-llvm14
   udf-service-exception_policy
   core-issue-protos
   yql-sql-pg_dummy

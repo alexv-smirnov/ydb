@@ -31,6 +31,7 @@ target_link_libraries(yql-providers-generic-provider-ut-pushdown PUBLIC
   providers-result-provider
   udf-service-stub
   library-yql-sql
+  minikql-invoke_builtins-llvm14
   yql-sql-pg_dummy
 )
 target_link_options(yql-providers-generic-provider-ut-pushdown PRIVATE

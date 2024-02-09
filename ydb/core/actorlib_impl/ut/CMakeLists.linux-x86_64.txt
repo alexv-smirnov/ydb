@@ -27,6 +27,7 @@ target_link_libraries(ydb-core-actorlib_impl-ut PUBLIC
   library-cpp-svnversion
   core-testlib-actors
   testlib-basics-default
+  minikql-comp_nodes-llvm14
 )
 target_link_options(ydb-core-actorlib_impl-ut PRIVATE
   -ldl

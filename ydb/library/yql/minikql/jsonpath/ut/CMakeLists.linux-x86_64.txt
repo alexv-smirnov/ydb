@@ -24,9 +24,9 @@ target_link_libraries(ydb-library-yql-minikql-jsonpath-ut PUBLIC
   library-cpp-json
   ydb-library-binary_json
   library-yql-minikql
-  minikql-computation-llvm
+  minikql-computation-llvm14
   yql-minikql-dom
-  minikql-invoke_builtins-llvm
+  minikql-invoke_builtins-llvm14
   udf-service-exception_policy
   core-issue-protos
   yql-sql-pg_dummy

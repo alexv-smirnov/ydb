@@ -19,7 +19,7 @@ target_link_libraries(ydb-library-yql-udfs-common-stat-ut PUBLIC
   yutil
   cpp-testing-unittest_main
   common-stat-static
-  minikql-comp_nodes-llvm
+  minikql-comp_nodes-llvm14
   udf-service-exception_policy
   yql-sql-pg_dummy
 )

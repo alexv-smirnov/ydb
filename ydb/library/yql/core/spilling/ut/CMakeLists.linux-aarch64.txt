@@ -22,6 +22,7 @@ target_link_libraries(ydb-library-yql-core-spilling-ut PUBLIC
   yql-core-spilling
   yql-public-udf
   udf-service-exception_policy
+  yql-sql-pg_dummy
 )
 target_link_options(ydb-library-yql-core-spilling-ut PRIVATE
   -ldl

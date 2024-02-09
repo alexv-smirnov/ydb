@@ -26,7 +26,7 @@ target_link_libraries(yqlrun PUBLIC
   core-file_storage-proto
   core-file_storage-http_download
   core-services-mounts
-  minikql-comp_nodes-llvm
+  minikql-comp_nodes-llvm14
   library-yql-protos
   udf-service-exception_policy
   yql-utils-backtrace
@@ -39,11 +39,15 @@ target_link_libraries(yqlrun PUBLIC
   providers-common-udf_resolve
   providers-dq-provider
   yt-gateway-file
+  yt-codec-codegen
+  yt-comp_nodes-llvm14
   yql-core-url_preprocessing
   tools-yqlrun-http
   yql-parser-pg_wrapper
 )
 target_sources(yqlrun PRIVATE
+  ${CMAKE_BINARY_DIR}/ydb/library/yql/tools/yqlrun/ui.sh
+  ${CMAKE_BINARY_DIR}/ydb/library/yql/tools/yqlrun/uig.sh
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/tools/yqlrun/yqlrun.cpp
   ${CMAKE_SOURCE_DIR}/ydb/library/yql/tools/yqlrun/gateway_spec.cpp
 )

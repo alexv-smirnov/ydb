@@ -16,7 +16,7 @@ target_link_libraries(presort PUBLIC
   contrib-libs-cxxsupp
   yutil
   library-cpp-presort
-  minikql-invoke_builtins-llvm
+  minikql-invoke_builtins-llvm14
   yql-public-udf
   udf-service-exception_policy
   yql-sql-pg_dummy

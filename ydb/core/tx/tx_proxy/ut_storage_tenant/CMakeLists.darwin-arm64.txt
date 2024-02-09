@@ -35,6 +35,7 @@ target_link_options(ydb-core-tx-tx_proxy-ut_storage_tenant PRIVATE
   CoreFoundation
 )
 target_sources(ydb-core-tx-tx_proxy-ut_storage_tenant PRIVATE
+  ${CMAKE_SOURCE_DIR}/ydb/core/tx/tx_proxy/proxy_ut_helpers.h
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/tx_proxy/storage_tenant_ut.cpp
   ${CMAKE_SOURCE_DIR}/ydb/core/tx/tx_proxy/proxy_ut_helpers.cpp
 )
