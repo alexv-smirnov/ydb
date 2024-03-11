@@ -8,8 +8,6 @@ jobs:
   main:
     runs-on: ubuntu-latest
     steps:
-    - name: Check out
-      uses: actions/checkout@v4
     - name: Step2
       uses: ./.github/actions/learn
       with:
