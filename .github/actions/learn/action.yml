@@ -11,8 +11,8 @@ runs:
   - name: step1
     shell: bash
     env: 
-      f1: ${{ inputs.str1.f1 }}
-      f2: ${{ inputs.str1.f2 }}
+      f1: ${{ fromJSON(inputs.str1.f1) }}
+      f2: ${{ fromJSON(inputs.str1.f2) }}
     run: |
       echo "f1: $f1"
       echo "f2: $f2"
