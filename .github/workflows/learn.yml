@@ -1,0 +1,14 @@
+name: Learn
+on:
+  workflow_dispatch:
+    inputs:
+      str1:
+        type: string
+jobs:
+  main:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Step1
+      uses: ./.github/actions/learn
+      with:
+        str1: ${{ inputs.str1 }}
