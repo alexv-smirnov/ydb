@@ -213,3 +213,5 @@ jobs:
         test_threads: 52
         put_build_results_to_cache: true
         commit_sha: ${{ needs.check-running-allowed.outputs.commit_sha }}
+        sec: format('{{"testmo_token":"{0}","aws_key_id":"{1}","aws_key_value":"{2}"}}', 
+          secrets.TESTMO_TOKEN, secrets.AWS_KEY_ID, secrets.AWS_KEY_VALUE)
