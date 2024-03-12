@@ -49,10 +49,6 @@ defaults:
     shell: bash
 runs:
   using: "composite"
-  env: 
-    testmo_token: ${{ fromJSON( inputs.sec ).testmo_token }}
-    aws_key_id: ${{ fromJSON( inputs.sec ).aws_key_id }}
-    aws_key_value: ${{ fromJSON( inputs.sec ).aws_key_value }}
   steps:
     - name: comment-build-start
       if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
@@ -72,8 +68,8 @@ runs:
       with:
         s3_bucket: ${{ vars.AWS_BUCKET }}
         s3_endpoint: ${{ vars.AWS_ENDPOINT }}
-        s3_key_id: $aws_key_id
-        s3_key_secret: $aws_key_value
+        s3_key_id: ${{ fromJSON( inputs.sec ).aws_key_id }}
+        s3_key_secret: ${{ fromJSON( inputs.sec ).aws_key_value }}
         folder_prefix: ya-
         build_preset: ${{ inputs.build_preset }}
 
@@ -96,7 +92,7 @@ runs:
         build_preset: ${{ inputs.build_preset }}
         test_size: ${{ inputs.test_size }}
         test_type: ${{ inputs.test_type }}
-        testman_token: $testmo_token
+        testman_token: ${{ fromJSON( inputs.sec ).testmo_token }}
         testman_url: ${{ vars.TESTMO_URL }}
         testman_project_id: ${{ vars.TESTMO_PROJECT_ID }}
         bazel_remote_uri: ${{ vars.REMOTE_CACHE_URL_YA || '' }}
