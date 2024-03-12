@@ -105,6 +105,7 @@ runs:
         test_threads: ${{ inputs.test_threads }}
     
     - name: comment-if-cancel
+      shell: bash
       if: cancelled() && (github.event_name == 'pull_request' || github.event_name == 'pull_request_target')
       env:
         BUILD_PRESET: ${{ inputs.build_preset }}
