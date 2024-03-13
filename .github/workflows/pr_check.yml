@@ -208,7 +208,7 @@ jobs:
       with:
         build_preset: ${{ matrix.build_preset }}
         build_target: "ydb/"
-        run_tests: ${{ matrix.build_preset == "relwithdebinfo" || matrix.build_preset == "release-asan" }}
+        run_tests: ${{ contains(fromJSON('["relwithdebinfo","release-asan"]'), matrix.build_preset }}
         test_size: "small,medium"
         test_type: "unittest,py3test,py2test,pytest"
         test_threads: 52
