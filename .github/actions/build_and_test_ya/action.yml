@@ -87,7 +87,7 @@ runs:
         bazel_remote_password: ${{ inputs.put_build_results_to_cache &&  fromJSON( inputs.secs ).REMOTE_CACHE_PASSWORD || '' }}
         link_threads: ${{ inputs.link_threads }}
 
-   - name: debug1
+    - name: debug1
       shell: bash
       run: echo "Run tests? ${{ inputs.run_tests }}"
 
