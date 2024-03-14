@@ -78,7 +78,7 @@ runs:
 
     - name: Build
       uses: ./.github/actions/build_ya
-      if: ${{ inputs.run_build }}
+      if: ${{ inputs.run_build == 'true' }}
       with:
         build_target: ${{ inputs.build_target }}
         build_preset: ${{ inputs.build_preset }}
@@ -93,7 +93,7 @@ runs:
 
     - name: Run tests
       uses: ./.github/actions/test_ya
-      if: ${{ inputs.run_tests }}
+      if: ${{ inputs.run_tests == 'true' }}
       with:
         build_target: ${{ inputs.build_target }}
         build_preset: ${{ inputs.build_preset }}
