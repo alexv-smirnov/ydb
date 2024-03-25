@@ -1,5 +1,5 @@
 #include "plugin.h"
-
+#
 #include <iostream>
 
 namespace NYT::NYqlPlugin {
