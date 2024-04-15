@@ -11,6 +11,7 @@
 #include <ydb/core/tx/columnshard/operations/write_data.h>
 #include <ydb/core/tx/columnshard/hooks/abstract/abstract.h>
 #include <ydb/core/tx/columnshard/hooks/testing/controller.h>
+#include <ydb/core/tx/columnshard/engines/portions/portion_info.h>
 #include <ydb/core/tx/columnshard/common/tests/shard_reader.h>
 #include <ydb/library/actors/protos/unittests.pb.h>
 #include <ydb/core/formats/arrow/simple_builder/filler.h>
@@ -33,12 +34,10 @@ using TTypeInfo = NScheme::TTypeInfo;
 
 using TDefaultTestsController = NKikimr::NYDBTest::NColumnShard::TController;
 class TDisableCompactionController: public NKikimr::NYDBTest::NColumnShard::TController {
-protected:
-    virtual bool DoOnStartCompaction(std::shared_ptr<NOlap::TColumnEngineChanges>& changes) {
-        changes = nullptr;
-        return true;
-    }
 public:
+    TDisableCompactionController() {
+        DisableBackground(NKikimr::NYDBTest::ICSController::EBackground::Compaction);
+    }
 };
 
 template <typename TKey = ui64>
@@ -1469,7 +1468,7 @@ void TestReadAggregate(const std::vector<NArrow::NTest::TTestColumn>& ydbSchema,
     THashSet<NScheme::TTypeId> intTypes = {
         NTypeIds::Int8, NTypeIds::Int16, NTypeIds::Int32, NTypeIds::Int64,
         NTypeIds::Uint8, NTypeIds::Uint16, NTypeIds::Uint32, NTypeIds::Uint64,
-        NTypeIds::Timestamp
+        NTypeIds::Timestamp, NTypeIds::Timestamp64, NTypeIds::Interval64
     };
     THashSet<NScheme::TTypeId> strTypes = {
         NTypeIds::Utf8, NTypeIds::String
@@ -2289,13 +2288,13 @@ Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
                 ui32 resultLimit = 1024 * 1024;
                 runtime.Send(new IEventHandle(scanActorId, sender, new NKqp::TEvKqpCompute::TEvScanDataAck(resultLimit, 0, 1)));
                 auto scan = runtime.GrabEdgeEvent<NKqp::TEvKqpCompute::TEvScanData>(handle);
-                auto batchStats = scan->ArrowBatch;
                 if (scan->Finished) {
                     AFL_VERIFY(!scan->ArrowBatch || !scan->ArrowBatch->num_rows());
                     break;
                 }
-                UNIT_ASSERT(batchStats);
-//                Cerr << batchStats->ToString() << Endl;
+                UNIT_ASSERT(scan->ArrowBatch);
+                auto batchStats = NArrow::ToBatch(scan->ArrowBatch, true);
+                //                Cerr << batchStats->ToString() << Endl;
 
                 for (ui32 i = 0; i < batchStats->num_rows(); ++i) {
                     auto paths = batchStats->GetColumnByName("PathId");
@@ -2514,9 +2513,9 @@ Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
                     Y_ABORT_UNLESS(append->AppendedPortions.size());
                     Cerr << "Added portions:";
                     for (const auto& portion : append->AppendedPortions) {
+                        Y_UNUSED(portion);
                         ++addedPortions;
-                        ui64 portionId = addedPortions;
-                        Cerr << " " << portionId << "(" << portion.GetPortionInfo().GetPortion() << ")";
+                        Cerr << " " << addedPortions;
                     }
                     Cerr << Endl;
                 }
@@ -2711,6 +2710,18 @@ Y_UNIT_TEST_SUITE(TColumnShardTestReadWrite) {
 
     Y_UNIT_TEST(CompactionGC) {
         TestCompactionGC();
+    }
+
+    Y_UNIT_TEST(PortionInfoSize) {
+        Cerr << sizeof(NOlap::TPortionInfo) << Endl;
+        Cerr << sizeof(NOlap::TPortionMeta) << Endl;
+        Cerr << sizeof(NOlap::TColumnRecord) << Endl;
+        Cerr << sizeof(NOlap::TIndexChunk) << Endl;
+        Cerr << sizeof(std::optional<NArrow::TReplaceKey>) << Endl;
+        Cerr << sizeof(std::optional<NOlap::TSnapshot>) << Endl;
+        Cerr << sizeof(NOlap::TSnapshot) << Endl;
+        Cerr << sizeof(NArrow::TReplaceKey) << Endl;
+        Cerr << sizeof(NArrow::NMerger::TSortableBatchPosition) << Endl;
     }
 }
 

@@ -264,6 +264,7 @@ TCell MakeTestCell(const TTypeInfo& typeInfo, ui32 value, std::vector<TString>& 
         const TString& str = mem.back();
         return TCell(str.data(), str.size());
     } else if (type == NTypeIds::Timestamp || type == NTypeIds::Interval ||
+                type == NTypeIds::Timestamp64 || type == NTypeIds::Interval64 ||
                 type == NTypeIds::Uint64 || type == NTypeIds::Int64) {
         return TCell::Make<ui64>(value);
     } else if (type == NTypeIds::Uint32 || type == NTypeIds::Int32 || type == NTypeIds::Datetime) {
@@ -298,8 +299,8 @@ std::vector<TCell> MakeTestCells(const std::vector<TTypeInfo>& types, ui32 value
 TString MakeTestBlob(std::pair<ui64, ui64> range, const std::vector<NArrow::NTest::TTestColumn>& columns,
                      const TTestBlobOptions& options, const std::set<std::string>& notNullColumns) {
     NArrow::TArrowBatchBuilder batchBuilder(arrow::Compression::LZ4_FRAME, notNullColumns);
-    batchBuilder.Start(NArrow::NTest::TTestColumn::ConvertToPairs(columns));
-
+    const auto startStatus = batchBuilder.Start(NArrow::NTest::TTestColumn::ConvertToPairs(columns));
+    UNIT_ASSERT_C(startStatus.ok(), startStatus.ToString());
     std::vector<ui32> nullPositions;
     std::vector<ui32> samePositions;
     for (size_t i = 0; i < columns.size(); ++i) {

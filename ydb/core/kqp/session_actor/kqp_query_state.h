@@ -9,12 +9,12 @@
 
 #include <ydb/core/base/cputime.h>
 #include <ydb/library/wilson_ids/wilson.h>
-#include <ydb/core/kqp/common/kqp.h>
-#include <ydb/core/kqp/common/simple/temp_tables.h>
 #include <ydb/core/kqp/common/kqp_resolve.h>
 #include <ydb/core/kqp/common/kqp_timeouts.h>
+#include <ydb/core/kqp/common/kqp_tx.h>
 #include <ydb/core/kqp/common/kqp_user_request_context.h>
-#include <ydb/core/kqp/session_actor/kqp_tx.h>
+#include <ydb/core/kqp/common/kqp.h>
+#include <ydb/core/kqp/common/simple/temp_tables.h>
 
 #include <ydb/library/actors/core/monotonic_provider.h>
 
@@ -174,6 +174,10 @@ public:
 
     bool GetUsePublicResponseDataFormat() const {
         return RequestEv->GetUsePublicResponseDataFormat();
+    }
+
+    ui64 GetOutputChunkMaxSize() const {
+        return RequestEv->GetOutputChunkMaxSize();
     }
 
     void UpdateTempTablesState(const TKqpTempTablesState& tempTablesState) {
@@ -446,13 +450,13 @@ public:
     bool SaveAndCheckParseResult(TEvKqp::TEvParseResponse&& ev);
     bool SaveAndCheckSplitResult(TEvKqp::TEvSplitResponse* ev);
     // build the compilation request.
-    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildCompileRequest(std::shared_ptr<std::atomic<bool>> cookie);
+    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildCompileRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
     // TODO(gvit): get rid of code duplication in these requests,
     // use only one of these requests.
-    std::unique_ptr<TEvKqp::TEvRecompileRequest> BuildReCompileRequest(std::shared_ptr<std::atomic<bool>> cookie);
+    std::unique_ptr<TEvKqp::TEvRecompileRequest> BuildReCompileRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
 
-    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildSplitRequest(std::shared_ptr<std::atomic<bool>> cookie);
-    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildCompileSplittedRequest(std::shared_ptr<std::atomic<bool>> cookie);
+    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildSplitRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
+    std::unique_ptr<TEvKqp::TEvCompileRequest> BuildCompileSplittedRequest(std::shared_ptr<std::atomic<bool>> cookie, const TGUCSettings::TPtr& gUCSettingsPtr);
 
     bool PrepareNextStatementPart();
 

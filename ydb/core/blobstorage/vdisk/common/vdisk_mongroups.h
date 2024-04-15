@@ -518,6 +518,10 @@ public:                                                                         
                 COUNTER_INIT_IF_EXTENDED(PutTotalBytes, true);
                 COUNTER_INIT_IF_EXTENDED(GetTotalBytes, true);
             }
+                
+            void MinHugeBlobInBytes(ui32 size) {
+                GroupCounters->GetNamedCounter("MinHugeBlobInBytes", ToString(size), false)->Inc();
+            }
 
             COUNTER_DEF(MovedPatchMsgs);
             COUNTER_DEF(PatchStartMsgs);
@@ -582,7 +586,16 @@ public:                                                                         
         public:
             GROUP_CONSTRUCTOR(TBalancingGroup)
             {
+                COUNTER_INIT(PlannedToSendOnMain, false);
+                COUNTER_INIT(SentOnMain, false);
+                COUNTER_INIT(CandidatesToDelete, false);
+                COUNTER_INIT(MarkedReadyToDelete, false);
             }
+
+            COUNTER_DEF(PlannedToSendOnMain);
+            COUNTER_DEF(SentOnMain);
+            COUNTER_DEF(CandidatesToDelete);
+            COUNTER_DEF(MarkedReadyToDelete);
         };
 
         ///////////////////////////////////////////////////////////////////////////////////

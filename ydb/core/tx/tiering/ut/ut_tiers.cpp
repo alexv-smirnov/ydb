@@ -28,12 +28,17 @@ using namespace NColumnShard;
 
 class TFastTTLCompactionController: public NKikimr::NYDBTest::ICSController {
 public:
-    virtual TDuration GetLagForCompactionBeforeTierings(const TDuration /*def*/) const override {
+    virtual bool NeedForceCompactionBacketsConstruction() const override {
+        return true;
+    }
+    virtual ui64 GetSmallPortionSizeDetector(const ui64 /*def*/) const override {
+        return 0;
+    }
+    virtual TDuration GetOptimizerFreshnessCheckDuration(const TDuration /*defaultValue*/) const override {
         return TDuration::Zero();
     }
-    virtual bool DoOnStartCompaction(std::shared_ptr<NOlap::TColumnEngineChanges>& changes) override {
-        changes = nullptr;
-        return true;
+    virtual TDuration GetLagForCompactionBeforeTierings(const TDuration /*def*/) const override {
+        return TDuration::Zero();
     }
     virtual TDuration GetTTLDefaultWaitingDuration(const TDuration /*defaultValue*/) const override {
         return TDuration::Seconds(1);
@@ -634,9 +639,7 @@ Y_UNIT_TEST_SUITE(ColumnShardTiers) {
             }
             UNIT_ASSERT(check);
         }
-#ifdef S3_TEST_USAGE
         Cerr << "storage initialized..." << Endl;
-#endif
 /*
         lHelper.DropTable("/Root/olapStore/olapTable");
         lHelper.StartDataRequest("DELETE FROM `/Root/olapStore/olapTable`");

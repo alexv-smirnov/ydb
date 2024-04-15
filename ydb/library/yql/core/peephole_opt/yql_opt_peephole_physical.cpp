@@ -2625,6 +2625,28 @@ TExprNode::TPtr ExpandPgArrayOp(const TExprNode::TPtr& input, TExprContext& ctx)
         .Build();
 }
 
+TExprNode::TPtr ExpandPgNullIf(const TExprNode::TPtr& input, TExprContext& ctx) {
+    auto pred = ctx.Builder(input->Pos())
+        .Callable("Coalesce")
+            .Callable(0, "FromPg")
+                .Callable( 0, "PgOp")
+                    .Atom(0, "=")
+                    .Add(1, input->Child(0))
+                    .Add(2, input->Child(1))
+                .Seal()
+            .Seal()
+            .Callable( 1, "Bool")
+                .Atom(0, "false")
+            .Seal()
+        .Seal().Build();
+    return ctx.Builder(input->Pos())
+        .Callable("If")
+            .Add(0, pred)
+            .Callable(1, "Null").Seal()
+            .Add(2, input->Child(0))
+        .Seal().Build();
+}
+
 template <bool Flat, bool List>
 TExprNode::TPtr ExpandContainerIf(const TExprNode::TPtr& input, TExprContext& ctx) {
     YQL_CLOG(DEBUG, CorePeepHole) << "Expand " << input->Content();
@@ -5446,7 +5468,7 @@ bool CollectBlockRewrites(const TMultiExprType* multiInputType, bool keepInputCo
 
         TExprNode::TListType funcArgs;
         std::string_view arrowFunctionName;
-        if (node->IsList() || node->IsCallable({"And", "Or", "Xor", "Not", "Coalesce", "If", "Just", "Nth", "ToPg", "FromPg", "PgResolvedCall", "PgResolvedOp"}))
+        if (node->IsList() || node->IsCallable({"And", "Or", "Xor", "Not", "Coalesce", "Exists", "If", "Just", "Member", "Nth", "ToPg", "FromPg", "PgResolvedCall", "PgResolvedOp"}))
         {
             if (node->IsCallable() && !IsSupportedAsBlockType(node->Pos(), *node->GetTypeAnn(), ctx, types)) {
                 return true;
@@ -5687,7 +5709,8 @@ bool CanRewriteToBlocksWithInput(const TExprNode& input, const TTypeAnnotationCo
 
 TExprNode::TPtr OptimizeWideMapBlocks(const TExprNode::TPtr& node, TExprContext& ctx, TTypeAnnotationContext& types) {
     const auto lambda = node->TailPtr();
-    if (node->Head().IsCallable("WideFromBlocks")) {
+    // Swap trivial WideMap and WideFromBlocks.
+    if (node->IsCallable("WideMap") && node->Head().IsCallable("WideFromBlocks")) {
         if (auto newLambda = RebuildArgumentsOnlyLambdaForBlocks(*lambda, ctx, types)) {
             YQL_CLOG(DEBUG, CorePeepHole) << "Swap " << node->Head().Content() << " with " << node->Content();
             return ctx.Builder(node->Pos())
@@ -7868,6 +7891,7 @@ struct TPeepHoleRules {
         {"Contains", &RewriteSearchByKeyForTypesMismatch<true>},
         {"ListHas", &ExpandListHas},
         {"PgAnyResolvedOp", &ExpandPgArrayOp},
+        {"PgNullIf", &ExpandPgNullIf},
         {"PgAllResolvedOp", &ExpandPgArrayOp},
         {"Map", &CleckClosureOnUpperLambdaOverList},
         {"OrderedMap", &CleckClosureOnUpperLambdaOverList},

@@ -525,9 +525,9 @@ protected:
                 }
             }
         }
-        for (auto& [index, input] : InputTransformsMap) {
-            if (input.AsyncInput) {
-                if (auto data = input.AsyncInput->ExtraData()) {
+        for (auto& [index, transform] : InputTransformsMap) {
+            if (transform.AsyncInput) {
+                if (auto data = transform.AsyncInput->ExtraData()) {
                     auto* entry = extraData->AddInputTransformsData();
                     entry->SetIndex(index);
                     entry->MutableData()->CopyFrom(*data);
@@ -723,6 +723,7 @@ protected:
             }
         } catch (const std::exception& e) {
             error = e.what();
+            CA_LOG_E("Exception: " << error);
         }
         TString& blob = *state.MutableMiniKqlProgram()->MutableData()->MutableStateData()->MutableBlob();
         if (blob && !error.Defined()) {
@@ -808,10 +809,11 @@ protected:
         }
     };
 
-    struct TAsyncInputTransformHelper : TAsyncInputHelper {
-        NUdf::TUnboxedValue InputBuffer;
-
-        using TAsyncInputHelper::TAsyncInputHelper;
+    //Design note:
+    //Inherited TComputeActorAsyncInputHelperSync represents output part of an input transform. A transform's output is an input for TaskRunner
+    struct TAsyncInputTransformHelper: TComputeActorAsyncInputHelperSync {
+        using TComputeActorAsyncInputHelperSync::TComputeActorAsyncInputHelperSync;
+        NUdf::TUnboxedValue Input; //Expect a flow, that is the input for the transform
     };
 
     struct TOutputChannelInfo {
@@ -820,6 +822,7 @@ protected:
         IDqOutputChannel::TPtr Channel;
         bool HasPeer = false;
         bool Finished = false; // != Channel->IsFinished() // If channel is in finished state, it sends only checkpoints.
+        bool EarlyFinish = false;
         bool PopStarted = false;
         bool IsTransformOutput = false; // Is this channel output of a transform.
         NDqProto::EWatermarksMode WatermarksMode = NDqProto::EWatermarksMode::WATERMARKS_MODE_DISABLED;
@@ -1300,7 +1303,7 @@ protected:
                         .StatsLevel = collectStatsLevel,
                         .TxId = TxId,
                         .TaskId = Task.GetId(),
-                        .TransformInput = transform.InputBuffer,
+                        .TransformInput = transform.Input,
                         .SecureParams = secureParams,
                         .TaskParams = taskParams,
                         .ComputeActorId = this->SelfId(),
@@ -1478,7 +1481,7 @@ private:
             if (inputDesc.HasTransform()) {
                 auto result = InputTransformsMap.emplace(
                     i,
-                    static_cast<TDerived*>(this)->template CreateInputHelper<TAsyncInputTransformHelper>(LogPrefix, i, NDqProto::WATERMARKS_MODE_DISABLED)
+                    TAsyncInputTransformHelper(LogPrefix, i, NDqProto::WATERMARKS_MODE_DISABLED)
                 );
                 YQL_ENSURE(result.second);
             }
@@ -1487,7 +1490,7 @@ private:
                 const auto watermarksMode = inputDesc.GetSource().GetWatermarksMode();
                 auto result = SourcesMap.emplace(
                     i, 
-                    static_cast<TDerived*>(this)->template CreateInputHelper<TAsyncInputHelper>(LogPrefix, i, watermarksMode)
+                    static_cast<TDerived*>(this)->CreateInputHelper(LogPrefix, i, watermarksMode)
                 );
                 YQL_ENSURE(result.second);
             } else {

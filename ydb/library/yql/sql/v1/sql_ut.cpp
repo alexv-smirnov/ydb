@@ -74,7 +74,7 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
                 "CALLABLE", "CASE", "CAST", "CUBE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
                 "DICT", "DISTINCT", "ENUM", "ERASE", "EXCEPT", "EXISTS", "FLOW", "FROM", "FULL", "GLOBAL",
                 "HAVING", "HOP", "INTERSECT", "JSON_EXISTS", "JSON_QUERY", "JSON_VALUE", "LIMIT", "LIST", "LOCAL",
-                "NOT", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "ROLLUP",
+                "NOT", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "RETURNING", "ROLLUP",
                 "SELECT", "SET", "STREAM", "STRUCT", "SYMMETRIC", "TAGGED", "TUPLE", "UNBOUNDED",
                 "UNION", "VARIANT", "WHEN", "WHERE", "WINDOW", "WITHOUT"
             },
@@ -93,7 +93,7 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
                 "CALLABLE", "CASE", "CAST", "CUBE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
                 "DICT", "DISTINCT", "EMPTY_ACTION", "ENUM", "EXCEPT", "EXISTS", "FALSE", "FLOW", "FROM", "FULL", "GLOBAL",
                 "HAVING", "HOP", "INTERSECT", "JSON_EXISTS", "JSON_QUERY", "JSON_VALUE", "LIMIT", "LIST", "LOCAL",
-                "NOT", "NULL", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "ROLLUP",
+                "NOT", "NULL", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "RETURNING", "ROLLUP",
                 "SELECT", "SET", "STRUCT", "SYMMETRIC", "TAGGED", "TRUE", "TUPLE", "UNBOUNDED",
                 "UNION", "VARIANT", "WHEN", "WHERE", "WINDOW", "WITHOUT"
              },
@@ -199,7 +199,7 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
                 "CALLABLE", "CASE", "CAST", "COMPACT", "CUBE", "CURRENT_DATE", "CURRENT_TIME", "CURRENT_TIMESTAMP",
                 "DICT", "DISTINCT", "ENUM", "ERASE", "EXCEPT", "EXISTS", "FLOW", "FROM", "FULL", "GLOBAL",
                 "HAVING", "HOP", "INTERSECT", "JSON_EXISTS", "JSON_QUERY", "JSON_VALUE", "LIMIT", "LIST", "LOCAL",
-                "NOT", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "ROLLUP",
+                "NOT", "OPTIONAL", "PROCESS", "REDUCE", "REPEATABLE", "RESOURCE", "RETURN", "RETURNING", "ROLLUP",
                 "SELECT", "SET", "STREAM", "STRUCT", "SYMMETRIC", "TAGGED", "TUPLE", "UNBOUNDED",
                 "UNION", "VARIANT", "WHEN", "WHERE", "WINDOW", "WITHOUT"
             },
@@ -533,6 +533,18 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
             UNIT_ASSERT(!res.Root);
             UNIT_ASSERT_STRINGS_EQUAL(res.Issues.ToString(), "<main>:1:98: Error: Duplicate join strategy hint\n");
         }
+    }
+
+    Y_UNIT_TEST(WarnCrossJoinStrategyHint) {
+        NYql::TAstParseResult res = SqlToYql("SELECT * FROM plato.Input AS a CROSS JOIN /*+ merge() */ plato.Input AS b;");
+        UNIT_ASSERT(res.Root);
+        UNIT_ASSERT_STRINGS_EQUAL(res.Issues.ToString(), "<main>:1:32: Warning: Non-default join strategy will not be used for CROSS JOIN, code: 4534\n");
+    }
+
+    Y_UNIT_TEST(WarnUnknownJoinStrategyHint) {
+        NYql::TAstParseResult res = SqlToYql("SELECT * FROM plato.Input AS a JOIN /*+ xmerge() */ plato.Input AS b USING (key);");
+        UNIT_ASSERT(res.Root);
+        UNIT_ASSERT_STRINGS_EQUAL(res.Issues.ToString(), "<main>:1:41: Warning: Unsupported join strategy: xmerge, code: 4534\n");
     }
 
     Y_UNIT_TEST(ReverseLabels) {
@@ -2482,7 +2494,7 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
 
     Y_UNIT_TEST(AlterTableAddIndexWithIsNotSupported) {
         ExpectFailWithError("USE plato; ALTER TABLE table ADD INDEX idx LOCAL WITH (a=b, c=d, e=f) ON (col)",
-            "<main>:1:40: Error: local: alternative is not implemented yet: 717:7: local_index\n");
+            "<main>:1:40: Error: local: alternative is not implemented yet: 720:7: local_index\n");
     }
 
     Y_UNIT_TEST(OptionalAliases) {
@@ -2566,6 +2578,35 @@ Y_UNIT_TEST_SUITE(SqlParsingOnly) {
                 UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("localhost:2135"));
                 UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("DATABASE"));
                 UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("/MyDatabase"));
+            }
+        };
+
+        TWordCountHive elementStat = { {TString("Write"), 0}};
+        VerifyProgram(res, elementStat, verifyLine);
+
+        UNIT_ASSERT_VALUES_EQUAL(1, elementStat["Write"]);
+    }
+
+    Y_UNIT_TEST(AlterAsyncReplicationParseCorrect) {
+        auto req = R"(
+            USE plato;
+            ALTER ASYNC REPLICATION MyReplication
+            SET (
+                STATE = "DONE",
+                FAILOVER_MODE = "FORCE"
+            );
+        )";
+        auto res = SqlToYql(req);
+        UNIT_ASSERT(res.Root);
+
+        TVerifyLineFunc verifyLine = [](const TString& word, const TString& line) {
+            if (word == "Write") {
+                UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("MyReplication"));
+                UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("alterAsyncReplication"));
+                UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("STATE"));
+                UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("DONE"));
+                UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("FAILOVER_MODE"));
+                UNIT_ASSERT_VALUES_UNEQUAL(TString::npos, line.find("FORCE"));
             }
         };
 
@@ -4779,8 +4820,6 @@ Y_UNIT_TEST_SUITE(JsonValue) {
             "SELECT $returning;\n"
             "SELECT 1 as returning;\n"
             "SELECT $returning as returning;\n"
-            "SELECT returning FROM InputSyntax;\n"
-            "SELECT returning, count(*) FROM InputSyntax GROUP BY returning;\n"
         );
 
         UNIT_ASSERT(res.Root);

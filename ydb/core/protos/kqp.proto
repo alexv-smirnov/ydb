@@ -115,6 +115,7 @@ message TQueryRequest {
     optional string ClientSdkBuildInfo = 31;
     optional string ApplicationName = 32;
     optional string UserSID = 33;
+    optional uint64 OutputChunkMaxSize = 34;
 }
 
 message TKqpPathIdProto {
@@ -562,6 +563,7 @@ message TEvStartKqpTasksRequest {
     optional NActorsProto.TActorId ExecuterActorId = 4;
     optional TKqpSnapshot Snapshot = 5;
     optional bool StartAllOrFail = 6 [default = true];
+    optional uint64 OutputChunkMaxSize = 7 [default = 0]; // 0 - use some default value 
 }
 
 message TEvStartKqpTasksResponse {

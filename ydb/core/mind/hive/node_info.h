@@ -64,6 +64,7 @@ public:
     bool Down;
     bool Freeze;
     bool Drain;
+    bool BecomeUpOnRestart = false;
     TVector<TActorId> DrainInitiators;
     TDrainSettings DrainSettings;
     std::unordered_map<TTabletInfo::EVolatileState, std::unordered_set<TTabletInfo*>> Tablets;
@@ -87,6 +88,8 @@ public:
     THashSet<TLeaderTabletInfo*> LockedTablets;
     mutable TInstant LastResourceChangeReaction;
     NKikimrHive::TNodeStatistics Statistics;
+    bool DeletionScheduled = false;
+    TString Name;
 
     TNodeInfo(TNodeId nodeId, THive& hive);
     TNodeInfo(const TNodeInfo&) = delete;

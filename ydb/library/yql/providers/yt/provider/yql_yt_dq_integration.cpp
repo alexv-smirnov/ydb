@@ -34,7 +34,7 @@
 
 namespace NYql {
 
-static const THashSet<TStringBuf> UNSUPPORTED_YT_PRAGMAS = {"maxrowweight",  "layerpaths", "operationspec"};
+static const THashSet<TStringBuf> UNSUPPORTED_YT_PRAGMAS = {"maxrowweight",  "layerpaths", "dockerimage", "operationspec"};
 static const THashSet<TStringBuf> POOL_TREES_WHITELIST = {"physical",  "cloud", "cloud_default"};
 
 using namespace NNodes;
@@ -310,6 +310,11 @@ public:
                         }
                     }
                     AddInfo(ctx, info, skipIssues);
+                    return false;
+                }
+                auto sampleSetting = GetSetting(section.Settings().Ref(), EYtSettingType::Sample);
+                if (sampleSetting && sampleSetting->Child(1)->Child(0)->Content() == "system") {
+                    AddInfo(ctx, "system sampling", skipIssues);
                     return false;
                 }
                 for (auto path: section.Paths()) {

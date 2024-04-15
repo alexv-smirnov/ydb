@@ -2063,7 +2063,7 @@ namespace NTypeAnnImpl {
             return IGraphTransformer::TStatus::Error;
         }
 
-        if (!(IsDataTypeNumeric(dataType->GetSlot()) || IsDataTypeDecimal(dataType->GetSlot()) || dataType->GetSlot() == EDataSlot::Interval)) {
+        if (!(IsDataTypeNumeric(dataType->GetSlot()) || IsDataTypeDecimal(dataType->GetSlot()) || IsDataTypeInterval(dataType->GetSlot()))) {
             ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), TStringBuilder() << "Expected numeric, decimal or interval type, but got: "
                 << *input->Head().GetTypeAnn()));
             return IGraphTransformer::TStatus::Error;
@@ -2243,7 +2243,7 @@ namespace NTypeAnnImpl {
             return IGraphTransformer::TStatus::Error;
         }
 
-        const bool isInterval = dataType1->GetSlot() == EDataSlot::Interval;
+        const bool isInterval = IsDataTypeInterval(dataType1->GetSlot());
 
         if (!(IsDataTypeNumeric(dataType1->GetSlot()) || IsDataTypeDecimal(dataType1->GetSlot()) || isInterval)) {
             ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), TStringBuilder() << "Expected numeric or decimal data type, but got: "
@@ -2343,14 +2343,14 @@ namespace NTypeAnnImpl {
             auto commonTypeSlot = GetNumericDataTypeByLevel(Max(GetNumericDataTypeLevel(dataType[0]->GetSlot()),
                 GetNumericDataTypeLevel(dataType[1]->GetSlot())));
             commonType = ctx.Expr.MakeType<TDataExprType>(commonTypeSlot);
-        } else if ((IsDataTypeDate(dataType[0]->GetSlot()) || IsDataTypeTzDate(dataType[0]->GetSlot())) && dataType[1]->GetSlot() == EDataSlot::Interval) {
+        } else if ((IsDataTypeDate(dataType[0]->GetSlot()) || IsDataTypeTzDate(dataType[0]->GetSlot())) && IsDataTypeInterval(dataType[1]->GetSlot())) {
             commonType = dataType[0];
             haveOptional = true;
-        } else if (dataType[0]->GetSlot() == EDataSlot::Interval && (IsDataTypeDate(dataType[1]->GetSlot()) || IsDataTypeTzDate(dataType[1]->GetSlot()))) {
+        } else if (IsDataTypeInterval(dataType[0]->GetSlot()) && (IsDataTypeDate(dataType[1]->GetSlot()) || IsDataTypeTzDate(dataType[1]->GetSlot()))) {
             commonType = dataType[1];
             haveOptional = true;
-        } else if (dataType[0]->GetSlot() == EDataSlot::Interval && dataType[1]->GetSlot() == EDataSlot::Interval) {
-            commonType = dataType[0];
+        } else if (IsDataTypeInterval(dataType[0]->GetSlot()) && IsDataTypeInterval(dataType[1]->GetSlot())) {
+            commonType = IsDataTypeBigDate(dataType[0]->GetSlot()) ? dataType[0] : dataType[1];
             haveOptional = true;
         } else if (IsDataTypeDecimal(dataType[0]->GetSlot()) && IsDataTypeDecimal(dataType[1]->GetSlot())) {
             const auto dataTypeOne = static_cast<const TDataExprParamsType*>(dataType[0]);
@@ -2437,11 +2437,18 @@ namespace NTypeAnnImpl {
                 GetNumericDataTypeLevel(dataType[1]->GetSlot())));
             commonType = ctx.Expr.MakeType<TDataExprType>(commonTypeSlot);
         } else if ((IsDataTypeDate(dataType[0]->GetSlot()) || IsDataTypeTzDate(dataType[0]->GetSlot())) &&
-            (IsDataTypeDate(dataType[1]->GetSlot()) || IsDataTypeTzDate(dataType[1]->GetSlot()))) {
-            commonType = ctx.Expr.MakeType<TDataExprType>(EDataSlot::Interval);
-        } else if (IsDataTypeDateOrTzDateOrInterval(dataType[0]->GetSlot()) &&
-            dataType[1]->GetSlot() == EDataSlot::Interval) {
+            (IsDataTypeDate(dataType[1]->GetSlot()) || IsDataTypeTzDate(dataType[1]->GetSlot())))
+        {
+            commonType = (IsDataTypeBigDate(dataType[0]->GetSlot()) || IsDataTypeBigDate(dataType[1]->GetSlot()))
+                ? ctx.Expr.MakeType<TDataExprType>(EDataSlot::Interval64)
+                : ctx.Expr.MakeType<TDataExprType>(EDataSlot::Interval);
+        } else if (IsDataTypeDateOrTzDate(dataType[0]->GetSlot()) && IsDataTypeInterval(dataType[1]->GetSlot())) {
             commonType = dataType[0];
+            haveOptional = true;
+        } else if (IsDataTypeInterval(dataType[0]->GetSlot()) && IsDataTypeInterval(dataType[1]->GetSlot())) {
+            commonType = (IsDataTypeBigDate(dataType[0]->GetSlot()) || IsDataTypeBigDate(dataType[1]->GetSlot()))
+                ? ctx.Expr.MakeType<TDataExprType>(EDataSlot::Interval64)
+                : ctx.Expr.MakeType<TDataExprType>(EDataSlot::Interval);
             haveOptional = true;
         } else if (IsDataTypeDecimal(dataType[0]->GetSlot()) && IsDataTypeDecimal(dataType[1]->GetSlot())) {
             const auto dataTypeOne = static_cast<const TDataExprParamsType*>(dataType[0]);
@@ -2523,10 +2530,10 @@ namespace NTypeAnnImpl {
             auto commonTypeSlot = GetNumericDataTypeByLevel(Max(GetNumericDataTypeLevel(dataType[0]->GetSlot()),
                 GetNumericDataTypeLevel(dataType[1]->GetSlot())));
             commonType = ctx.Expr.MakeType<TDataExprType>(commonTypeSlot);
-        } else if (IsDataTypeIntegral(dataType[0]->GetSlot()) && dataType[1]->GetSlot() == EDataSlot::Interval) {
+        } else if (IsDataTypeIntegral(dataType[0]->GetSlot()) && IsDataTypeInterval(dataType[1]->GetSlot())) {
             commonType = dataType[1];
             haveOptional = true;
-        } else if (dataType[0]->GetSlot() == EDataSlot::Interval && IsDataTypeIntegral(dataType[1]->GetSlot())) {
+        } else if (IsDataTypeInterval(dataType[0]->GetSlot()) && IsDataTypeIntegral(dataType[1]->GetSlot())) {
             commonType = dataType[0];
             haveOptional = true;
         } else if (IsDataTypeDecimal(dataType[0]->GetSlot()) || IsDataTypeDecimal(dataType[1]->GetSlot())) {
@@ -2604,7 +2611,7 @@ namespace NTypeAnnImpl {
             if (!IsDataTypeFloat(commonTypeSlot)) {
                 haveOptional = true;
             }
-        } else if (dataType[0]->GetSlot() == EDataSlot::Interval && IsDataTypeIntegral(dataType[1]->GetSlot())) {
+        } else if (IsDataTypeInterval(dataType[0]->GetSlot()) && IsDataTypeIntegral(dataType[1]->GetSlot())) {
             commonType = dataType[0];
             haveOptional = true;
         } else if (IsDataTypeDecimal(dataType[0]->GetSlot()) && (IsDataTypeDecimal(dataType[1]->GetSlot()) || IsDataTypeIntegral(dataType[1]->GetSlot()))) {
@@ -2870,7 +2877,7 @@ namespace NTypeAnnImpl {
         }
 
         auto dataSlot = dataType->GetSlot();
-        if (!(IsDataTypeNumeric(dataSlot) || IsDataTypeDecimal(dataSlot) || dataSlot == EDataSlot::Interval)) {
+        if (!(IsDataTypeNumeric(dataSlot) || IsDataTypeDecimal(dataSlot) || IsDataTypeInterval(dataSlot))) {
             ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), TStringBuilder() << "Expected numeric, decimal or interval data type, but got: "
                 << *input->Head().GetTypeAnn()));
 
@@ -4371,7 +4378,7 @@ namespace NTypeAnnImpl {
         }
 
         const bool isDecimal = IsDataTypeDecimal(sourceDataType->GetSlot());
-        const bool isInterval = sourceDataType->GetSlot() == EDataSlot::Interval;
+        const bool isInterval = IsDataTypeInterval(sourceDataType->GetSlot());
         if (!(isDecimal || IsDataTypeNumeric(sourceDataType->GetSlot()) || isInterval)) {
             ctx.Expr.AddError(TIssue(ctx.Expr.GetPosition(input->Pos()), TStringBuilder() << "Expected numeric type, but got " <<
                 *input->Head().GetTypeAnn()));
@@ -7235,7 +7242,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
 
                 cached.FunctionType = description.CallableType;
                 cached.RunConfigType = description.RunConfigType ? description.RunConfigType : ctx.Expr.MakeType<TVoidExprType>();
-                cached.NormalizedUserType = description.UserType ? description.NormalizedUserType : ctx.Expr.MakeType<TVoidExprType>();
+                cached.NormalizedUserType = description.NormalizedUserType ? description.NormalizedUserType : ctx.Expr.MakeType<TVoidExprType>();
                 cached.SupportsBlocks = description.SupportsBlocks;
                 cached.IsStrict = description.IsStrict;
             }
@@ -11859,6 +11866,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["Nanvl"] = &NanvlWrapper;
         Functions["Unwrap"] = &UnwrapWrapper;
         Functions["Exists"] = &ExistsWrapper;
+        Functions["BlockExists"] = &BlockExistsWrapper;
         Functions["Just"] = &JustWrapper;
         Functions["Optional"] = &OptionalWrapper;
         Functions["OptionalIf"] = &OptionalIfWrapper;
@@ -12231,6 +12239,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["BlockIf"] = &BlockIfWrapper;
         Functions["BlockJust"] = &BlockJustWrapper;
         Functions["BlockAsTuple"] = &BlockAsTupleWrapper;
+        Functions["BlockMember"] = &BlockMemberWrapper;
         Functions["BlockNth"] = &BlockNthWrapper;
         Functions["BlockToPg"] = &BlockToPgWrapper;
         Functions["BlockFromPg"] = &BlockFromPgWrapper;
@@ -12276,6 +12285,7 @@ template <NKikimr::NUdf::EDataSlot DataSlot>
         Functions["FromPg"] = &FromPgWrapper;
         Functions["ToPg"] = &ToPgWrapper;
         Functions["PgClone"] = &PgCloneWrapper;
+        Functions["PgNullIf"] = &PgNullIfWrapper;
         ExtFunctions["PgAgg"] = &PgAggWrapper;
         ExtFunctions["PgAggWindowCall"] = &PgAggWrapper;
         ExtFunctions["PgCall"] = &PgCallWrapper;
