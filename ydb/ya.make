@@ -1,4 +1,5 @@
 RECURSE(
+// trigger recompile
     apps
     core
     docs
