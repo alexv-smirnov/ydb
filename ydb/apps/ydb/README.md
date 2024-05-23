@@ -1,6 +1,6 @@
 # Yandex Database Command Line Interface
 
-This is the official YDB command line client that works via public API.
+This is the official YDB command line client that works via public API. Yes.
 
 The structure of commands in YDB CLI is similar to one in YDB API and consists of services (table, scheme, etc.).
 There is also an additional "tools" section which provides useful utilities for common operations with the database.
