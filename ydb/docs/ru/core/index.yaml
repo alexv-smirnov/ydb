@@ -10,7 +10,7 @@ nav:
 meta:
   title: Документация YDB
 links:
-  - title: Начало работы
+  - title: Начало работы gugug
     description: Разверните кластер и выполните простейшие операции с данными
     href: quickstart
   - title: Концепции
