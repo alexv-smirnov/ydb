@@ -2,6 +2,8 @@
 #include <ydb/public/lib/ydb_cli/commands/ydb_service_topic.h>
 // trigger check
 
+
+ fail compile here
 TVector<NYdb::NTopic::ECodec> NYdb::NConsoleClient::InitAllowedCodecs() {
     return TVector<NYdb::NTopic::ECodec>{
             NYdb::NTopic::ECodec::RAW,
