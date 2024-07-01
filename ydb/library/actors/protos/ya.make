@@ -1,5 +1,7 @@
 PROTO_LIBRARY()
 
+# trigger rebuild
+
 SRCS(
     actors.proto
     interconnect.proto
