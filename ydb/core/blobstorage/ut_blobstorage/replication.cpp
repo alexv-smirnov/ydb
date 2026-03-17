@@ -457,7 +457,10 @@ Y_UNIT_TEST_SUITE(Replication) {
         env.Sim(TDuration::Seconds(30));
 
         printStage("commence replication");
-        env.CommenceReplication();
+        while (!env.Runtime->Send(new IEventHandle(TEvBlobStorage::EvCommenceRepl, 0, targetVDiskActorId, {}, nullptr, 0),
+                targetVDiskActorId.NodeId())) {
+            env.Sim(TDuration::Seconds(1));
+        }
         {
             const TActorId edge = env.Runtime->AllocateEdgeActor(targetVDiskActorId.NodeId(), __FILE__, __LINE__);
             for (;;) {
