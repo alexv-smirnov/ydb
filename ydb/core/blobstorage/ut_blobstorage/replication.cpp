@@ -447,6 +447,7 @@ Y_UNIT_TEST_SUITE(Replication) {
         const TVDiskID targetVDiskId = groupInfo->GetVDiskId(0);
         const TActorId targetVDiskActorId = groupInfo->GetActorId(0);
         const auto baseConfig = env.FetchBaseConfig();
+        const auto pdiskLayout = MakePDiskLayout(baseConfig, groupInfo->GetTopology(), groupId);
         const auto location = FindVSlotForVDisk(baseConfig, targetVDiskId);
         UNIT_ASSERT(location);
 
@@ -457,7 +458,23 @@ Y_UNIT_TEST_SUITE(Replication) {
 
         printStage("commence replication");
         env.CommenceReplication();
-        env.WaitForVDiskRepl(targetVDiskActorId, targetVDiskId);
+        {
+            const TActorId edge = env.Runtime->AllocateEdgeActor(targetVDiskActorId.NodeId(), __FILE__, __LINE__);
+            for (;;) {
+                env.Runtime->Send(new IEventHandle(targetVDiskActorId, edge, new TEvBlobStorage::TEvVStatus(targetVDiskId),
+                    IEventHandle::FlagTrackDelivery), targetVDiskActorId.NodeId());
+                auto res = env.Runtime->WaitForEdgeActorEvent({edge});
+                if (auto *msg = res->CastAsLocal<TEvBlobStorage::TEvVStatusResult>(); msg && msg->Record.GetReplicated()) {
+                    env.Runtime->DestroyActor(edge);
+                    break;
+                }
+
+                const ui64 replMem = env.AggregateVDiskCounters(env.StoragePoolName, env.Settings.NodeCount,
+                    groupInfo->GetTotalVDisksNum(), groupId, pdiskLayout, "memhull", "MemTotal:Replication");
+                Cerr << "*** [" << Now() << "] Replication in progress: MemTotal:Replication=" << replMem << " ***" << Endl;
+                env.Sim(TDuration::MilliSeconds(100));
+            }
+        }
 
         printStage("verify blobs after replication");
         for (const auto& blob : blobs) {
