@@ -407,6 +407,16 @@ Y_UNIT_TEST_SUITE(Replication) {
         constexpr ui32 MinBlobSize = 100;
         constexpr ui32 MaxBlobSize = 1_MB;
 
+        TInstant prevStage = Now();
+        auto printStage = [&](TStringBuf stage) {
+            const TInstant now = Now();
+            Cerr << "*** [" << now << "] Stage: " << stage << " (+" << (now - prevStage) << ") ***" << Endl;
+            prevStage = now;
+        };
+
+        Cerr << Endl << "*** [" << prevStage << "] RUNNING TEST: Block42PeerReplicationAfterVDiskRecreate ***" << Endl;
+        printStage("setup environment");
+
         TEnvironmentSetup env(TEnvironmentSetup::TSettings{
             .NodeCount = 8,
             .VDiskReplPausedAtStart = true,
@@ -424,6 +434,7 @@ Y_UNIT_TEST_SUITE(Replication) {
         TVector<TReplicationBlobSpec> blobs;
         blobs.reserve(NumBlobs);
 
+        printStage(TStringBuilder() << "write " << NumBlobs << " blobs");
         TReallyFastRng32 rng(1);
         for (ui32 i = 0; i < NumBlobs; ++i) {
             const ui32 size = MinBlobSize + rng.GenRand() % (MaxBlobSize - MinBlobSize + 1);
@@ -440,15 +451,20 @@ Y_UNIT_TEST_SUITE(Replication) {
         UNIT_ASSERT(location);
 
         const auto [nodeId, pdiskId, vslotId] = *location;
+        printStage(TStringBuilder() << "wipe vdisk " << targetVDiskId << " on " << nodeId << ":" << pdiskId << ":" << vslotId);
         env.Wipe(nodeId, pdiskId, vslotId, targetVDiskId);
         env.Sim(TDuration::Seconds(30));
 
+        printStage("commence replication");
         env.CommenceReplication();
         env.WaitForVDiskRepl(targetVDiskActorId, targetVDiskId);
 
+        printStage("verify blobs after replication");
         for (const auto& blob : blobs) {
             CheckBlobViaProxy(env, groupId, blob.Id, MakeBlobData(blob.Id.BlobSize(), blob.Seed));
         }
+
+        printStage("completed successfully");
     }
 }
 
