@@ -1648,10 +1648,29 @@ Y_UNIT_TEST_SUITE(TPDiskTest) {
                 .EnableFormatAndMetadataEncryption = encryption,
                 .EnableSectorEncryption = encryption,
             });
+            const ui32 firstNodeId = testCtx.GetRuntime()->GetFirstNodeId();
+            testCtx.GetRuntime()->SetDispatchTimeout(10 * TDuration::MilliSeconds(testCtx.GetPDiskConfig()->StatisticsUpdateIntervalMs));
+            testCtx.GetRuntime()->RegisterService(NNodeWhiteboard::MakeNodeWhiteboardServiceId(firstNodeId), testCtx.Sender);
+
+            auto awaitAndCheckLogTotalSize = [&]() {
+                for (int numInspect = 10; numInspect > 0; --numInspect) {
+                    const auto evPDiskStateUpdate = testCtx.Recv<NNodeWhiteboard::TEvWhiteboard::TEvPDiskStateUpdate>();
+                    const auto& pdiskInfo = evPDiskStateUpdate->Record;
+                    if (!pdiskInfo.HasLogTotalSize() || !pdiskInfo.GetLogTotalSize()) {
+                        continue;
+                    }
+                    const ui64 logTotalSizeCounter = testCtx.GetPDisk()->Mon.StatsGroup->GetCounter("LogTotalSizeBytes")->Val();
+                    UNIT_ASSERT_VALUES_EQUAL(testCtx.GetPDisk()->Mon.LogTotalSizeBytes->Val(), logTotalSizeCounter);
+                    UNIT_ASSERT_VALUES_EQUAL(logTotalSizeCounter, pdiskInfo.GetLogTotalSize());
+                    return;
+                }
+                UNIT_FAIL("No appropriate TEvPDiskStateUpdate with LogTotalSize received");
+            };
 
             TVDiskMock vdisk(&testCtx);
             vdisk.InitFull();
             vdisk.SendEvLogSync();
+            awaitAndCheckLogTotalSize();
 
             TRcBuf buf(TString(64_MB, 'a'));
             auto writeLog = [&]() {
@@ -1668,6 +1687,7 @@ Y_UNIT_TEST_SUITE(TPDiskTest) {
 
             vdisk.InitFull();
             vdisk.SendEvLogSync();
+            awaitAndCheckLogTotalSize();
 
             UNIT_ASSERT_VALUES_EQUAL(writeLog(), NKikimrProto::OK);
         }
