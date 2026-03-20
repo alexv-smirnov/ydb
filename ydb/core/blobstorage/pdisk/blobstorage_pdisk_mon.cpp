@@ -71,6 +71,7 @@ TPDiskMon::TPDiskMon(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& count
     COUNTER_INIT(StatsGroup, TotalSpaceBytes, false);
     COUNTER_INIT(StatsGroup, FreeSpaceBytes, false);
     COUNTER_INIT(StatsGroup, UsedSpaceBytes, false);
+    COUNTER_INIT(StatsGroup, LogTotalSizeBytes, false);
     COUNTER_INIT(StatsGroup, SectorMapAllocatedBytes, false);
 
     COUNTER_INIT(StatsGroup, NumActiveSlots, false);

@@ -251,6 +251,7 @@ struct TPDiskMon {
     ::NMonitoring::TDynamicCounters::TCounterPtr TotalSpaceBytes;
     ::NMonitoring::TDynamicCounters::TCounterPtr FreeSpaceBytes;
     ::NMonitoring::TDynamicCounters::TCounterPtr UsedSpaceBytes;
+    ::NMonitoring::TDynamicCounters::TCounterPtr LogTotalSizeBytes;
     ::NMonitoring::TDynamicCounters::TCounterPtr SectorMapAllocatedBytes;
 
     ::NMonitoring::TDynamicCounters::TCounterPtr NumActiveSlots;

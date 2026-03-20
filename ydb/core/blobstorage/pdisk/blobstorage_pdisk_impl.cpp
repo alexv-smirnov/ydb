@@ -1620,11 +1620,13 @@ void TPDisk::WhiteboardReport(TWhiteboardReport &whiteboardReport) {
 
         // Only report size information when PDisk is not in error state
         if (*Mon.PDiskBriefState != TPDiskMon::TPDisk::Error) {
+            const ui64 logTotalSize = Format.ChunkSize * Keeper.GetOwnerHardLimit(OwnerCommonStaticLog);
             pdiskState.SetAvailableSize(availableSize);
             pdiskState.SetTotalSize(totalSize);
             pdiskState.SetSystemSize(Format.ChunkSize * (Keeper.GetOwnerHardLimit(OwnerSystemLog) + Keeper.GetOwnerHardLimit(OwnerSystemReserve)));
             pdiskState.SetLogUsedSize(Format.ChunkSize * (Keeper.GetOwnerHardLimit(OwnerCommonStaticLog) - Keeper.GetOwnerFree(OwnerCommonStaticLog, {})));
-            pdiskState.SetLogTotalSize(Format.ChunkSize * Keeper.GetOwnerHardLimit(OwnerCommonStaticLog));
+            pdiskState.SetLogTotalSize(logTotalSize);
+            *Mon.LogTotalSizeBytes = logTotalSize;
         }
         pdiskState.SetNumActiveSlots(numActiveSlots);
         pdiskState.SetSlotSizeInUnits(Cfg->SlotSizeInUnits);

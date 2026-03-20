@@ -176,8 +176,12 @@ void Run(TVector<IActor*> tests, TTestRunConfig runCfg) {
 
         TIntrusivePtr<::NMonitoring::TDynamicCounters> pDiskCounters =
                 GetServiceCounters(mainCounters, "pdisks")->GetSubgroup(
-                        "pdisk", Sprintf("%09" PRIu32, (ui32)pDiskConfig->PDiskId));
+                        "pdisk", Sprintf("%09" PRIu32, (ui32)pDiskConfig->PDiskId))
+                ->GetSubgroup("media", to_lower(pDiskConfig->PDiskCategory.TypeStrShort()));
         TIntrusivePtr<::NMonitoring::TDynamicCounters> deviceGroup = pDiskCounters->GetSubgroup("subsystem", "device");
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> statsGroup = pDiskCounters
+                ->GetSubgroup("type", pDiskConfig->PDiskCategory.IsSolidState() ? "ssd_excl" : "hdd_excl")
+                ->GetSubgroup("subsystem", "stats");
 
         TStringStream errorStr;
         errorStr << "test timeout"
@@ -185,8 +189,13 @@ void Run(TVector<IActor*> tests, TTestRunConfig runCfg) {
             << "; bytesReadAndWritten# " << deviceGroup->GetCounter("DeviceBytesRead")->Val()
                 + deviceGroup->GetCounter("DeviceBytesWritten")->Val()
             << "; IOs done# " << deviceGroup->GetCounter("DeviceReads")->Val()
-                + deviceGroup->GetCounter("DeviceWrites")->Val();
+                + deviceGroup->GetCounter("DeviceWrites")->Val()
+            << "; logTotalSizeBytes# " << statsGroup->GetCounter("LogTotalSizeBytes")->Val();
         UNIT_ASSERT_VALUES_EQUAL_C(doneCount, runCfg.Instances, errorStr.Str());
+        if (!runCfg.IsBad) {
+            UNIT_ASSERT_C(statsGroup->GetCounter("LogTotalSizeBytes")->Val() > 0,
+                "Expected LogTotalSizeBytes counter to be positive for a healthy PDisk");
+        }
     } catch (yexception ex) {
         lastException = ex;
         AtomicSet(isLastExceptionSet, 1);
