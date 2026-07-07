@@ -111,9 +111,18 @@ Y_UNIT_TEST_SUITE(TSectorMapPerformance) {
         };
 
         struct TOperationState {
+            ui32 Index = 0;
             TInstant SubmittedAt;
             TDuration Latency;
         };
+
+        Cerr << "TestAsyncReadQueueDepthAndJitter config"
+            << " QueueDepth# " << QueueDepth
+            << " OperationCount# " << OperationCount
+            << " SeekSleepUs# " << SeekSleepUs
+            << " SeekSleepJitterUs# " << SeekSleepJitterUs
+            << " SectorSize# " << SectorSize
+            << Endl;
 
         auto sectorMap = MakeIntrusive<NPDisk::TSectorMap>(SectorSize * 16, EDiskMode::DM_HDD);
         auto diskModeParams = sectorMap->GetDiskModeParams();
@@ -134,6 +143,7 @@ Y_UNIT_TEST_SUITE(TSectorMapPerformance) {
         operations.reserve(OperationCount);
 
         for (ui32 idx = 0; idx < OperationCount; ++idx) {
+            states[idx].Index = idx;
             buffers.emplace_back(TString::Uninitialized(SectorSize));
             auto *op = io->CreateAsyncIoOperation(&states[idx], NPDisk::TReqId(NPDisk::TReqId::Test0, idx), nullptr);
             io->PreparePRead(op, buffers.back().Detach(), SectorSize, 0);
@@ -146,6 +156,10 @@ Y_UNIT_TEST_SUITE(TSectorMapPerformance) {
             if (result == NPDisk::EIoResult::Ok) {
                 states[idx].SubmittedAt = submittedAt;
             }
+            Cerr << "Submit"
+                << " idx# " << idx
+                << " result# " << result
+                << Endl;
             return result;
         };
 
@@ -160,13 +174,26 @@ Y_UNIT_TEST_SUITE(TSectorMapPerformance) {
         for (; nextToSubmit < QueueDepth; ++nextToSubmit) {
             UNIT_ASSERT(submit(nextToSubmit) == NPDisk::EIoResult::Ok);
             maxInFlight = Max(maxInFlight, ++inFlight);
+            Cerr << "Initial submit accepted"
+                << " idx# " << nextToSubmit
+                << " inFlight# " << inFlight
+                << Endl;
         }
         UNIT_ASSERT(submit(nextToSubmit) == NPDisk::EIoResult::TryAgain);
+        Cerr << "Initial QD limit reached"
+            << " rejectedIdx# " << nextToSubmit
+            << " inFlight# " << inFlight
+            << Endl;
 
         while (completed < OperationCount) {
             NPDisk::TAsyncIoOperationResult events[QueueDepth];
             const i64 eventCount = io->GetEvents(1, QueueDepth, events, TDuration::Seconds(5));
             UNIT_ASSERT_C(eventCount > 0, "No SectorMap read completions received");
+            Cerr << "GetEvents"
+                << " eventCount# " << eventCount
+                << " inFlightBefore# " << inFlight
+                << " completedBefore# " << completed
+                << Endl;
 
             for (i64 idx = 0; idx < eventCount; ++idx) {
                 UNIT_ASSERT(events[idx].Result == NPDisk::EIoResult::Ok);
@@ -176,16 +203,31 @@ Y_UNIT_TEST_SUITE(TSectorMapPerformance) {
                 io->DestroyAsyncIoOperation(events[idx].Operation);
                 --inFlight;
                 ++completed;
+                Cerr << "Complete"
+                    << " idx# " << state->Index
+                    << " latency# " << state->Latency
+                    << " inFlight# " << inFlight
+                    << " completed# " << completed
+                    << Endl;
             }
 
             while (nextToSubmit < OperationCount && inFlight < QueueDepth) {
                 const auto result = submit(nextToSubmit);
                 if (result == NPDisk::EIoResult::TryAgain) {
+                    Cerr << "Refill rejected"
+                        << " idx# " << nextToSubmit
+                        << " inFlight# " << inFlight
+                        << Endl;
                     break;
                 }
                 UNIT_ASSERT(result == NPDisk::EIoResult::Ok);
                 ++nextToSubmit;
                 maxInFlight = Max(maxInFlight, ++inFlight);
+                Cerr << "Refill accepted"
+                    << " idx# " << nextToSubmit - 1
+                    << " inFlight# " << inFlight
+                    << " nextToSubmit# " << nextToSubmit
+                    << Endl;
             }
         }
 
@@ -208,6 +250,15 @@ Y_UNIT_TEST_SUITE(TSectorMapPerformance) {
                 hasDifferentLatencyMs = true;
             }
         }
+
+        Cerr << "TestAsyncReadQueueDepthAndJitter summary"
+            << " elapsed# " << elapsed
+            << " minLatency# " << minLatency
+            << " maxLatency# " << maxLatency
+            << " maxInFlight# " << maxInFlight
+            << " latencies# " << latencies.size()
+            << " hasDifferentLatencyMs# " << hasDifferentLatencyMs
+            << Endl;
 
         UNIT_ASSERT_VALUES_EQUAL(latencies.size(), OperationCount);
         UNIT_ASSERT_VALUES_EQUAL(maxInFlight, QueueDepth);
