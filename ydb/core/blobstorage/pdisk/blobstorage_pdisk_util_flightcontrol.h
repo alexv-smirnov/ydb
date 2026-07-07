@@ -7,6 +7,8 @@
 #include <util/generic/queue.h>
 #include <util/generic/vector.h>
 #include <util/system/condvar.h>
+
+#include <atomic>
 #include <functional>
 #include <variant>
 
@@ -17,8 +19,16 @@ namespace NPDisk {
 // TFlightControl
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 class TFlightControl {
-    TAtomic BeginIdx;
-    TAtomic MaxInFlightIdx;
+    struct TScheduleAtomic {
+        ui64 MaxInFlightIdx;
+    };
+
+    struct TCompletionAtomic {
+        ui64 BeginIdx;
+    };
+
+    std::atomic<TScheduleAtomic> ScheduleAtomic;
+    std::atomic<TCompletionAtomic> CompletionAtomic;
     ui64 EndIdx;
     ui64 MaxSize;
     ui64 Mask;

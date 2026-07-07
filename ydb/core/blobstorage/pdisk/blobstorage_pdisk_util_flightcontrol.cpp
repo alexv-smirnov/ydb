@@ -7,8 +7,8 @@ namespace NPDisk {
 // TFlightControl
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 TFlightControl::TFlightControl(ui64 maxInFlightRequests, ui64 inFlightBytesLimit)
-    : BeginIdx(1)
-    , MaxInFlightIdx(0)
+    : ScheduleAtomic(TScheduleAtomic{0})
+    , CompletionAtomic(TCompletionAtomic{1})
     , EndIdx(1)
     , MaxSize(maxInFlightRequests)
     , Mask(maxInFlightRequests - 1)
@@ -32,8 +32,10 @@ ui64 TFlightControl::TrySchedule(ui64 size) {
     ui64 newMaxInFlightIdx = 0;
     bool isDone = false;
     while (!isDone) {
-        ui64 beginIdx = AtomicGet(BeginIdx);
-        ui64 prevMaxInFlightIdx = AtomicGet(MaxInFlightIdx);
+        TCompletionAtomic completionAtomic = CompletionAtomic.load(std::memory_order_relaxed);
+        TScheduleAtomic scheduleAtomic = ScheduleAtomic.load(std::memory_order_relaxed);
+        ui64 beginIdx = completionAtomic.BeginIdx;
+        ui64 prevMaxInFlightIdx = scheduleAtomic.MaxInFlightIdx;
         if (prevMaxInFlightIdx >= beginIdx) {
             bool isFull = (prevMaxInFlightIdx - beginIdx + 1 >= MaxSize);
             if (isFull) {
@@ -41,7 +43,9 @@ ui64 TFlightControl::TrySchedule(ui64 size) {
             }
         }
         newMaxInFlightIdx = prevMaxInFlightIdx + 1;
-        isDone = AtomicCas(&MaxInFlightIdx, newMaxInFlightIdx, prevMaxInFlightIdx);
+        TScheduleAtomic newScheduleAtomic = scheduleAtomic;
+        newScheduleAtomic.MaxInFlightIdx = newMaxInFlightIdx;
+        isDone = ScheduleAtomic.compare_exchange_strong(scheduleAtomic, newScheduleAtomic, std::memory_order_relaxed);
     }
     return newMaxInFlightIdx;
 }
@@ -76,14 +80,16 @@ void TFlightControl::WakeUp() {
 void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
     Y_UNUSED(size);
 
-    ui64 beginIdx = AtomicGet(BeginIdx);
+    TCompletionAtomic completionAtomic = CompletionAtomic.load(std::memory_order_relaxed);
+    ui64 beginIdx = completionAtomic.BeginIdx;
     Y_VERIFY_S(idx >= beginIdx, PDiskLogPrefix);
     Y_VERIFY_S(idx < beginIdx + MaxSize, PDiskLogPrefix);
     if (idx == beginIdx) {
         // It's the first item we are waiting for
         if (beginIdx == EndIdx) {
             // The loop was empty, just move both begin and end
-            AtomicIncrement(BeginIdx);
+            completionAtomic.BeginIdx = beginIdx + 1;
+            CompletionAtomic.store(completionAtomic, std::memory_order_relaxed);
             ++EndIdx;
             WakeUp();
             return;
@@ -93,7 +99,8 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
         while (beginIdx < EndIdx && IsCompleteLoop[beginIdx & Mask]) {
             ++beginIdx;
         }
-        AtomicSet(BeginIdx, beginIdx);
+        completionAtomic.BeginIdx = beginIdx;
+        CompletionAtomic.store(completionAtomic, std::memory_order_relaxed);
         WakeUp();
         return;
     }
@@ -108,7 +115,7 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
 }
 
 ui64 TFlightControl::FirstIncompleteIdx() {
-    return AtomicGet(BeginIdx);
+    return CompletionAtomic.load(std::memory_order_relaxed).BeginIdx;
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
