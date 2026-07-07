@@ -20,16 +20,19 @@ namespace NPDisk {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 class TFlightControl {
     struct TScheduleAtomic {
-        ui64 MaxInFlightIdx;
+        ui64 LastScheduledIdx;
+        ui64 EnqueueCount;
     };
 
     struct TCompletionAtomic {
         ui64 BeginIdx;
+        ui64 DequeueCount;
     };
 
     std::atomic<TScheduleAtomic> ScheduleAtomic;
     std::atomic<TCompletionAtomic> CompletionAtomic;
     ui64 EndIdx;
+    ui64 MaxInFlight;
     ui64 MaxSize;
     ui64 Mask;
     TVector<bool> IsCompleteLoop;

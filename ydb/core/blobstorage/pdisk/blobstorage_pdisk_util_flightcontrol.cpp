@@ -7,16 +7,16 @@ namespace NPDisk {
 // TFlightControl
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 TFlightControl::TFlightControl(ui64 maxInFlightRequests, ui64 inFlightBytesLimit)
-    : ScheduleAtomic(TScheduleAtomic{0})
-    , CompletionAtomic(TCompletionAtomic{1})
+    : ScheduleAtomic(TScheduleAtomic{0, 0})
+    , CompletionAtomic(TCompletionAtomic{1, 0})
     , EndIdx(1)
-    , MaxSize(maxInFlightRequests)
-    , Mask(maxInFlightRequests - 1)
-    , IsCompleteLoop(maxInFlightRequests)
+    , MaxInFlight(maxInFlightRequests)
+    , MaxSize(32)
+    , Mask(MaxSize - 1)
+    , IsCompleteLoop(MaxSize)
 {
     Y_UNUSED(inFlightBytesLimit);
-    Y_VERIFY(maxInFlightRequests > 0 && maxInFlightRequests < (1ull << 16));
-    Y_VERIFY((maxInFlightRequests & (maxInFlightRequests - 1)) == 0);
+    Y_VERIFY(maxInFlightRequests > 0);
 }
 
 void TFlightControl::Initialize(const TString& logPrefix) {
@@ -29,25 +29,29 @@ void TFlightControl::Initialize(const TString& logPrefix) {
 ui64 TFlightControl::TrySchedule(ui64 size) {
     Y_UNUSED(size);
 
-    ui64 newMaxInFlightIdx = 0;
+    ui64 newLastScheduledIdx = 0;
     bool isDone = false;
     while (!isDone) {
         TCompletionAtomic completionAtomic = CompletionAtomic.load(std::memory_order_relaxed);
         TScheduleAtomic scheduleAtomic = ScheduleAtomic.load(std::memory_order_relaxed);
         ui64 beginIdx = completionAtomic.BeginIdx;
-        ui64 prevMaxInFlightIdx = scheduleAtomic.MaxInFlightIdx;
-        if (prevMaxInFlightIdx >= beginIdx) {
-            bool isFull = (prevMaxInFlightIdx - beginIdx + 1 >= MaxSize);
+        ui64 lastScheduledIdx = scheduleAtomic.LastScheduledIdx;
+        if (scheduleAtomic.EnqueueCount - completionAtomic.DequeueCount >= MaxInFlight) {
+            return 0;
+        }
+        if (lastScheduledIdx >= beginIdx) {
+            bool isFull = (lastScheduledIdx - beginIdx + 1 >= MaxSize);
             if (isFull) {
                 return 0;
             }
         }
-        newMaxInFlightIdx = prevMaxInFlightIdx + 1;
+        newLastScheduledIdx = lastScheduledIdx + 1;
         TScheduleAtomic newScheduleAtomic = scheduleAtomic;
-        newScheduleAtomic.MaxInFlightIdx = newMaxInFlightIdx;
+        newScheduleAtomic.LastScheduledIdx = newLastScheduledIdx;
+        ++newScheduleAtomic.EnqueueCount;
         isDone = ScheduleAtomic.compare_exchange_strong(scheduleAtomic, newScheduleAtomic, std::memory_order_relaxed);
     }
-    return newMaxInFlightIdx;
+    return newLastScheduledIdx;
 }
 
 // Blocking Schedule method
@@ -81,6 +85,7 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
     Y_UNUSED(size);
 
     TCompletionAtomic completionAtomic = CompletionAtomic.load(std::memory_order_relaxed);
+    ++completionAtomic.DequeueCount;
     ui64 beginIdx = completionAtomic.BeginIdx;
     Y_VERIFY_S(idx >= beginIdx, PDiskLogPrefix);
     Y_VERIFY_S(idx < beginIdx + MaxSize, PDiskLogPrefix);
@@ -112,6 +117,7 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
         EndIdx = idx + 1;
     }
     IsCompleteLoop[idx & Mask] = true;
+    CompletionAtomic.store(completionAtomic, std::memory_order_relaxed);
 }
 
 ui64 TFlightControl::FirstIncompleteIdx() {
