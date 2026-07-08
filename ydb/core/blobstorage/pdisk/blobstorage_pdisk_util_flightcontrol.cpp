@@ -11,12 +11,13 @@ TFlightControl::TFlightControl(ui64 maxInFlightRequests, ui64 inFlightBytesLimit
     , CompletionAtomic(TCompletionAtomic{1, 0})
     , EndIdx(1)
     , MaxInFlight(maxInFlightRequests)
-    , MaxSize(32)
+    , MaxSize(Max<ui64>(32, maxInFlightRequests))
     , Mask(MaxSize - 1)
     , IsCompleteLoop(MaxSize)
 {
     Y_UNUSED(inFlightBytesLimit);
     Y_VERIFY(maxInFlightRequests > 0);
+    Y_VERIFY((MaxSize & (MaxSize - 1)) == 0);
 }
 
 void TFlightControl::Initialize(const TString& logPrefix) {
