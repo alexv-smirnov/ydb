@@ -897,7 +897,7 @@ protected:
     void Initialize(std::shared_ptr<TPDiskCtx> pCtx) override {
         PCtx = std::move(pCtx);
         Y_VERIFY(PCtx);
-        FlightControl.Initialize(PCtx->PDiskLogPrefix);
+        FlightControl.Initialize(PCtx->PDiskLogPrefix, PCtx->ActorSystem);
 
         TString errStr = TDeviceMode::Validate(Flags);
         if (errStr) {
