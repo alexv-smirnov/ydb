@@ -26,13 +26,14 @@ class TFlightControl {
     TMutex ScheduleMutex;
     TCondVar ScheduleCondVar;
     TString PDiskLogPrefix;
+    TActorSystem *ActorSystem = nullptr;
 
     void WakeUp();
 
 public:
     TFlightControl(ui64 maxInFlightRequests, ui64 inFlightBytesLimit = 0);
 
-    void Initialize(const TString& logPrefix);
+    void Initialize(const TString& logPrefix, TActorSystem *actorSystem = nullptr);
 
     // Returns 0 in case of scheduling error
     // Operation Idx otherwise
@@ -63,13 +64,14 @@ class TBytesFlightControl {
     TMutex ScheduleMutex;
     TCondVar ScheduleCondVar;
     TString PDiskLogPrefix;
+    TActorSystem *ActorSystem = nullptr;
 
     ui64 TryScheduleLocked(ui64 size);
 
 public:
     TBytesFlightControl(ui64 inFlightRequestsLimit, ui64 inFlightBytesLimit);
 
-    void Initialize(const TString& logPrefix);
+    void Initialize(const TString& logPrefix, TActorSystem *actorSystem = nullptr);
 
     // Returns 0 in case of scheduling error
     // Operation Idx otherwise
@@ -102,10 +104,10 @@ public:
     {
     }
 
-    void Initialize(const TString& logPrefix) {
+    void Initialize(const TString& logPrefix, TActorSystem *actorSystem = nullptr) {
         std::visit(
                 [&](auto& control) {
-                    control.Initialize(logPrefix);
+                    control.Initialize(logPrefix, actorSystem);
                 },
                 FlightControl);
     }

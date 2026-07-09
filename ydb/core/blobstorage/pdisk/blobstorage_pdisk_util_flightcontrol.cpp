@@ -3,6 +3,13 @@
 namespace NKikimr {
 namespace NPDisk {
 
+#define PDISK_FLIGHTCONTROL_TRACE(actorSystem, stream) \
+    do { \
+        if (actorSystem) { \
+            YDB_LOG_TRACE_CTX_COMP(*(actorSystem), NKikimrServices::BS_PDISK, stream); \
+        } \
+    } while (false)
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 // TFlightControl
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -19,15 +26,26 @@ TFlightControl::TFlightControl(ui64 maxInFlightRequests, ui64 inFlightBytesLimit
     Y_VERIFY((maxInFlightRequests & (maxInFlightRequests - 1)) == 0);
 }
 
-void TFlightControl::Initialize(const TString& logPrefix) {
+void TFlightControl::Initialize(const TString& logPrefix, TActorSystem *actorSystem) {
     PDiskLogPrefix = logPrefix;
+    ActorSystem = actorSystem;
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::Initialize"
+            << " BeginIdx# " << AtomicGet(BeginIdx)
+            << " MaxInFlightIdx# " << AtomicGet(MaxInFlightIdx)
+            << " EndIdx# " << EndIdx
+            << " MaxSize# " << MaxSize
+            << " Mask# " << Mask);
 }
 
 // Returns 0 in case of scheduling error
 // Operation Idx otherwise
 // May sometimes return 0 when it already can schedule
 ui64 TFlightControl::TrySchedule(ui64 size) {
-    Y_UNUSED(size);
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::TrySchedule enter"
+            << " Size# " << size
+            << " BeginIdx# " << AtomicGet(BeginIdx)
+            << " MaxInFlightIdx# " << AtomicGet(MaxInFlightIdx)
+            << " MaxSize# " << MaxSize);
 
     ui64 newMaxInFlightIdx = 0;
     bool isDone = false;
@@ -37,12 +55,25 @@ ui64 TFlightControl::TrySchedule(ui64 size) {
         if (prevMaxInFlightIdx >= beginIdx) {
             bool isFull = (prevMaxInFlightIdx - beginIdx + 1 >= MaxSize);
             if (isFull) {
+                PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::TrySchedule exit"
+                        << " Result# 0"
+                        << " Reason# MaxSize"
+                        << " Size# " << size
+                        << " BeginIdx# " << beginIdx
+                        << " MaxInFlightIdx# " << prevMaxInFlightIdx
+                        << " MaxSize# " << MaxSize);
                 return 0;
             }
         }
         newMaxInFlightIdx = prevMaxInFlightIdx + 1;
         isDone = AtomicCas(&MaxInFlightIdx, newMaxInFlightIdx, prevMaxInFlightIdx);
     }
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::TrySchedule exit"
+            << " Result# " << newMaxInFlightIdx
+            << " Size# " << size
+            << " BeginIdx# " << AtomicGet(BeginIdx)
+            << " MaxInFlightIdx# " << AtomicGet(MaxInFlightIdx)
+            << " MaxSize# " << MaxSize);
     return newMaxInFlightIdx;
 }
 
@@ -74,7 +105,13 @@ void TFlightControl::WakeUp() {
 }
 
 void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
-    Y_UNUSED(size);
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::MarkComplete enter"
+            << " Idx# " << idx
+            << " Size# " << size
+            << " BeginIdx# " << AtomicGet(BeginIdx)
+            << " MaxInFlightIdx# " << AtomicGet(MaxInFlightIdx)
+            << " EndIdx# " << EndIdx
+            << " MaxSize# " << MaxSize);
 
     ui64 beginIdx = AtomicGet(BeginIdx);
     Y_VERIFY_S(idx >= beginIdx, PDiskLogPrefix);
@@ -86,6 +123,14 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
             AtomicIncrement(BeginIdx);
             ++EndIdx;
             WakeUp();
+            PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::MarkComplete exit"
+                    << " Reason# FirstAndEmpty"
+                    << " Idx# " << idx
+                    << " Size# " << size
+                    << " BeginIdx# " << AtomicGet(BeginIdx)
+                    << " MaxInFlightIdx# " << AtomicGet(MaxInFlightIdx)
+                    << " EndIdx# " << EndIdx
+                    << " MaxSize# " << MaxSize);
             return;
         }
         // The loop was not empty, move begin forward once, then skip all the complete items
@@ -95,6 +140,14 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
         }
         AtomicSet(BeginIdx, beginIdx);
         WakeUp();
+        PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::MarkComplete exit"
+                << " Reason# First"
+                << " Idx# " << idx
+                << " Size# " << size
+                << " BeginIdx# " << AtomicGet(BeginIdx)
+                << " MaxInFlightIdx# " << AtomicGet(MaxInFlightIdx)
+                << " EndIdx# " << EndIdx
+                << " MaxSize# " << MaxSize);
         return;
     }
     // It's not the first item
@@ -105,6 +158,14 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
         EndIdx = idx + 1;
     }
     IsCompleteLoop[idx & Mask] = true;
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TFlightControl::MarkComplete exit"
+            << " Reason# OutOfOrder"
+            << " Idx# " << idx
+            << " Size# " << size
+            << " BeginIdx# " << AtomicGet(BeginIdx)
+            << " MaxInFlightIdx# " << AtomicGet(MaxInFlightIdx)
+            << " EndIdx# " << EndIdx
+            << " MaxSize# " << MaxSize);
 }
 
 ui64 TFlightControl::FirstIncompleteIdx() {
@@ -127,12 +188,45 @@ TBytesFlightControl::TBytesFlightControl(ui64 inFlightRequestsLimit, ui64 inFlig
     Y_VERIFY(inFlightBytesLimit > 0);
 }
 
-void TBytesFlightControl::Initialize(const TString& logPrefix) {
+void TBytesFlightControl::Initialize(const TString& logPrefix, TActorSystem *actorSystem) {
     PDiskLogPrefix = logPrefix;
+    ActorSystem = actorSystem;
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TBytesFlightControl::Initialize"
+            << " CachedFirstIncompleteIdx# " << AtomicGet(CachedFirstIncompleteIdx)
+            << " NextScheduleIdx# " << NextScheduleIdx
+            << " InFlightRequests# " << InFlightRequests
+            << " InFlightRequestsLimit# " << InFlightRequestsLimit
+            << " InFlightBytes# " << InFlightBytes
+            << " InFlightBytesLimit# " << InFlightBytesLimit
+            << " FirstIncompleteIdxValue# " << FirstIncompleteIdxValue
+            << " CompletedIdxSize# " << CompletedIdx.size());
 }
 
 ui64 TBytesFlightControl::TryScheduleLocked(ui64 size) {
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TBytesFlightControl::TrySchedule enter"
+            << " Size# " << size
+            << " CachedFirstIncompleteIdx# " << AtomicGet(CachedFirstIncompleteIdx)
+            << " NextScheduleIdx# " << NextScheduleIdx
+            << " InFlightRequests# " << InFlightRequests
+            << " InFlightRequestsLimit# " << InFlightRequestsLimit
+            << " InFlightBytes# " << InFlightBytes
+            << " InFlightBytesLimit# " << InFlightBytesLimit
+            << " FirstIncompleteIdxValue# " << FirstIncompleteIdxValue
+            << " CompletedIdxSize# " << CompletedIdx.size());
+
     if (InFlightRequests >= InFlightRequestsLimit) {
+        PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TBytesFlightControl::TrySchedule exit"
+                << " Result# 0"
+                << " Reason# InFlightRequestsLimit"
+                << " Size# " << size
+                << " CachedFirstIncompleteIdx# " << AtomicGet(CachedFirstIncompleteIdx)
+                << " NextScheduleIdx# " << NextScheduleIdx
+                << " InFlightRequests# " << InFlightRequests
+                << " InFlightRequestsLimit# " << InFlightRequestsLimit
+                << " InFlightBytes# " << InFlightBytes
+                << " InFlightBytesLimit# " << InFlightBytesLimit
+                << " FirstIncompleteIdxValue# " << FirstIncompleteIdxValue
+                << " CompletedIdxSize# " << CompletedIdx.size());
         return 0;
     }
     size = std::min(size, InFlightBytesLimit);
@@ -140,12 +234,35 @@ ui64 TBytesFlightControl::TryScheduleLocked(ui64 size) {
     if (InFlightBytes + size > InFlightBytesLimit) {
         //Cerr << "reject because " << InFlightBytes << " >= " << InFlightBytesLimit << " size# " << size
         //    << " InFlightRequests# " << InFlightRequests << Endl;
+        PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TBytesFlightControl::TrySchedule exit"
+                << " Result# 0"
+                << " Reason# InFlightBytesLimit"
+                << " Size# " << size
+                << " CachedFirstIncompleteIdx# " << AtomicGet(CachedFirstIncompleteIdx)
+                << " NextScheduleIdx# " << NextScheduleIdx
+                << " InFlightRequests# " << InFlightRequests
+                << " InFlightRequestsLimit# " << InFlightRequestsLimit
+                << " InFlightBytes# " << InFlightBytes
+                << " InFlightBytesLimit# " << InFlightBytesLimit
+                << " FirstIncompleteIdxValue# " << FirstIncompleteIdxValue
+                << " CompletedIdxSize# " << CompletedIdx.size());
         return 0;
     }
 
     const ui64 idx = NextScheduleIdx++;
     ++InFlightRequests;
     InFlightBytes += size;
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TBytesFlightControl::TrySchedule exit"
+            << " Result# " << idx
+            << " Size# " << size
+            << " CachedFirstIncompleteIdx# " << AtomicGet(CachedFirstIncompleteIdx)
+            << " NextScheduleIdx# " << NextScheduleIdx
+            << " InFlightRequests# " << InFlightRequests
+            << " InFlightRequestsLimit# " << InFlightRequestsLimit
+            << " InFlightBytes# " << InFlightBytes
+            << " InFlightBytesLimit# " << InFlightBytesLimit
+            << " FirstIncompleteIdxValue# " << FirstIncompleteIdxValue
+            << " CompletedIdxSize# " << CompletedIdx.size());
     return idx;
 }
 
@@ -175,6 +292,18 @@ ui64 TBytesFlightControl::Schedule(double& blockedMs, ui64 size) {
 
 void TBytesFlightControl::MarkComplete(ui64 idx, ui64 size) {
     TGuard<TMutex> guard(ScheduleMutex);
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TBytesFlightControl::MarkComplete enter"
+            << " Idx# " << idx
+            << " Size# " << size
+            << " CachedFirstIncompleteIdx# " << AtomicGet(CachedFirstIncompleteIdx)
+            << " NextScheduleIdx# " << NextScheduleIdx
+            << " InFlightRequests# " << InFlightRequests
+            << " InFlightRequestsLimit# " << InFlightRequestsLimit
+            << " InFlightBytes# " << InFlightBytes
+            << " InFlightBytesLimit# " << InFlightBytesLimit
+            << " FirstIncompleteIdxValue# " << FirstIncompleteIdxValue
+            << " CompletedIdxSize# " << CompletedIdx.size());
+
     size = std::min(size, InFlightBytesLimit);
 
     Y_VERIFY_S(idx >= FirstIncompleteIdxValue, PDiskLogPrefix << " idx# " << idx
@@ -194,6 +323,17 @@ void TBytesFlightControl::MarkComplete(ui64 idx, ui64 size) {
 
     AtomicSet(CachedFirstIncompleteIdx, FirstIncompleteIdxValue);
     ScheduleCondVar.Signal();
+    PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << " TBytesFlightControl::MarkComplete exit"
+            << " Idx# " << idx
+            << " Size# " << size
+            << " CachedFirstIncompleteIdx# " << AtomicGet(CachedFirstIncompleteIdx)
+            << " NextScheduleIdx# " << NextScheduleIdx
+            << " InFlightRequests# " << InFlightRequests
+            << " InFlightRequestsLimit# " << InFlightRequestsLimit
+            << " InFlightBytes# " << InFlightBytes
+            << " InFlightBytesLimit# " << InFlightBytesLimit
+            << " FirstIncompleteIdxValue# " << FirstIncompleteIdxValue
+            << " CompletedIdxSize# " << CompletedIdx.size());
 }
 
 ui64 TBytesFlightControl::FirstIncompleteIdx() {
@@ -202,3 +342,5 @@ ui64 TBytesFlightControl::FirstIncompleteIdx() {
 
 } // NPDisk
 } // NKikimr
+
+#undef PDISK_FLIGHTCONTROL_TRACE
