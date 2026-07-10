@@ -508,6 +508,7 @@ class TRealBlockDevice : public IBlockDevice {
                 }
                 YDB_LOG_P_LOG(PRI_TRACE, "Iop is done",
                     {"marker", "BPD01"},
+                    {"PDiskLogPrefix", PCtx->PDiskLogPrefix},
                     {"type", op->GetType()},
                     {"duration", duration},
                     {"offset", op->GetOffset()},
@@ -975,6 +976,13 @@ protected:
             TrimThread->Start();
             IsInitialized = true;
         }
+        YDB_LOG_TRACE_CTX_COMP(*PCtx->ActorSystem, NKikimrServices::BS_PDISK,
+                PCtx->PDiskLogPrefix << "TRealBlockDevice::Initialize finished"
+                << " DeviceInFlight# " << DeviceInFlight
+                << " MaxEvents# " << MaxEvents
+                << " PDiskBufferSize# " << PDiskBufferSize
+                << " IsFileOpened# " << IsFileOpened
+                << " IsInitialized# " << IsInitialized);
     }
 
     bool IsGood() override {
