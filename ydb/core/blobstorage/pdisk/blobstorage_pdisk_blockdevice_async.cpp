@@ -688,6 +688,12 @@ class TRealBlockDevice : public IBlockDevice {
             bool isExiting = false;
 
             TAsyncIoOperationResult events[MaxEvents];
+            YDB_LOG_TRACE_CTX_COMP(*PCtx->ActorSystem, NKikimrServices::BS_PDISK,
+                    PCtx->PDiskLogPrefix << "TSubmitGetThread::Exec entry"
+                    << " DeviceInFlight# " << Device.DeviceInFlight
+                    << " MaxEvents# " << MaxEvents
+                    << " IsExiting# " << isExiting
+                    << " InFlight# " << inFlight);
 
             while(!SubmitQuitCounter.IsBlocked() || SubmitQuitCounter.Get()) {
                 // Submit events
