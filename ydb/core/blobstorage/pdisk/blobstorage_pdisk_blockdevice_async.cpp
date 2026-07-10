@@ -726,7 +726,22 @@ class TRealBlockDevice : public IBlockDevice {
 
                 // Get events
                 do {
+                    const i64 inFlightBeforeGetEvents = inFlight;
+                    YDB_LOG_TRACE_CTX_COMP(*PCtx->ActorSystem, NKikimrServices::BS_PDISK,
+                            PCtx->PDiskLogPrefix << "TSubmitGetThread::Exec GetEvents entry"
+                            << " InFlight# " << inFlightBeforeGetEvents
+                            << " DeviceInFlight# " << Device.DeviceInFlight
+                            << " MaxEvents# " << MaxEvents
+                            << " IsExiting# " << isExiting);
                     i64 ret = Device.IoContext->GetEvents(0, MaxEvents, events, TDuration::MilliSeconds(WaitTimeoutMs));
+                    YDB_LOG_TRACE_CTX_COMP(*PCtx->ActorSystem, NKikimrServices::BS_PDISK,
+                            PCtx->PDiskLogPrefix << "TSubmitGetThread::Exec GetEvents exit"
+                            << " Result# " << ret
+                            << " InFlightBefore# " << inFlightBeforeGetEvents
+                            << " InFlightAfter# " << inFlightBeforeGetEvents - ret
+                            << " DeviceInFlight# " << Device.DeviceInFlight
+                            << " MaxEvents# " << MaxEvents
+                            << " IsExiting# " << isExiting);
                     // TODO Stop working here in case of error
                     if (ret < 0) {
                         Device.BecomeErrorState(TStringBuilder() << " error in IoContext->GetEvents, reason# "
