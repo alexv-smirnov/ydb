@@ -197,6 +197,10 @@ void TFlightControl::MarkComplete(ui64 idx, ui64 size) {
     }
     IsCompleteLoop[idx & Mask] = true;
     CompletionAtomic.store(completionAtomic, std::memory_order_relaxed);
+
+    if (MaxSize > MaxInFlight) {
+        WakeUp();
+    }
     PDISK_FLIGHTCONTROL_TRACE(ActorSystem, PDiskLogPrefix << "TFlightControl::MarkComplete exit"
             << " Idx# " << idx
             << " Branch# OutOfOrder"
